@@ -43,10 +43,16 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
     """
     Handler for VLM Analysis (终极修复版：处理嵌套列表字符串)
     """
-    raw_images = arguments.get("image_paths") or arguments.get("image_path")
+    # 统一入口参数命名为 images（兼容旧的 image_paths/image_path）
+    raw_images = (
+        arguments.get("images")
+        or arguments.get("image")
+        or arguments.get("image_paths")
+        or arguments.get("image_path")
+    )
     
     if not raw_images:
-         return {"status": "error", "message": "Missing image_paths parameter."}
+         return {"status": "error", "message": "Missing images parameter."}
 
     logger.info(f"DEBUG INPUT: Type={type(raw_images)} Value={raw_images}")
     print(f"DEBUG INPUT: Type={type(raw_images)} Value={raw_images}")
@@ -157,9 +163,10 @@ def sam2_segment_handler(arguments: Dict[str, Any], context: Any, account: Any) 
     """
     Handler for SAM2 Segmentation (Full Image Box Prompt).
     """
-    image_path = arguments.get("image_path")
+    # 外部参数统一为 image，兼容旧的 image_path
+    image_path = arguments.get("image") or arguments.get("image_path")
     if not image_path:
-        return {"status": "error", "message": "Missing image_path parameter."}
+        return {"status": "error", "message": "Missing image parameter."}
     
     # 清理路径字符串 (防止传进来的是列表字符串)
     clean_path = str(image_path).strip()
@@ -223,9 +230,9 @@ def sam2_segment_handler(arguments: Dict[str, Any], context: Any, account: Any) 
         
         
 def mock_model_handler(model_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-    image_path = arguments.get("image_path")
+    image_path = arguments.get("image") or arguments.get("image_path")
     if not image_path:
-        return {"status": "error", "message": "Missing image_path parameter."}
+        return {"status": "error", "message": "Missing image parameter."}
     
     # 模拟一点延迟，让演示更真实
     time.sleep(1.5) 
@@ -285,7 +292,7 @@ def remoteclip_analysis_handler(arguments: Dict[str, Any], context: Any, account
     """
     Handler for RemoteCLIP Analysis.
     """
-    image_path = arguments.get("image_path")
+    image_path = arguments.get("image") or arguments.get("image_path")
 
     # === 修复核心逻辑：处理字符串分割 ===
     raw_text_queries = arguments.get("text_queries")
@@ -315,7 +322,7 @@ def remoteclip_analysis_handler(arguments: Dict[str, Any], context: Any, account
     logger.info(f"Using text_queries: {text_queries}")  # 调试日志
 
     if not image_path:
-        return {"status": "error", "message": "Missing image_path parameter."}
+        return {"status": "error", "message": "Missing image parameter."}
 
     clean_path = str(image_path).strip()
     if not os.path.exists(clean_path):
@@ -358,11 +365,11 @@ def strip_rcnn_handler(arguments: Dict[str, Any], context: Any, account: Any) ->
     """
     Handler for Strip R-CNN Detection.
     """
-    image_path = arguments.get("image_path")
+    image_path = arguments.get("image") or arguments.get("image_path")
     score_threshold = arguments.get("score_threshold", 0.3)
 
     if not image_path:
-        return {"status": "error", "message": "Missing image_path parameter."}
+        return {"status": "error", "message": "Missing image parameter."}
 
     clean_path = str(image_path).strip()
     if not os.path.exists(clean_path):
@@ -420,13 +427,13 @@ def remotesam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> 
     """
     Handler for RemoteSAM tasks.
     """
-    image_path = arguments.get("image_path")
+    image_path = arguments.get("image") or arguments.get("image_path")
     task_type = arguments.get("task_type")
     sentence = arguments.get("sentence", "")
     classnames = arguments.get("classnames", [])
 
     if not image_path:
-        return {"status": "error", "message": "Missing image_path parameter."}
+        return {"status": "error", "message": "Missing image parameter."}
 
     clean_path = str(image_path).strip()
     if not os.path.exists(clean_path):
@@ -479,27 +486,27 @@ def setup(registrar):
             parameters={
                 "type": "object",
                 "properties": {
-                    "image_paths": {
-                        "type": "array", 
+                    "images": {
+                        "type": "array",
                         "items": {"type": "string"},
-                        "description": "List of absolute paths to image files."
-                    },
-                    "image_path": {
-                        "type": "string",
-                        "description": "Legacy: Single image path (optional)."
+                        "description": (
+                            "One or more images. "
+                            "If multiple images are provided, they will be analyzed jointly. "
+                            "Frontend uploads image files; the backend resolves local file paths."
+                        ),
                     },
                     "prompt": {
-                        "type": "string", 
-                        "description": "Question or instruction.", 
-                        "default": ""
+                        "type": "string",
+                        "description": "Question or instruction.",
+                        "default": "",
                     },
-                    "max_tokens": {"type": "integer", "default": 4096}
+                    "max_tokens": {"type": "integer", "default": 4096},
                 },
-                "required": [] 
+                "required": [],
             },
-            requires_connection=False
+            requires_connection=False,
         ),
-        vlm_analyze_handler
+        vlm_analyze_handler,
     )
     
     registrar.tool(
@@ -510,12 +517,12 @@ def setup(registrar):
             parameters={
                 "type": "object",
                 "properties": {
-                    "image_path": {
+                    "image": {
                         "type": "string",
-                        "description": "Absolute path to the image file."
+                        "description": "Image to segment. Frontend uploads the image; backend resolves the local file path."
                     }
                 },
-                "required": ["image_path"]
+                "required": ["image"]
             },
             requires_connection=False
         ),
@@ -531,9 +538,12 @@ def setup(registrar):
             parameters={
                 "type": "object",
                 "properties": {
-                    "image_path": {"type": "string", "description": "Absolute path to the image file."}
+                    "image": {
+                        "type": "string",
+                        "description": "Image to analyze. Frontend uploads the image; backend resolves the local file path."
+                    }
                 },
-                "required": ["image_path"]
+                "required": ["image"]
             },
             requires_connection=False
         ),
@@ -549,9 +559,9 @@ def setup(registrar):
             parameters={
                 "type": "object",
                 "properties": {
-                    "image_path": {
+                    "image": {
                         "type": "string",
-                        "description": "Absolute path to the image file."
+                        "description": "Image to analyze. Frontend uploads the image; backend resolves the local file path."
                     },
                     "text_queries": {
                         "oneOf": [
@@ -568,7 +578,7 @@ def setup(registrar):
                         "default": "A busy airport with many airplanes.Satellite view of Hohai University.A building next to a lake.Many people in a stadium.a cute cat"
                     }
                 },
-                "required": ["image_path", "text_queries"]
+                "required": ["image", "text_queries"]
             },
             requires_connection=False
         ),
@@ -584,19 +594,19 @@ def setup(registrar):
             parameters={
                 "type": "object",
                 "properties": {
-                    "image_path": {
+                    "image": {
                         "type": "string",
-                        "description": "Absolute path to the image file."
+                        "description": "Image to analyze. Frontend uploads the image; backend resolves the local file path."
                     },
                     "score_threshold": {
                         "type": "number",
                         "minimum": 0.0,
                         "maximum": 1.0,
-                        "default": 0.3,
+                        "default": 0.1,
                         "description": "Confidence threshold for detection results (default: 0.3)."
                     }
                 },
-                "required": ["image_path"]
+                "required": ["image"]
             },
             requires_connection=False
         ),
@@ -612,9 +622,9 @@ def setup(registrar):
             parameters={
                 "type": "object",
                 "properties": {
-                    "image_path": {
+                    "image": {
                         "type": "string",
-                        "description": "Absolute path to the image file."
+                        "description": "Image to analyze. Frontend uploads the image; backend resolves the local file path."
                     },
                     "task_type": {
                         "type": "string",
@@ -640,7 +650,7 @@ def setup(registrar):
                         "description": "List of class names for segmentation, detection, classification, etc. (optional)."
                     }
                 },
-                "required": ["image_path", "task_type"]
+                "required": ["image", "task_type"]
             },
             requires_connection=False
         ),
@@ -656,10 +666,16 @@ def setup(registrar):
             parameters={
                 "type": "object",
                 "properties": {
-                    "image_path": {"type": "string", "description": "Absolute path to the image file."},
-                    "text_prompt": {"type": "string", "description": "Instruction prompt (e.g., 'Count all the red cars')."}
+                    "image": {
+                        "type": "string",
+                        "description": "Image to analyze. Frontend uploads the image; backend resolves the local file path."
+                    },
+                    "text_prompt": {
+                        "type": "string",
+                        "description": "Instruction prompt (e.g., 'Count all the red cars')."
+                    }
                 },
-                "required": ["image_path", "text_prompt"]
+                "required": ["image", "text_prompt"]
             },
             requires_connection=False
         ),

@@ -1,7 +1,7 @@
 """Routes for toolkits and tool execution."""
 
-from typing import List, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import List, Dict, Any, Optional
+from fastapi import APIRouter, Depends, HTTPException, status, Form, File, UploadFile
 from sqlalchemy.orm import Session
 
 from ..db.session import get_db
@@ -12,6 +12,13 @@ from ..core.schemas import (
     ToolSpecOut, ToolkitOut, ExecuteRequestIn, ExecuteResponseOut,
 )
 from ..core.services import ToolService
+
+import json
+import os
+import uuid
+from pathlib import Path
+
+UPLOAD_DIR = Path(os.getenv("TERRABOX_UPLOAD_DIR", "/tmp/terrabox_uploads"))
 
 
 # Business logic helpers (shared between SDK/GUI)
@@ -172,9 +179,55 @@ def make_tools_router(config: RouterConfig) -> APIRouter:
         """Execute a tool."""
         real_slug = _resolve_slug(slug, db, current_user.user_id)
         return await _execute_tool(db, current_user.user_id, real_slug, request)
-    
-    return router
 
+    @router.post("/tools/{slug}/execute-multipart", response_model=ExecuteResponseOut)
+    async def execute_tool_multipart(
+        slug: str,
+        inputs: str = Form(...),
+        metadata: Optional[str] = Form(None),
+        files: List[UploadFile] = File(...),
+        current_user: m.User = Depends(config.current_user_dep),
+        db: Session = Depends(get_db),
+    ):
+        """Execute a tool with file uploads (multipart/form-data)."""
+        try:
+            inputs_dict: Dict[str, Any] = json.loads(inputs or "{}")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid inputs JSON: {e}")
+
+        metadata_dict: Dict[str, Any] = {}
+        if metadata:
+            try:
+                metadata_dict = json.loads(metadata)
+            except Exception:
+                metadata_dict = {}
+
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        saved_paths: List[str] = []
+        for f in files:
+            suffix = Path(f.filename).suffix or ".bin"
+            filename = f"{uuid.uuid4().hex}{suffix}"
+            dst = UPLOAD_DIR / filename
+            with dst.open("wb") as out:
+                content = await f.read()
+                out.write(content)
+            saved_paths.append(str(dst))
+
+        # 写回到 image/images，并兼容旧的 image_path/image_paths 命名
+        if len(saved_paths) > 1:
+            inputs_dict["images"] = saved_paths
+            inputs_dict["image_paths"] = saved_paths  # backward compatibility
+        elif saved_paths:
+            inputs_dict["image"] = saved_paths[0]
+            inputs_dict["images"] = saved_paths
+            inputs_dict["image_path"] = saved_paths[0]  # backward compatibility
+            inputs_dict.setdefault("image_paths", saved_paths)
+
+        request_in = ExecuteRequestIn(inputs=inputs_dict, metadata=metadata_dict or None)
+        real_slug = _resolve_slug(slug, db, current_user.user_id)
+        return await _execute_tool(db, current_user.user_id, real_slug, request_in)
+
+    return router
 
 # =============================================================================
 # Create SDK and GUI routers using factory
