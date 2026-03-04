@@ -12,16 +12,10 @@ class SAM2ServiceManager:
     _instance = None
     _process = None
     
-    # === 配置 ===
-    # 1. Python 解释器 (您的 SAM2 环境)
+    # Path to the isolated Python interpreter for the SAM2 conda environment
     SAM2_PYTHON_EXEC = "/home/yuhongjie/miniconda3/envs/sam2/bin/python"
-    
-    # 2. Server 脚本的绝对路径 (修改为您指定的目录)
-    # 请确保您把 sam2_server.py 文件保存到了这个路径下！
     SERVER_SCRIPT = "/data1/yuhongjie2/sam2/sam2_server2.py"
-    
-    # 3. 工作目录 (Working Directory)
-    # [关键] 建议让子进程在这个目录下运行，这样能更好加载 sam2 的相对路径依赖
+    # Run the subprocess from the SAM2 directory so relative imports resolve correctly
     WORK_DIR = "/data1/yuhongjie2/sam2"
 
     API_URL = "http://127.0.0.1:9002"
@@ -44,28 +38,23 @@ class SAM2ServiceManager:
         if cls.is_running():
             return
 
-        # 检查脚本是否存在
         if not os.path.exists(cls.SERVER_SCRIPT):
             raise FileNotFoundError(f"Server script not found at: {cls.SERVER_SCRIPT}")
 
         logger.info(f"Starting SAM2 Service from {cls.WORK_DIR}...")
-        
-        # 准备环境
+
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = cls.GPU_DEVICES
-        # 有时候需要把当前目录加到 PYTHONPATH，防止导包错误
         env["PYTHONPATH"] = f"{cls.WORK_DIR}:{env.get('PYTHONPATH', '')}"
-        
-        # 启动
+
         cls._process = subprocess.Popen(
             [cls.SAM2_PYTHON_EXEC, cls.SERVER_SCRIPT],
-            cwd=cls.WORK_DIR, # [关键] 在 SAM2 目录下运行
+            cwd=cls.WORK_DIR,
             env=env,
-            stdout=open(os.path.join(cls.WORK_DIR, "sam2_stdout.log"), "w"), # 日志也保存在那边
+            stdout=open(os.path.join(cls.WORK_DIR, "sam2_stdout.log"), "w"),
             stderr=open(os.path.join(cls.WORK_DIR, "sam2_stderr.log"), "w")
         )
 
-        # 等待启动
         max_retries = 30
         for i in range(max_retries):
             if cls.is_running():

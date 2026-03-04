@@ -14,14 +14,22 @@ import mimetypes
 import requests
 from typing import Any, Dict, List
 from ..core.registry import ToolSpec
-from ..utils.vllm_manager import vllm_manager
-from ..utils.sam2_manager import sam2_manager
-from ..utils.remoteclip_manager import remoteclip_manager
-from ..utils.remotesam_manager import remotesam_manager
-from ..utils.strip_rcnn_manager import strip_rcnn_manager
-# 确保有 logger
+import os as _os
+if _os.environ.get("TERRABOX_USE_DOCKER", "false").lower() == "true":
+    from ..utils.docker.vllm_manager import vllm_manager
+    from ..utils.docker.sam2_manager import sam2_manager
+    from ..utils.docker.remoteclip_manager import remoteclip_manager
+    from ..utils.docker.remotesam_manager import remotesam_manager
+    from ..utils.docker.strip_rcnn_manager import strip_rcnn_manager
+else:
+    from ..utils.vllm_manager import vllm_manager
+    from ..utils.sam2_manager import sam2_manager
+    from ..utils.remoteclip_manager import remoteclip_manager
+    from ..utils.remotesam_manager import remotesam_manager
+    from ..utils.strip_rcnn_manager import strip_rcnn_manager
 logger = logging.getLogger(__name__)
-# --- 辅助函数 ---
+
+# --- Helpers ---
 
 def _encode_image_to_base64(image_path: str) -> str:
     """Helper: Convert local image file to data URI scheme."""
@@ -37,13 +45,10 @@ def _encode_image_to_base64(image_path: str) -> str:
         
     return f"data:{mime_type};base64,{encoded_string}"
 
-# --- Handler ---
+# --- Handlers ---
 
 def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
-    """
-    Handler for VLM Analysis (终极修复版：处理嵌套列表字符串)
-    """
-    # 统一入口参数命名为 images（兼容旧的 image_paths/image_path）
+    """Handler for VLM multi-image analysis."""
     raw_images = (
         arguments.get("images")
         or arguments.get("image")
@@ -59,28 +64,22 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
 
     image_paths = []
 
-    # === 修复核心逻辑 ===
     if isinstance(raw_images, list):
-        # 检查是否命中了 "列表包字符串" 的情况
-        # 例如: ['["/path/a", "/path/b"]']
+        # Handle list-wrapping-a-JSON-string: e.g. ['["/path/a", "/path/b"]']
         if len(raw_images) == 1 and isinstance(raw_images[0], str):
             s = raw_images[0].strip()
             if s.startswith("[") and s.endswith("]"):
                 try:
-                    # 尝试把里面那个字符串解开
                     image_paths = json.loads(s)
                     logger.info("Unwrapped nested JSON string inside list.")
                 except:
-                    # 解不开就当做普通路径
                     image_paths = raw_images
             else:
                 image_paths = raw_images
         else:
-            # 正常的列表 ["/path/a", "/path/b"]
             image_paths = raw_images
-            
+
     elif isinstance(raw_images, str):
-        # 处理纯字符串的情况 (之前的逻辑)
         s = raw_images.strip()
         if s.startswith("[") and s.endswith("]"):
             try:
@@ -89,7 +88,7 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
                 try:
                     image_paths = ast.literal_eval(s)
                 except:
-                    # 暴力拆解
+                    # Fallback: split the bracketed string manually
                     content = s[1:-1]
                     parts = content.split(',')
                     for p in parts:
@@ -98,13 +97,10 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
                             image_paths.append(clean_p)
         else:
             image_paths = [s]
-    # === 逻辑结束 ===
 
-    # 打印最终解析结果，再次确认是否正确
     logger.info(f"DEBUG PARSED PATHS: {image_paths}")
     print(f"DEBUG PARSED PATHS: {image_paths}")
 
-    # ... (后续代码：start_service, prompt, max_tokens 处理保持不变) ...
     prompt = arguments.get("prompt", "Analyze these images.")
     max_tokens = arguments.get("max_tokens", 512)
     
@@ -118,9 +114,7 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
     try:
         for idx, path in enumerate(image_paths):
             clean_path = str(path).strip()
-            # 再次检查路径是否存在
             if not os.path.exists(clean_path):
-                # 打印出具体是哪个路径错了
                 logger.error(f"File not found: {clean_path}")
                 return {"status": "error", "message": f"File not found on server: {clean_path}"}
                 
@@ -132,10 +126,9 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
     except Exception as e:
         return {"status": "error", "message": f"Image error: {str(e)}"}
 
-    # 发送请求
     api_url = f"{vllm_manager.API_BASE}/chat/completions"
     payload = {
-        "model": vllm_manager.MODEL_PATH,
+        "model": getattr(vllm_manager, "MODEL_NAME", vllm_manager.MODEL_PATH),
         "messages": [{"role": "user", "content": message_content}],
         "max_tokens": max_tokens,
         "temperature": 0.1
@@ -163,41 +156,23 @@ def sam2_segment_handler(arguments: Dict[str, Any], context: Any, account: Any) 
     """
     Handler for SAM2 Segmentation (Full Image Box Prompt).
     """
-    # 外部参数统一为 image，兼容旧的 image_path
     image_path = arguments.get("image") or arguments.get("image_path")
     if not image_path:
         return {"status": "error", "message": "Missing image parameter."}
-    
-    # 清理路径字符串 (防止传进来的是列表字符串)
+
+    # Strip list-string artifacts e.g. "['path']" → "path"
     clean_path = str(image_path).strip()
     if clean_path.startswith("['") or clean_path.startswith('["'):
-         # 简单的清理逻辑，复用之前的经验
-         clean_path = clean_path[2:-2]
-    
+        clean_path = clean_path[2:-2]
+
     if not os.path.exists(clean_path):
         return {"status": "error", "message": f"Image not found: {clean_path}"}
 
-    # 1. 启动服务 (Lazy Loading)
     try:
         sam2_manager.start_service()
     except Exception as e:
         return {"status": "error", "message": f"Failed to start SAM2 Service: {str(e)}"}
 
-    # 2. 调用服务
-    '''try:
-        api_url = f"{sam2_manager.API_URL}/segment"
-        payload = {"image_path": clean_path}
-        
-        response = requests.post(api_url, json=payload, timeout=120)
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return {"status": "error", "message": f"SAM2 API Error: {response.text}"}
-            
-    except Exception as e:
-        return {"status": "error", "message": f"Connection to SAM2 failed: {str(e)}"}
-        '''
     try:
         api_url = f"{sam2_manager.API_URL}/segment"
         payload = {"image_path": clean_path}
@@ -209,18 +184,14 @@ def sam2_segment_handler(arguments: Dict[str, Any], context: Any, account: Any) 
             
             vis_b64 = result.get("visualization")
             count = result.get("count", 0)
-            
-            # 构造 Markdown 字符串
+
             md_text = f"SAM2 Segmentation Complete. Found {count} regions.\n\n"
             if vis_b64:
-                # 这一行是关键：Markdown 图片语法
                 md_text += f"![Segmentation Result]({vis_b64})"
-            
-            # === [修正点] 必须返回字典 ===
+
             return {
                 "status": "success",
-                "output": md_text,  # 把 Markdown 放在这里
-                # "geojson": result.get("geojson") # 为了不刷屏，你可以先注释掉这一行，只看图片
+                "output": md_text,
             }
         else:
             return {"status": "error", "message": f"SAM2 API Error: {response.text}"}
@@ -234,10 +205,8 @@ def mock_model_handler(model_name: str, arguments: Dict[str, Any]) -> Dict[str, 
     if not image_path:
         return {"status": "error", "message": "Missing image parameter."}
     
-    # 模拟一点延迟，让演示更真实
-    time.sleep(1.5) 
-    
-    # 根据模型名构造假的返回结果
+    time.sleep(1.5)
+
     if model_name == "MSCN":
         return {
             "status": "success",
@@ -283,7 +252,7 @@ def mock_model_handler(model_name: str, arguments: Dict[str, Any]) -> Dict[str, 
     return {"status": "error", "message": "Unknown model"}
 
 
-# --- 包装函数 (为了适配注册接口) ---
+# --- Wrappers ---
 
 def mscn_handler(args, ctx, acc): return mock_model_handler("MSCN", args)
 
@@ -294,11 +263,9 @@ def remoteclip_analysis_handler(arguments: Dict[str, Any], context: Any, account
     """
     image_path = arguments.get("image") or arguments.get("image_path")
 
-    # === 修复核心逻辑：处理字符串分割 ===
     raw_text_queries = arguments.get("text_queries")
 
     if raw_text_queries is None:
-        # 用户未传任何 text_queries，使用默认值
         text_queries = [
             "A busy airport with many airplanes.",
             "Satellite view of Hohai University.",
@@ -307,19 +274,16 @@ def remoteclip_analysis_handler(arguments: Dict[str, Any], context: Any, account
             "a cute cat"
         ]
     else:
-        # 检查是否为字符串（前端传来的格式）
         if isinstance(raw_text_queries, str):
-            # 按句号分割，并去除空字符串和前后空格
+            # Split on '.' and drop empty segments
             text_queries = [q.strip() for q in raw_text_queries.split('.') if q.strip()]
         elif isinstance(raw_text_queries, list):
-            # 如果传的是数组（兼容旧格式），直接使用
             text_queries = [str(q).strip() for q in raw_text_queries if str(q).strip()]
         else:
-            # 其他类型，返回错误
             return {"status": "error",
                     "message": f"text_queries must be string (separated by '.') or array, got {type(raw_text_queries)}"}
 
-    logger.info(f"Using text_queries: {text_queries}")  # 调试日志
+    logger.info(f"Using text_queries: {text_queries}")
 
     if not image_path:
         return {"status": "error", "message": "Missing image parameter."}
@@ -337,10 +301,10 @@ def remoteclip_analysis_handler(arguments: Dict[str, Any], context: Any, account
         api_url = f"{remoteclip_manager.API_URL}/analyze"
         payload = {
             "image_path": clean_path,
-            "text_queries": text_queries  # 现在传的是正确解析的数组
+            "text_queries": text_queries
         }
 
-        print(f"Sending payload: {payload}")  # 调试输出
+        print(f"Sending payload: {payload}")
         response = requests.post(api_url, json=payload, timeout=120)
 
         if response.status_code == 200:
@@ -349,7 +313,7 @@ def remoteclip_analysis_handler(arguments: Dict[str, Any], context: Any, account
                 "status": "success",
                 "predictions": result.get("predictions"),
                 "message": "RemoteCLIP analysis completed.",
-                "used_queries": text_queries  # 返回实际使用的查询（用于调试）
+                "used_queries": text_queries
             }
 
         else:
@@ -469,7 +433,7 @@ def remotesam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> 
 def instructsam_handler(args, ctx, acc): return mock_model_handler("InstructSAM", args)        
 
     
-# --- 注册 ---
+# --- Tool Registration ---
 
 def setup(registrar):
     registrar.toolkit(

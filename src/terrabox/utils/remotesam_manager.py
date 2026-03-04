@@ -14,7 +14,6 @@ class RemoteSAMServiceManager:
     _instance = None
     _process = None
 
-    # === 配置 ===
     REMOTESAM_PYTHON_EXEC = "/home/yuhongjie/miniconda3/envs/RemoteSAM/bin/python"
     SERVER_SCRIPT = "/data1/yuhongjie2/RemoteSAM/start.py"
     WORK_DIR = "/data1/yuhongjie2/RemoteSAM"

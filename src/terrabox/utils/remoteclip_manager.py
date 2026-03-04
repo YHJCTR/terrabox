@@ -14,7 +14,6 @@ class RemoteCLIPServiceManager:
     _instance = None
     _process = None
 
-    # === 配置 ===
     REMOTECLIP_PYTHON_EXEC = "/home/yuhongjie/miniconda3/envs/RemoteCLIP/bin/python"
     SERVER_SCRIPT = "/data1/yuhongjie2/RemoteCLIP/start2.py"
     WORK_DIR = "/data1/yuhongjie2/RemoteCLIP"

@@ -14,14 +14,12 @@ class StripRCNNServiceManager:
     _instance = None
     _process = None
 
-    # === 配置 ===
     STRIP_RCNN_PYTHON_EXEC = "/home/yuhongjie/miniconda3/envs/strip/bin/python"
     SERVER_SCRIPT = "/data1/yuhongjie2/Strip-RCNN/start.py"
     WORK_DIR = "/data1/yuhongjie2/Strip-RCNN"
     API_URL = "http://127.0.0.1:9005"
     GPU_DEVICES = "0"
 
-    # 模型配置
     CONFIG_PATH = "/data1/yuhongjie2/Strip-RCNN/configs/strip_rcnn/orig/strip_rcnn_s_fpn_1x_dota_le90.py"
     CHECKPOINT_PATH = "/data1/yuhongjie2/Strip-RCNN/ckpt/stripnet_s.pth"
 
@@ -57,7 +55,6 @@ class StripRCNNServiceManager:
         env["CUDA_VISIBLE_DEVICES"] = cls.GPU_DEVICES
         env["PYTHONPATH"] = f"{cls.WORK_DIR}:{env.get('PYTHONPATH', '')}"
 
-        # 启动服务
         cls._process = subprocess.Popen(
             [
                 cls.STRIP_RCNN_PYTHON_EXEC,
