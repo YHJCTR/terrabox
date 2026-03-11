@@ -32,6 +32,16 @@ def init_strip_model(config_path, checkpoint_path, device):
     """
     # Now MMDet can recognize StripRCNN because mmrotate was imported first
     model = init_detector(config_path, checkpoint_path, device=device)
+    
+    # Manually set DOTA classes to override checkpoint's default COCO classes
+    # Checkpoint doesn't save class names, so we must set them manually
+    model.CLASSES = (
+        'plane', 'baseball-diamond', 'bridge', 'ground-track-field',
+        'small-vehicle', 'large-vehicle', 'ship', 'tennis-court',
+        'basketball-court', 'storage-tank', 'soccer-ball-field',
+        'roundabout', 'harbor', 'swimming-pool', 'helicopter'
+    )
+    
     print(f"Model loaded successfully on {device}")
     print(f"Classes: {model.CLASSES}")
     return model
@@ -49,19 +59,26 @@ def process_detection_result(result, class_names):
         dict: {'class_name': [[cx, cy, w, h, angle, score], ...]}
     """
     detections = {}
-
+    
+    print(f"[DEBUG] Number of classes in result: {len(result)}")
+    
     for cls_idx, cls_dets in enumerate(result):
         if len(cls_dets) == 0:
             continue
-
+        
         cls_name = class_names[cls_idx]
         detections[cls_name] = []
-
+        
+        print(f"[DEBUG] Class {cls_idx} ({cls_name}): len={len(cls_dets)}, shape={cls_dets.shape if hasattr(cls_dets, 'shape') else 'N/A'}")
+        if len(cls_dets) > 0:
+            print(f"[DEBUG]   First det: {cls_dets[0]}")
+            print(f"[DEBUG]   Last det: {cls_dets[-1]}")
+        
         for det in cls_dets:
             # det format: [cx, cy, w, h, angle, score] (for oriented R-CNN)
             cx, cy, w, h, angle, score = det
             detections[cls_name].append([float(cx), float(cy), float(w), float(h), float(angle), float(score)])
-
+    
     return detections
 
 

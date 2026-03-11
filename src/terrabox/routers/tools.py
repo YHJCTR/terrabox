@@ -18,7 +18,7 @@ import os
 import uuid
 from pathlib import Path
 
-UPLOAD_DIR = Path(os.getenv("TERRABOX_UPLOAD_DIR", "/tmp/terrabox_uploads"))
+UPLOAD_DIR = Path(os.getenv("TERRABOX_UPLOAD_DIR", "/data1/terrabox_uploads"))
 
 
 # Business logic helpers (shared between SDK/GUI)

@@ -181,7 +181,10 @@ def sam2_segment_handler(arguments: Dict[str, Any], context: Any, account: Any) 
         
         if response.status_code == 200:
             result = response.json()
-            
+
+            if result.get("status") == "error":
+                return {"status": "error", "message": result.get("message", "SAM2 returned an error.")}
+
             vis_b64 = result.get("visualization")
             count = result.get("count", 0)
 

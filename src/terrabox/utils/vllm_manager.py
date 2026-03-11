@@ -69,7 +69,7 @@ class VLLMServiceManager:
             "--port", str(cls.PORT),
             "--tensor-parallel-size", str(cls.TENSOR_PARALLEL_SIZE),
             "--max-model-len", "4096",
-            "--limit-mm-per-prompt", '{"image": 8}',
+            "--limit-mm-per-prompt", "image=8",
             "--gpu-memory-utilization", "0.9",
             "--enforce-eager"
         ]

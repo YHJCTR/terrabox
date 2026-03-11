@@ -5,12 +5,13 @@ Uses 'docker run' to start terrabox/remotesam:latest instead of subprocess.
 Set TERRABOX_USE_DOCKER=true to activate this manager via geo_perception.py imports.
 
 Volume mounts:
-  -v /data1:/data1                image files (same path inside container)
-  -v ${REMOTESAM_SRC_HOST}:/app:ro  RemoteSAM source tree (includes pretrained_weights/)
-  -w /app                           working directory so relative paths resolve correctly
+  -v /data1:/data1                             image files (same path inside container)
+  -v ${REMOTESAM_CHECKPOINT_HOST}:/checkpoints:ro  pretrained_weights directory
+  -v ${HF_CACHE_HOST}:/root/.cache/huggingface:ro  HuggingFace model cache
 
-Note: RemoteSAM/start.py uses relative paths like "./pretrained_weights/...".
-      Mounting the entire source directory as /app preserves those relative paths.
+Note: The image clones RemoteSAM source from GitHub at build time (no host source mount needed).
+      bert-base-uncased and the EPOC model must be present in the HF cache; TRANSFORMERS_OFFLINE=1
+      prevents network download attempts inside the container.
 
 Build image first:
   cd docker/remotesam && docker build -t terrabox/remotesam:latest .
@@ -22,6 +23,7 @@ import os
 import requests
 import logging
 import atexit
+from ..gpu_allocator import allocate_gpu
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("docker.remotesam_manager")
@@ -36,12 +38,17 @@ class RemoteSAMDockerManager:
     DOCKER_IMAGE = "terrabox/remotesam:latest"
     GPU_DEVICES = os.environ.get("REMOTESAM_GPU_DEVICES", "3")
 
-    # Entire RemoteSAM source directory (includes pretrained_weights/) mounted as /app
-    SRC_HOST = os.environ.get(
-        "REMOTESAM_SRC_HOST",
-        "/data1/yuhongjie2/RemoteSAM"
+    # pretrained_weights directory on the host — mounted as /checkpoints inside the container
+    CHECKPOINT_HOST = os.environ.get(
+        "REMOTESAM_CHECKPOINT_HOST",
+        "/data1/yuhongjie2/RemoteSAM/pretrained_weights",
     )
     DATA_MOUNT_HOST = os.environ.get("DATA_MOUNT_HOST", "/data1")
+    # HuggingFace cache on the host — must contain bert-base-uncased and the EPOC model
+    HF_CACHE_HOST = os.environ.get(
+        "HF_CACHE_HOST",
+        os.path.expanduser("~/.cache/huggingface"),
+    )
 
     def __new__(cls):
         if cls._instance is None:
@@ -71,19 +78,30 @@ class RemoteSAMDockerManager:
 
         subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
 
+        gpu = allocate_gpu(
+            min_free_mib=6144,
+            fallback=cls.GPU_DEVICES,
+            env_var="REMOTESAM_GPU_DEVICES",
+        )
+
         cmd = [
             "docker", "run", "-d",
             "--name", cls.CONTAINER_NAME,
-            "--gpus", f"device={cls.GPU_DEVICES}",
+            "--gpus", f"device={gpu}",
             "-p", "9004:9004",
             "-v", f"{cls.DATA_MOUNT_HOST}:{cls.DATA_MOUNT_HOST}",
-            # Mount entire RemoteSAM source tree (preserves local imports and pretrained_weights/)
-            "-v", f"{cls.SRC_HOST}:/app:ro",
-            "-w", "/app",   # keep cwd so ./pretrained_weights/ relative paths work
+            # Mount pretrained_weights as /checkpoints (source code is baked into the image)
+            "-v", f"{cls.CHECKPOINT_HOST}:/checkpoints:ro",
+            # Mount HuggingFace cache so bert-base-uncased and EPOC model are available offline
+            "-v", f"{cls.HF_CACHE_HOST}:/root/.cache/huggingface:ro",
+            # Force offline mode — prevents transformers from trying to reach HuggingFace Hub
+            "-e", "TRANSFORMERS_OFFLINE=1",
+            "-e", "HF_DATASETS_OFFLINE=1",
+            "-e", "REMOTESAM_CHECKPOINT=/checkpoints/swin_base_patch4_window12_384_22k.pth",
             cls.DOCKER_IMAGE,
         ]
 
-        logger.info(f"Starting RemoteSAM container (GPU: {cls.GPU_DEVICES})...")
+        logger.info(f"Starting RemoteSAM container (GPU: {gpu})...")
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(
@@ -97,12 +115,14 @@ class RemoteSAMDockerManager:
 
         cls._start_docker()
 
-        logger.info("Waiting for RemoteSAM service to start...")
-        max_retries = 60
+        logger.info("Waiting for RemoteSAM service to start (model loading may take ~3 min)...")
+        max_retries = 150  # poll every 2s, up to 300s
         for i in range(max_retries):
             if cls.is_running():
                 logger.info("RemoteSAM service is READY.")
                 return
+            if i % 15 == 0 and i > 0:
+                logger.info(f"Still loading... ({i * 2}s elapsed)")
             time.sleep(2)
 
         cls.stop_service()

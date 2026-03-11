@@ -18,6 +18,7 @@ import os
 import requests
 import logging
 import atexit
+from ..gpu_allocator import allocate_gpu
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("docker.remoteclip_manager")
@@ -66,10 +67,16 @@ class RemoteCLIPDockerManager:
 
         subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
 
+        gpu = allocate_gpu(
+            min_free_mib=4096,
+            fallback=cls.GPU_DEVICES,
+            env_var="REMOTECLIP_GPU_DEVICES",
+        )
+
         cmd = [
             "docker", "run", "-d",
             "--name", cls.CONTAINER_NAME,
-            "--gpus", f"device={cls.GPU_DEVICES}",
+            "--gpus", f"device={gpu}",
             "-p", "9003:9003",
             "-v", f"{cls.DATA_MOUNT_HOST}:{cls.DATA_MOUNT_HOST}",
             "-v", f"{cls.CKPT_HOST}:/checkpoints:ro",
@@ -77,7 +84,7 @@ class RemoteCLIPDockerManager:
             cls.DOCKER_IMAGE,
         ]
 
-        logger.info(f"Starting RemoteCLIP container (GPU: {cls.GPU_DEVICES})...")
+        logger.info(f"Starting RemoteCLIP container (GPU: {gpu})...")
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(

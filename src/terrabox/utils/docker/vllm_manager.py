@@ -22,6 +22,7 @@ import os
 import requests
 import logging
 import atexit
+from ..gpu_allocator import allocate_gpus
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("docker.vllm_manager")
@@ -43,7 +44,7 @@ class VLLMDockerManager:
     MODEL_NAME = os.environ.get("VLM_MODEL_NAME", "/model")
 
     CONTAINER_NAME = "terrabox-vllm"
-    DOCKER_IMAGE = "vllm/vllm-openai:latest"
+    DOCKER_IMAGE = os.environ.get("VLM_DOCKER_IMAGE", "terrabox/vllm:latest")
     GPU_DEVICES = os.environ.get("VLM_GPU_DEVICES", "2,3")
     TENSOR_PARALLEL_SIZE = os.environ.get("VLM_TENSOR_PARALLEL_SIZE", "2")
 
@@ -77,12 +78,24 @@ class VLLMDockerManager:
         # Remove any stopped container with the same name to avoid "name already in use"
         subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
 
+        gpu = allocate_gpus(
+            count=int(cls.TENSOR_PARALLEL_SIZE),
+            min_free_mib=16384,
+            fallback=cls.GPU_DEVICES,
+            env_var="VLM_GPU_DEVICES",
+        )
+
         cmd = [
             "docker", "run", "-d",
             "--name", cls.CONTAINER_NAME,
-            "--gpus", f"device={cls.GPU_DEVICES}",
+            # Use NVIDIA_VISIBLE_DEVICES + --gpus all instead of --gpus device=X,Y.
+            # Docker's --gpus device= parser fails for comma-separated IDs ("cannot set
+            # both Count and DeviceIDs"), while the env-var approach is always reliable.
+            "--gpus", "all",
+            "-e", f"NVIDIA_VISIBLE_DEVICES={gpu}",
             "-p", f"{cls.PORT}:8000",   # vllm-openai image listens on 8000 internally
             "-v", f"{cls.MODEL_PATH}:/model:ro",
+            "-v", "/data1:/data1",
             "--shm-size=16g",
             cls.DOCKER_IMAGE,
             "--model", "/model",
@@ -91,17 +104,25 @@ class VLLMDockerManager:
             "--port", "8000",
             "--tensor-parallel-size", cls.TENSOR_PARALLEL_SIZE,
             "--max-model-len", "4096",
-            "--limit-mm-per-prompt", '{"image": 8}',
-            "--gpu-memory-utilization", "0.9",
+            "--gpu-memory-utilization", "0.8",
             "--enforce-eager",
+            "--allowed-local-media-path", "/data1",
         ]
 
-        logger.info(f"Starting vLLM container (GPU: {cls.GPU_DEVICES}, model: {cls.MODEL_PATH})...")
+        logger.info(f"Starting vLLM container (GPU: {gpu}, model: {cls.MODEL_PATH})...")
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(
                 f"Failed to start vLLM container.\nstderr: {result.stderr}"
             )
+
+    @classmethod
+    def _get_container_logs(cls, tail: int = 50) -> str:
+        result = subprocess.run(
+            ["docker", "logs", "--tail", str(tail), cls.CONTAINER_NAME],
+            capture_output=True, text=True
+        )
+        return (result.stdout + result.stderr).strip()
 
     @classmethod
     def start_service(cls):
@@ -116,6 +137,15 @@ class VLLMDockerManager:
             if cls.is_running():
                 logger.info("vLLM service is READY!")
                 return
+
+            # Mirror the non-Docker manager's process.poll() check:
+            # if the container has already exited, stop waiting immediately.
+            if not cls._container_is_running():
+                logs = cls._get_container_logs()
+                raise RuntimeError(
+                    f"vLLM container exited unexpectedly.\n"
+                    f"--- docker logs (last 50 lines) ---\n{logs}"
+                )
 
             if i % 6 == 0:
                 logger.info(f"Still loading... ({i * 5}s elapsed)")

@@ -119,16 +119,19 @@ def segment_image(data: dict = Body(...)):
             crs = "Pixel"
 
         full_image_box = [0, 0, W, H]
-        box_tensor = torch.tensor([full_image_box], dtype=torch.float32).to(DEVICE)
+        # SAM2 predict() requires box as numpy array with shape (4,): [x1, y1, x2, y2]
+        box_np = np.array(full_image_box, dtype=np.float32)
 
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             predictor.set_image(image_np)
-            try:
-                masks, scores, logits = predictor.predict({"box": box_tensor})
-            except Exception:
-                masks, scores, logits = predictor.predict(box=box_tensor, multimask_output=False)
+            masks, scores, logits = predictor.predict(
+                box=box_np,
+                multimask_output=True
+            )
 
-        best_mask = masks[0]
+        # Select the mask with the highest confidence score
+        best_idx = int(np.argmax(scores))
+        best_mask = masks[best_idx]
         vis_image_np = draw_masks_on_image(image_np, best_mask)
         vis_base64 = image_to_base64(vis_image_np)
         polygons = mask_to_geojson(best_mask, transform)

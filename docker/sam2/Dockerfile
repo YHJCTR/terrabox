@@ -11,19 +11,20 @@ RUN pip3 install --upgrade pip
 # PyTorch with CUDA 11.8
 RUN pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 
-# SAM2 from source
-RUN git clone https://github.com/facebookresearch/sam2.git /sam2_src
+# Use local SAM2 source code (excluding checkpoints via .dockerignore)
+COPY sam2 /sam2_src
 WORKDIR /sam2_src
-RUN pip3 install -e ".[demo]"
+# SAM2_BUILD_CUDA=0: skip compiling the CUDA extension (connected_components.cu).
+# The extension is only used for some post-processing; inference works without it.
+# Without this flag the build hangs silently for several minutes on nvcc compilation.
+RUN SAM2_BUILD_CUDA=0 pip3 install -e .
 
-# Server script dependencies
+# Server script dependencies (hydra-core/omegaconf already pulled in by sam2)
 RUN pip3 install \
     fastapi \
     uvicorn \
     opencv-python-headless \
     Pillow \
-    hydra-core \
-    omegaconf \
     rasterio \
     shapely
 
