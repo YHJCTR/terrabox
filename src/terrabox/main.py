@@ -16,6 +16,7 @@ from .routers import connections as connections_router
 from .routers import analytics as analytics_router
 from .routers import async_tools as async_tools_router
 from .core.background_tasks import start_background_tasks, stop_background_tasks
+from .agent.router import router as agent_router
 
 try:
     from mcp.server.sse import SseServerTransport
@@ -92,7 +93,10 @@ def create_app() -> FastAPI:
     app.include_router(async_tools_router.sdk_router)     # SDK async tools
     app.include_router(async_tools_router.gui_router)     # GUI async tools
     app.include_router(async_tools_router.batch_tools_router)  # Legacy batch tools (backward compatibility)
-    
+
+    # Agent router
+    app.include_router(agent_router)
+
     if SseServerTransport is not None and mcp_instance is not None:
         sse = SseServerTransport("/mcp/messages")
 

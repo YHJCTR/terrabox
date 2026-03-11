@@ -8,37 +8,31 @@ RUN apt-get update && apt-get install -y \
 
 RUN pip3 install --upgrade pip
 
-# torch 1.13 requires numpy < 2.0; pin it before any other install
-RUN pip3 install "numpy<2.0"
+RUN pip3 install "setuptools<70.0" wheel packaging
 
-# RemoteSAM requires torch 1.13; use cu117 wheels
+RUN pip3 install "numpy==1.23.5"
+
 RUN pip3 install --no-cache-dir \
     --progress-bar on \
     torch==1.13.1+cu117 \
     torchvision==0.14.1+cu117 \
     --extra-index-url https://download.pytorch.org/whl/cu117
 
-# mmcv is required by RemoteSAM's lib/mmcv_custom (checkpoint loading)
 RUN pip3 install mmcv-full \
     -f https://download.openmmlab.com/mmcv/dist/cu117/torch1.13.0/index.html
 
-# Copy requirements.txt to container and install dependencies
-# Note: numpy<2.0 is already installed above; skip it to avoid conflicts
 COPY RemoteSAM/requirements.txt /tmp/requirements.txt
 RUN pip3 install --no-deps -r /tmp/requirements.txt && \
-    pip3 install flask opencv-python-headless scipy scikit-learn scikit-image
+    pip3 install flask opencv-python-headless scipy scikit-learn scikit-image huggingface_hub safetensors && \
+    pip3 install "setuptools<70.0" spacy thinc && \
+    pip3 install pyyaml jsonpatch terminaltables addict yapf pytest && \
+    pip3 install Pillow sympy onnx onnxruntime ninja
 
-# Use local RemoteSAM source code (excluding dataset via .dockerignore)
 COPY RemoteSAM /app/
 WORKDIR /app
 
-# Docker-aware server script (replaces start.py; reads config from env vars)
 COPY server.py /app/docker_server.py
 
-# Model checkpoint is volume-mounted at runtime:
-#   -v /your/RemoteSAM/pretrained_weights:/checkpoints:ro
-# HuggingFace cache (bert-base-uncased + EPOC model) is volume-mounted:
-#   -v ~/.cache/huggingface:/root/.cache/huggingface:ro
 ENV REMOTESAM_CHECKPOINT="/checkpoints/swin_base_patch4_window12_384_22k.pth"
 ENV REMOTESAM_USE_EPOC="true"
 

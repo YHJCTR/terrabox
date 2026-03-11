@@ -1,0 +1,34 @@
+# ============================================================
+# Terrabox Agent Configuration
+# ============================================================
+
+# ---- LLM 模式 ----
+# use_local_llm: true  = 启动本地 vLLM 进程
+#                false = 使用远程 LLM API（OpenAI 兼容）
+use_local_llm: true
+
+# use_docker: false = 子进程模式（推荐，直接用本地 conda 环境，无需 Docker）
+#             true  = Docker 容器模式
+use_docker: false
+
+# ---- 本地 LLM 公共参数 ----
+local_llm_model_path: /data1/yuhongjie2/Earth-Agent/llm/qwen/3_8B/
+local_llm_host: 127.0.0.1
+local_llm_port: 9100          # 避免与视觉 vLLM 容器的 9000 端口冲突
+local_llm_gpu_devices: "0"    # 分配的 GPU 编号，多卡用逗号分隔，如 "0,1"
+local_llm_tensor_parallel: 1  # tensor parallel size，需与 GPU 数量一致
+local_llm_max_model_len: 24576  # token 上下文窗口（GPU 限制约 24960，勿超过）
+
+# ---- 子进程模式（use_docker: false）----
+local_llm_python_exec: /home/yuhongjie/miniconda3/envs/unsloth/bin/python
+
+# ---- Docker 模式（use_docker: true）----
+local_llm_docker_image: terrabox/agent-llm:latest
+
+# ---- 远程 LLM API（use_local_llm: false 时生效） ----
+remote_llm_api_base: https://api.openai.com/v1
+remote_llm_api_key: ""        # 填入你的 API Key
+remote_llm_model: gpt-4o
+
+# ---- Agent 行为 ----
+max_iterations: 15            # 最大工具调用轮次（LangGraph recursion_limit）

@@ -88,11 +88,11 @@ class VLLMDockerManager:
         cmd = [
             "docker", "run", "-d",
             "--name", cls.CONTAINER_NAME,
-            # Use NVIDIA_VISIBLE_DEVICES + --gpus all instead of --gpus device=X,Y.
-            # Docker's --gpus device= parser fails for comma-separated IDs ("cannot set
-            # both Count and DeviceIDs"), while the env-var approach is always reliable.
+            # --gpus all exposes all GPUs to the container; CUDA_VISIBLE_DEVICES then
+            # restricts which ones CUDA actually uses (works even with --gpus all,
+            # unlike NVIDIA_VISIBLE_DEVICES which --gpus all overrides).
             "--gpus", "all",
-            "-e", f"NVIDIA_VISIBLE_DEVICES={gpu}",
+            "-e", f"CUDA_VISIBLE_DEVICES={gpu}",
             "-p", f"{cls.PORT}:8000",   # vllm-openai image listens on 8000 internally
             "-v", f"{cls.MODEL_PATH}:/model:ro",
             "-v", "/data1:/data1",

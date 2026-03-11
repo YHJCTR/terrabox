@@ -467,7 +467,7 @@ def setup(registrar):
                         "description": "Question or instruction.",
                         "default": "",
                     },
-                    "max_tokens": {"type": "integer", "default": 4096},
+                    "max_tokens": {"type": "integer", "default": 512},
                 },
                 "required": [],
             },
