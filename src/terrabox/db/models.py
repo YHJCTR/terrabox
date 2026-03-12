@@ -238,7 +238,7 @@ class ToolOverride(Base):
 class OAuthState(Base):
     """OAuth callback state (PKCE/replay protection)."""
     __tablename__ = "oauth_states"
-    
+
     state = Column(Text, primary_key=True)
     user_id = Column(get_uuid_type(), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     toolkit_id = Column(BigInteger, ForeignKey("toolkits.id", ondelete="CASCADE"), nullable=False)
@@ -247,6 +247,21 @@ class OAuthState(Base):
     redirect_uri = Column(Text)
     created_at = Column(get_timestamp_type(), default=datetime.utcnow)
     expires_at = Column(get_timestamp_type(), nullable=False)
-    
+
     # Relationships
     connection = relationship("Connection", back_populates="oauth_states")
+
+
+class AgentSession(Base):
+    """Persistent storage for agent conversation history."""
+    __tablename__ = "agent_sessions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id_fk = Column(get_uuid_type(), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    messages_json = Column(Text, nullable=False, default="[]")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_agent_session_user", "user_id_fk"),
+    )
