@@ -1,8 +1,6 @@
 """FastAPI router for the Agent chat endpoints."""
 from __future__ import annotations
 
-import uuid
-from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
@@ -11,11 +9,8 @@ from sqlalchemy.orm import Session
 from ..db import models
 from ..db.session import get_db
 from ..routers.deps import current_user_from_jwt
+from ..core.utils.uploads import save_upload_files
 from .graph import clear_session, new_session_id, run_agent
-
-import os
-
-UPLOAD_DIR = Path(os.getenv("TERRABOX_UPLOAD_DIR", "/data1/terrabox_uploads"))
 
 router = APIRouter(prefix="/v1/gui/agent", tags=["agent"])
 
@@ -38,17 +33,10 @@ async def agent_chat(
     if not session_id:
         session_id = new_session_id()
 
-    # Save uploaded files to the shared upload directory
-    image_paths: list[str] = []
-    for file in files:
-        suffix = Path(file.filename or "upload").suffix or ".bin"
-        dest = UPLOAD_DIR / f"{uuid.uuid4()}{suffix}"
-        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(await file.read())
-        image_paths.append(str(dest))
+    image_paths = await save_upload_files(files)
 
     try:
-        response = run_agent(session_id, message, image_paths, current_user)
+        response = run_agent(session_id, message, image_paths, current_user, db)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -62,7 +50,8 @@ async def agent_chat(
 def delete_session(
     session_id: str,
     current_user: models.User = Depends(current_user_from_jwt),
+    db: Session = Depends(get_db),
 ):
     """Clear the conversation history for a session."""
-    clear_session(session_id)
+    clear_session(session_id, db, current_user.id)
     return {"status": "ok", "session_id": session_id}

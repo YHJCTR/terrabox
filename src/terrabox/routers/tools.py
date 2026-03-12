@@ -12,13 +12,10 @@ from ..core.schemas import (
     ToolSpecOut, ToolkitOut, ExecuteRequestIn, ExecuteResponseOut,
 )
 from ..core.services import ToolService
+from ..core.utils.uploads import save_upload_files
 
 import json
-import os
-import uuid
 from pathlib import Path
-
-UPLOAD_DIR = Path(os.getenv("TERRABOX_UPLOAD_DIR", "/data1/terrabox_uploads"))
 
 
 # Business logic helpers (shared between SDK/GUI)
@@ -202,16 +199,7 @@ def make_tools_router(config: RouterConfig) -> APIRouter:
             except Exception:
                 metadata_dict = {}
 
-        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        saved_paths: List[str] = []
-        for f in files:
-            suffix = Path(f.filename).suffix or ".bin"
-            filename = f"{uuid.uuid4().hex}{suffix}"
-            dst = UPLOAD_DIR / filename
-            with dst.open("wb") as out:
-                content = await f.read()
-                out.write(content)
-            saved_paths.append(str(dst))
+        saved_paths = await save_upload_files(files)
 
         # 写回到 image/images，并兼容旧的 image_path/image_paths 命名
         if len(saved_paths) > 1:
