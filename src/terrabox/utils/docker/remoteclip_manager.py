@@ -17,14 +17,14 @@ import time
 import os
 import requests
 import logging
-import atexit
 from ..gpu_allocator import allocate_gpu
+from ..base_manager import BaseServiceManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("docker.remoteclip_manager")
 
 
-class RemoteCLIPDockerManager:
+class RemoteCLIPDockerManager(BaseServiceManager):
     _instance = None
 
     API_URL = "http://127.0.0.1:9003"
@@ -117,8 +117,3 @@ class RemoteCLIPDockerManager:
 
 
 remoteclip_manager = RemoteCLIPDockerManager()
-
-
-@atexit.register
-def _cleanup():
-    pass

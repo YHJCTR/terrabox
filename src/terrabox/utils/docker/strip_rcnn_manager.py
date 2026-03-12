@@ -25,14 +25,14 @@ import time
 import os
 import requests
 import logging
-import atexit
 from ..gpu_allocator import allocate_gpu
+from ..base_manager import BaseServiceManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("docker.strip_rcnn_manager")
 
 
-class StripRCNNDockerManager:
+class StripRCNNDockerManager(BaseServiceManager):
     _instance = None
 
     API_URL = "http://127.0.0.1:9005"
@@ -144,8 +144,3 @@ class StripRCNNDockerManager:
 
 
 strip_rcnn_manager = StripRCNNDockerManager()
-
-
-@atexit.register
-def _cleanup():
-    pass

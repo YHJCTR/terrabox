@@ -36,7 +36,7 @@ DEFAULT_PROMPT   = "帮我用vlm工具查看图像中有什么"
 def login(base_url: str, email: str, password: str) -> str:
     """POST /v1/login and return the JWT access token."""
     url = f"{base_url}/v1/login"
-    resp = requests.post(url, json={"email": email, "password": password}, timeout=10)
+    resp = requests.post(url, json={"email": email, "password": password}, timeout=10, proxies={"http": None, "https": None})
     if resp.status_code != 200:
         print(f"[FAIL] Login failed ({resp.status_code}): {resp.text}")
         sys.exit(1)
@@ -69,7 +69,7 @@ def send_agent_chat(
         print(f"       prompt  : {prompt!r}")
         print(f"       image   : {image_path}")
 
-        resp = requests.post(url, headers=headers, data=data, files=files, timeout=300)
+        resp = requests.post(url, headers=headers, data=data, files=files, timeout=300, proxies={"http": None, "https": None})
 
     return resp
 

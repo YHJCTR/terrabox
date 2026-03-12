@@ -18,14 +18,14 @@ import time
 import os
 import requests
 import logging
-import atexit
 from ..gpu_allocator import allocate_gpu
+from ..base_manager import BaseServiceManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("docker.sam2_manager")
 
 
-class SAM2DockerManager:
+class SAM2DockerManager(BaseServiceManager):
     _instance = None
 
     API_URL = "http://127.0.0.1:9002"
@@ -127,8 +127,3 @@ class SAM2DockerManager:
 
 
 sam2_manager = SAM2DockerManager()
-
-
-@atexit.register
-def _cleanup():
-    pass

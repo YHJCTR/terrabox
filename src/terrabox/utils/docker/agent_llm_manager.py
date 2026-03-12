@@ -16,11 +16,12 @@ import time
 import requests
 
 from ..gpu_allocator import allocate_gpus
+from ..base_manager import BaseServiceManager
 
 logger = logging.getLogger("docker.agent_llm_manager")
 
 
-class AgentLLMDockerManager:
+class AgentLLMDockerManager(BaseServiceManager):
     _instance = None
 
     HOST = "127.0.0.1"

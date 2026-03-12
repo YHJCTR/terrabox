@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
@@ -17,6 +18,7 @@ from .routers import analytics as analytics_router
 from .routers import async_tools as async_tools_router
 from .core.background_tasks import start_background_tasks, stop_background_tasks
 from .agent.router import router as agent_router
+from .utils.base_manager import ServiceRegistry
 
 try:
     from mcp.server.sse import SseServerTransport
@@ -43,6 +45,8 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown
     await stop_background_tasks()
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, ServiceRegistry.cleanup_all)
 
 
 def create_app() -> FastAPI:

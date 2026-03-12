@@ -7,19 +7,19 @@ unsloth conda environment, mirroring the pattern of utils/vllm_manager.py.
 Default port: 9100  (avoids conflict with the VLM manager on 9000)
 Log files:    agent_llm_stdout.log / agent_llm_stderr.log
 """
-import atexit
 import logging
 import os
 import subprocess
 import time
 
 import requests
+from .base_manager import BaseServiceManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agent_llm_manager")
 
 
-class AgentLLMServiceManager:
+class AgentLLMServiceManager(BaseServiceManager):
     _instance = None
     _process = None
 
@@ -143,8 +143,3 @@ class AgentLLMServiceManager:
 
 
 agent_llm_manager = AgentLLMServiceManager()
-
-
-@atexit.register
-def _auto_cleanup():
-    agent_llm_manager.stop_service()

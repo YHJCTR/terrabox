@@ -4,13 +4,13 @@ import time
 import os
 import requests
 import logging
-import atexit
+from .base_manager import BaseServiceManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("remotesam_manager")
 
 
-class RemoteSAMServiceManager:
+class RemoteSAMServiceManager(BaseServiceManager):
     _instance = None
     _process = None
 
@@ -73,8 +73,3 @@ class RemoteSAMServiceManager:
 
 
 remotesam_manager = RemoteSAMServiceManager()
-
-
-@atexit.register
-def _cleanup():
-    remotesam_manager.stop_service()

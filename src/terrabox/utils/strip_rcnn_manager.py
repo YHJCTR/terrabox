@@ -4,13 +4,13 @@ import time
 import os
 import requests
 import logging
-import atexit
+from .base_manager import BaseServiceManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("strip_rcnn_manager")
 
 
-class StripRCNNServiceManager:
+class StripRCNNServiceManager(BaseServiceManager):
     _instance = None
     _process = None
 
@@ -90,8 +90,3 @@ class StripRCNNServiceManager:
 
 
 strip_rcnn_manager = StripRCNNServiceManager()
-
-
-@atexit.register
-def _cleanup():
-    strip_rcnn_manager.stop_service()

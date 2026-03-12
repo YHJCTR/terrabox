@@ -21,14 +21,14 @@ import time
 import os
 import requests
 import logging
-import atexit
 from ..gpu_allocator import allocate_gpus
+from ..base_manager import BaseServiceManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("docker.vllm_manager")
 
 
-class VLLMDockerManager:
+class VLLMDockerManager(BaseServiceManager):
     _instance = None
 
     HOST = "127.0.0.1"
@@ -163,11 +163,3 @@ class VLLMDockerManager:
 
 
 vllm_manager = VLLMDockerManager()
-
-
-@atexit.register
-def _auto_cleanup():
-    # Containers intentionally keep running after the host process exits (allows reuse).
-    # Uncomment below to stop automatically:
-    # vllm_manager.stop_service()
-    pass

@@ -4,13 +4,13 @@ import time
 import os
 import requests
 import logging
-import atexit
+from .base_manager import BaseServiceManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("remoteclip_manager")
 
 
-class RemoteCLIPServiceManager:
+class RemoteCLIPServiceManager(BaseServiceManager):
     _instance = None
     _process = None
 
@@ -73,8 +73,3 @@ class RemoteCLIPServiceManager:
 
 
 remoteclip_manager = RemoteCLIPServiceManager()
-
-
-@atexit.register
-def _cleanup():
-    remoteclip_manager.stop_service()

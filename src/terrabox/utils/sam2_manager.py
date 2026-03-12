@@ -3,12 +3,12 @@ import time
 import os
 import requests
 import logging
-import atexit
+from .base_manager import BaseServiceManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sam2_manager")
 
-class SAM2ServiceManager:
+class SAM2ServiceManager(BaseServiceManager):
     _instance = None
     _process = None
     
@@ -73,7 +73,3 @@ class SAM2ServiceManager:
             cls._process = None
 
 sam2_manager = SAM2ServiceManager()
-
-@atexit.register
-def _cleanup():
-    sam2_manager.stop_service()

@@ -1,17 +1,16 @@
 import subprocess
 import time
 import os
-import signal
 import requests
 import logging
 import sys
-import atexit
+from .base_manager import BaseServiceManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("vllm_manager")
 
 
-class VLLMServiceManager:
+class VLLMServiceManager(BaseServiceManager):
     _instance = None
     _process = None
 
@@ -121,8 +120,3 @@ class VLLMServiceManager:
 
 
 vllm_manager = VLLMServiceManager()
-
-
-@atexit.register
-def _auto_cleanup():
-    vllm_manager.stop_service()
