@@ -37,6 +37,10 @@ class AgentConfig:
     # Agent behavior
     max_iterations: int = 15
 
+    # Progressive disclosure mode
+    enable_progressive_disclosure: bool = False  # if True, use 3-level tool discovery
+    max_retries_on_error: int = 3                # max rethink attempts before giving up
+
 
 def load_config() -> AgentConfig:
     """Load AgentConfig from agent_config.yaml (project root) or return defaults."""

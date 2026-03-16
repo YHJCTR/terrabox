@@ -55,13 +55,19 @@ def _make_tool_func(handler, user):
     return _call
 
 
-def build_langchain_tools(user) -> list[StructuredTool]:
+def build_langchain_tools(user, slugs: Optional[list[str]] = None) -> list[StructuredTool]:
     """
     Wrap every tool registered in CoreRegistry as a LangChain StructuredTool.
     The agent LLM can call any of these tools autonomously.
+
+    Args:
+        user: The authenticated user object passed to each tool handler.
+        slugs: Optional list of tool slugs to include. If None, all tools are included.
     """
     tools = []
     for spec in registry.list_tools():
+        if slugs is not None and spec.slug not in slugs:
+            continue
         handler = registry.get_handler(spec.slug)
         if handler is None:
             continue

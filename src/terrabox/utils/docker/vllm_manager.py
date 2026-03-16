@@ -24,7 +24,6 @@ import logging
 from ..gpu_allocator import allocate_gpus
 from ..base_manager import BaseServiceManager
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("docker.vllm_manager")
 
 

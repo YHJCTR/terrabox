@@ -20,7 +20,6 @@ import logging
 from ..gpu_allocator import allocate_gpu
 from ..base_manager import BaseServiceManager
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("docker.remoteclip_manager")
 
 

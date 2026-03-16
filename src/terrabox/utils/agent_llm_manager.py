@@ -15,7 +15,6 @@ import time
 import requests
 from .base_manager import BaseServiceManager
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agent_llm_manager")
 
 

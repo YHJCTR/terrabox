@@ -6,7 +6,6 @@ import logging
 import sys
 from .base_manager import BaseServiceManager
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("vllm_manager")
 
 

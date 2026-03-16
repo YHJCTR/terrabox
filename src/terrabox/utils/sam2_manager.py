@@ -5,7 +5,6 @@ import requests
 import logging
 from .base_manager import BaseServiceManager
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sam2_manager")
 
 class SAM2ServiceManager(BaseServiceManager):

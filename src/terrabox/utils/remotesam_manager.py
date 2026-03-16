@@ -6,7 +6,6 @@ import requests
 import logging
 from .base_manager import BaseServiceManager
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("remotesam_manager")
 
 

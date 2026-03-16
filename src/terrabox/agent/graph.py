@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from datetime import datetime
 
@@ -18,21 +19,26 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Dedicated I/O logger — writes to a fixed file for easy inspection
 # ---------------------------------------------------------------------------
-_AGENT_LOG_PATH = "/data1/yuhongjie2/agent.log"
+_AGENT_LOG_PATH = os.environ.get("AGENT_LOG_PATH", "/data1/yuhongjie2/agent.log")
 _io_logger: logging.Logger | None = None
 
 
 def _get_io_logger() -> logging.Logger:
     global _io_logger
     if _io_logger is None:
+        # Apply TL_LOG_LEVEL to root logger (safe: only changes level, no handlers added)
+        level_str = os.environ.get("TL_LOG_LEVEL", "INFO").upper()
+        logging.root.setLevel(getattr(logging, level_str, logging.INFO))
+
         _io_logger = logging.getLogger("agent.io")
         _io_logger.setLevel(logging.DEBUG)
         _io_logger.propagate = False          # don't leak into uvicorn root logger
-        fh = logging.FileHandler(_AGENT_LOG_PATH, encoding="utf-8")
-        fh.setFormatter(
-            logging.Formatter("%(asctime)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-        )
-        _io_logger.addHandler(fh)
+        if not _io_logger.handlers:           # guard against duplicate handlers
+            fh = logging.FileHandler(_AGENT_LOG_PATH, encoding="utf-8")
+            fh.setFormatter(
+                logging.Formatter("%(asctime)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+            )
+            _io_logger.addHandler(fh)
     return _io_logger
 
 
@@ -93,6 +99,11 @@ def run_agent(
     from ..db.models import AgentSession
 
     config = load_config()
+
+    if config.enable_progressive_disclosure:
+        from .progressive_graph import run_progressive_agent
+        return run_progressive_agent(session_id, user_message, image_paths, user, db, config)
+
     llm = get_llm(config)
     tools = build_langchain_tools(user)
     graph = create_react_agent(llm, tools)
