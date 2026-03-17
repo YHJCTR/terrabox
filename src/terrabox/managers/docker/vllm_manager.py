@@ -55,7 +55,11 @@ class VLLMDockerManager(BaseServiceManager):
     @classmethod
     def is_running(cls):
         try:
-            resp = requests.get(f"http://{cls.HOST}:{cls.PORT}/health", timeout=1)
+            resp = requests.get(
+                f"http://{cls.HOST}:{cls.PORT}/health",
+                timeout=1,
+                proxies={"http": None, "https": None},
+            )
             return resp.status_code == 200
         except Exception:
             return False

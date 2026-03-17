@@ -633,6 +633,100 @@ def line_length_handler(arguments: dict, context: dict, account=None) -> Dict[st
 
 
 # -------------------------------------------------------------------
+# Bounding Box Utilities
+# -------------------------------------------------------------------
+
+def bbox_expansion_handler(arguments: dict, context: dict, account=None) -> Dict[str, Any]:
+    """
+    Expand bounding boxes by a given radius (in real-world units) given the GSD.
+    Each pixel side expands by radius/gsd pixels.
+
+    Input bboxes format: [x1, y1, x2, y2] (top-left and bottom-right corners).
+    """
+    bboxes = arguments.get("bboxes", [])
+    try:
+        radius = float(arguments["radius"])
+        gsd = float(arguments["gsd"])
+    except (KeyError, TypeError, ValueError) as e:
+        raise ValueError(f"Invalid 'radius' or 'gsd': {e}")
+
+    if gsd <= 0:
+        raise ValueError("gsd must be > 0")
+
+    pixel_expand = radius / gsd
+    expanded = []
+    for bbox in bboxes:
+        x1, y1, x2, y2 = bbox
+        expanded.append([x1 - pixel_expand, y1 - pixel_expand,
+                          x2 + pixel_expand, y2 + pixel_expand])
+
+    return {"expanded_bboxes": expanded}
+
+
+def bboxes_to_centroids_handler(arguments: dict, context: dict, account=None) -> Dict[str, Any]:
+    """
+    Convert bounding boxes from [x1, y1, x2, y2] format to centroid [cx, cy] coordinates.
+    """
+    bboxes = arguments.get("bboxes", [])
+    centroids = [[(x1 + x2) / 2.0, (y1 + y2) / 2.0] for x1, y1, x2, y2 in bboxes]
+    return {"centroids": centroids}
+
+
+def centroid_distance_extremes_handler(arguments: dict, context: dict, account=None) -> Dict[str, Any]:
+    """
+    Compute pairwise Euclidean distances between centroids and return both the
+    closest and farthest pairs with their indices and distances.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        raise ImportError("numpy is required. Install: pip install numpy")
+
+    centroids = arguments.get("centroids", [])
+    if len(centroids) < 2:
+        raise ValueError("At least 2 centroids are required")
+
+    points = np.array(centroids, dtype=float)
+    diff = points[:, None, :] - points[None, :, :]
+    dist_matrix = np.sqrt(np.sum(diff ** 2, axis=-1))
+
+    np.fill_diagonal(dist_matrix, np.inf)
+    min_idx = np.unravel_index(np.argmin(dist_matrix), dist_matrix.shape)
+    min_dist = float(dist_matrix[min_idx])
+
+    np.fill_diagonal(dist_matrix, -np.inf)
+    max_idx = np.unravel_index(np.argmax(dist_matrix), dist_matrix.shape)
+    max_dist = float(dist_matrix[max_idx])
+
+    return {
+        "min": {"index1": int(min_idx[0]), "index2": int(min_idx[1]), "distance": min_dist},
+        "max": {"index1": int(max_idx[0]), "index2": int(max_idx[1]), "distance": max_dist}
+    }
+
+
+def bbox_area_handler(arguments: dict, context: dict, account=None) -> Dict[str, Any]:
+    """
+    Calculate total area of bounding boxes in [x, y, w, h] format (top-left + width/height).
+    Returns area in pixel² and, if gsd is provided, also in m².
+    """
+    bboxes = arguments.get("bboxes", [])
+    gsd = arguments.get("gsd")
+
+    total_area = 0.0
+    for bbox in bboxes:
+        if len(bbox) != 4:
+            raise ValueError(f"Invalid bbox format: {bbox}. Expected [x, y, w, h].")
+        _, _, w, h = bbox
+        total_area += w * h
+
+    result: Dict[str, Any] = {"total_area_px2": total_area}
+    if gsd is not None:
+        result["total_area_m2"] = total_area * float(gsd) ** 2
+
+    return result
+
+
+# -------------------------------------------------------------------
 # Toolkit registration (same style as your example)
 # -------------------------------------------------------------------
 def setup(registrar):
@@ -800,4 +894,95 @@ def setup(registrar):
             requires_connection=False
         ),
         line_length_handler
+    )
+
+    # 8) BBox Expansion
+    registrar.tool(
+        ToolSpec(
+            slug="geo_basic.bbox_expansion",
+            name="BBox Expansion",
+            description="Expand bounding boxes [x1,y1,x2,y2] by a real-world radius given the image GSD (meters/pixel).",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "bboxes": {
+                        "type": "array",
+                        "items": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
+                        "description": "List of bounding boxes [[x1,y1,x2,y2], ...]."
+                    },
+                    "radius": {"type": "number", "description": "Expansion radius in real-world units (same unit as gsd)."},
+                    "gsd": {"type": "number", "description": "Ground Sampling Distance (meters per pixel)."}
+                },
+                "required": ["bboxes", "radius", "gsd"]
+            },
+            requires_connection=False
+        ),
+        bbox_expansion_handler
+    )
+
+    # 9) BBoxes to Centroids
+    registrar.tool(
+        ToolSpec(
+            slug="geo_basic.bboxes_to_centroids",
+            name="BBoxes to Centroids",
+            description="Convert a list of bounding boxes [x1,y1,x2,y2] to centroid coordinates [cx, cy].",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "bboxes": {
+                        "type": "array",
+                        "items": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
+                        "description": "List of bounding boxes [[x1,y1,x2,y2], ...]."
+                    }
+                },
+                "required": ["bboxes"]
+            },
+            requires_connection=False
+        ),
+        bboxes_to_centroids_handler
+    )
+
+    # 10) Centroid Distance Extremes
+    registrar.tool(
+        ToolSpec(
+            slug="geo_basic.centroid_distance_extremes",
+            name="Centroid Distance Extremes",
+            description="Find the closest and farthest centroid pairs from a list of [x, y] centroids. Returns indices and distances.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "centroids": {
+                        "type": "array",
+                        "items": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+                        "description": "List of centroid coordinates [[x, y], ...]."
+                    }
+                },
+                "required": ["centroids"]
+            },
+            requires_connection=False
+        ),
+        centroid_distance_extremes_handler
+    )
+
+    # 11) BBox Area
+    registrar.tool(
+        ToolSpec(
+            slug="geo_basic.bbox_area",
+            name="BBox Area",
+            description="Calculate total area of bounding boxes in [x, y, w, h] format. Returns area in pixel² and optionally m² if gsd is given.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "bboxes": {
+                        "type": "array",
+                        "items": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
+                        "description": "List of bounding boxes [[x, y, w, h], ...] (top-left corner + width/height)."
+                    },
+                    "gsd": {"type": "number", "description": "Optional GSD (m/pixel). If provided, also returns total_area_m2."}
+                },
+                "required": ["bboxes"]
+            },
+            requires_connection=False
+        ),
+        bbox_area_handler
     )

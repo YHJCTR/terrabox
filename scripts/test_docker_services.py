@@ -118,7 +118,7 @@ SERVICES = {
             "-e", "TRANSFORMERS_OFFLINE=1",
             "-e", "HF_DATASETS_OFFLINE=1",
         ],
-        "ready_timeout":  300,   # Swin-B model loading can take ~3 min
+        "ready_timeout":  100,   # Swin-B model loading can take ~3 min
         "poll_interval":  2,
     },
     "strip-rcnn": {
@@ -148,6 +148,28 @@ SERVICES = {
         "ready_timeout":  180,   # mmrotate model init can take ~2 min
         "poll_interval":  2,
     },
+    "instructsam": {
+        # InstructSAM (NeurIPS 2025): Training-Free instruction-based segmentation.
+        # Pipeline: SAM2 mask proposals → vLLM counting (HTTP) → GeoRSCLIP matching.
+        # 镜像与 sam2 使用相同基础: nvidia/cuda:11.8.0-devel-ubuntu22.04
+        # Models: /data1/yuhongjie2/terra_model/instructsam/
+        #   sam2_hiera_large.pt  |  GeoRSCLIP-ViT-L-14.pt
+        # Download first:  python scripts/download_instructsam_models.py --skip-qwen
+        # Build image:     cd docker/instructsam && bash build.sh
+        "container_name": "terrabox-instructsam",
+        "docker_image":   "terrabox/instructsam:latest",
+        "port":           9006,
+        "api_url":        "http://127.0.0.1:9006",
+        "gpu_env_var":    "INSTRUCTSAM_GPU_DEVICES",
+        "default_gpu":    "1",
+        "docker_run_extra": [
+            "--add-host", "host.docker.internal:host-gateway",
+            "-v", "/data1/yuhongjie2/terra_model/instructsam:/models:ro",
+            "-v", "/data1:/data1",
+        ],
+        "ready_timeout":  120,   # SAM2 + CLIP loading ~30s
+        "poll_interval":  2,
+    },
 }
 
 
@@ -165,7 +187,11 @@ def container_is_running(container_name: str) -> bool:
 
 def service_is_healthy(api_url: str) -> bool:
     try:
-        resp = requests.get(f"{api_url}/health", timeout=2)
+        resp = requests.get(
+            f"{api_url}/health",
+            timeout=2,
+            proxies={"http": None, "https": None},
+        )
         return resp.status_code == 200
     except Exception:
         return False
@@ -260,6 +286,7 @@ def test_sam2(api_url: str, image_path: str) -> dict:
         f"{api_url}/segment",
         json={"image_path": image_path},
         timeout=120,
+        proxies={"http": None, "https": None},
     )
     resp.raise_for_status()
     result = resp.json()
@@ -285,6 +312,7 @@ def test_remoteclip(api_url: str, image_path: str) -> dict:
             ],
         },
         timeout=60,
+        proxies={"http": None, "https": None},
     )
     resp.raise_for_status()
     result = resp.json()
@@ -307,6 +335,7 @@ def test_remotesam(api_url: str, image_path: str) -> dict:
             "sentence":   "road",
         },
         timeout=120,
+        proxies={"http": None, "https": None},
     )
     resp.raise_for_status()
     result = resp.json()
@@ -326,6 +355,7 @@ def test_strip_rcnn(api_url: str, image_path: str) -> dict:
         f"{api_url}/detect",
         json={"image_path": image_path, "score_threshold": 0.01},
         timeout=60,
+        proxies={"http": None, "https": None},
     )
     result = resp.json()
     
@@ -358,6 +388,7 @@ def test_vllm(api_url: str, image_path: str) -> dict:
             "max_tokens": 256,
         },
         timeout=120,
+        proxies={"http": None, "https": None},
     )
     resp.raise_for_status()
     result = resp.json()
@@ -369,12 +400,37 @@ def test_vllm(api_url: str, image_path: str) -> dict:
     }
 
 
+def test_instructsam(api_url: str, image_path: str) -> dict:
+    """POST /segment — InstructSAM instruction-based segmentation and counting."""
+    resp = requests.post(
+        f"{api_url}/segment",
+        json={
+            "image_path":  image_path,
+            "text_prompt": "Count all the objects in this image.",
+        },
+        timeout=300,
+        proxies={"http": None, "https": None},
+    )
+    resp.raise_for_status()
+    result = resp.json()
+    count  = result.get("count", -1)
+    passed = result.get("status") == "success" and count >= 0
+    return {
+        "passed":     passed,
+        "status":     result.get("status"),
+        "count":      count,
+        "objects":    result.get("objects", [])[:5],   # 最多显示 5 个
+        "error":      result.get("error"),
+    }
+
+
 INFERENCE_FUNCS = {
-    "sam2":       test_sam2,
-    "remoteclip": test_remoteclip,
-    "remotesam":  test_remotesam,
-    "strip-rcnn": test_strip_rcnn,
-    "vllm":       test_vllm,
+    "sam2":         test_sam2,
+    "remoteclip":   test_remoteclip,
+    "remotesam":    test_remotesam,
+    "strip-rcnn":   test_strip_rcnn,
+    "vllm":         test_vllm,
+    "instructsam":  test_instructsam,
 }
 
 
@@ -461,7 +517,8 @@ def main():
         "--service",
         choices=list(SERVICES.keys()) + ["all"],
         default="all",
-        help="Which service to test (default: all).",
+        help="Which service to test (default: all). "
+             "Services: " + ", ".join(SERVICES.keys()),
     )
     parser.add_argument(
         "--image",

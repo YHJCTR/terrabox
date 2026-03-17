@@ -28,7 +28,11 @@ class SAM2ServiceManager(BaseServiceManager):
     @classmethod
     def is_running(cls):
         try:
-            return requests.get(f"{cls.API_URL}/health", timeout=1).status_code == 200
+            return requests.get(
+                f"{cls.API_URL}/health",
+                timeout=1,
+                proxies={"http": None, "https": None},
+            ).status_code == 200
         except:
             return False
 

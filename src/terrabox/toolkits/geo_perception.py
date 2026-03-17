@@ -16,17 +16,19 @@ from typing import Any, Dict, List
 from ..core.registry import ToolSpec
 import os as _os
 if _os.environ.get("TERRABOX_USE_DOCKER", "false").lower() == "true":
-    from ..utils.docker.vllm_manager import vllm_manager
-    from ..utils.docker.sam2_manager import sam2_manager
-    from ..utils.docker.remoteclip_manager import remoteclip_manager
-    from ..utils.docker.remotesam_manager import remotesam_manager
-    from ..utils.docker.strip_rcnn_manager import strip_rcnn_manager
+    from ..managers.docker.vllm_manager import vllm_manager
+    from ..managers.docker.sam2_manager import sam2_manager
+    from ..managers.docker.remoteclip_manager import remoteclip_manager
+    from ..managers.docker.remotesam_manager import remotesam_manager
+    from ..managers.docker.strip_rcnn_manager import strip_rcnn_manager
+    from ..managers.docker.instructsam_manager import instructsam_manager
 else:
-    from ..utils.vllm_manager import vllm_manager
-    from ..utils.sam2_manager import sam2_manager
-    from ..utils.remoteclip_manager import remoteclip_manager
-    from ..utils.remotesam_manager import remotesam_manager
-    from ..utils.strip_rcnn_manager import strip_rcnn_manager
+    from ..managers.vllm_manager import vllm_manager
+    from ..managers.sam2_manager import sam2_manager
+    from ..managers.remoteclip_manager import remoteclip_manager
+    from ..managers.remotesam_manager import remotesam_manager
+    from ..managers.strip_rcnn_manager import strip_rcnn_manager
+    from ..managers.instructsam_manager import instructsam_manager
 logger = logging.getLogger(__name__)
 
 # --- Helpers ---
@@ -135,7 +137,13 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
     }
 
     try:
-        response = requests.post(api_url, headers={"Content-Type": "application/json"}, json=payload, timeout=300)
+        response = requests.post(
+            api_url,
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            timeout=300,
+            proxies={"http": None, "https": None},
+        )
         if response.status_code == 200:
             res_json = response.json()
             content = res_json['choices'][0]['message']['content']
@@ -177,8 +185,11 @@ def sam2_segment_handler(arguments: Dict[str, Any], context: Any, account: Any) 
         api_url = f"{sam2_manager.API_URL}/segment"
         payload = {"image_path": clean_path}
         
-        response = requests.post(api_url, json=payload, timeout=60)
-        
+        response = requests.post(
+            api_url, json=payload, timeout=60,
+            proxies={"http": None, "https": None},
+        )
+
         if response.status_code == 200:
             result = response.json()
 
@@ -308,7 +319,10 @@ def remoteclip_analysis_handler(arguments: Dict[str, Any], context: Any, account
         }
 
         print(f"Sending payload: {payload}")
-        response = requests.post(api_url, json=payload, timeout=120)
+        response = requests.post(
+            api_url, json=payload, timeout=120,
+            proxies={"http": None, "https": None},
+        )
 
         if response.status_code == 200:
             result = response.json()
@@ -354,7 +368,10 @@ def strip_rcnn_handler(arguments: Dict[str, Any], context: Any, account: Any) ->
             "score_threshold": score_threshold
         }
 
-        response = requests.post(api_url, json=payload, timeout=120)
+        response = requests.post(
+            api_url, json=payload, timeout=120,
+            proxies={"http": None, "https": None},
+        )
 
         if response.status_code == 200:
             result = response.json()
@@ -419,7 +436,10 @@ def remotesam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> 
             "classnames": classnames
         }
 
-        response = requests.post(api_url, json=payload, timeout=120)
+        response = requests.post(
+            api_url, json=payload, timeout=120,
+            proxies={"http": None, "https": None},
+        )
         print(payload)
         if response.status_code == 200:
             result = response.json()
@@ -433,7 +453,61 @@ def remotesam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> 
 
     except Exception as e:
         return {"status": "error", "message": f"Connection failed: {str(e)}"}
-def instructsam_handler(args, ctx, acc): return mock_model_handler("InstructSAM", args)        
+def instructsam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """
+    Handler for InstructSAM — instruction-based segmentation and counting.
+    Pipeline: SAM2 mask proposals → Qwen2.5-VL counting → CLIP matching.
+    """
+    image_path  = arguments.get("image") or arguments.get("image_path")
+    text_prompt = arguments.get("text_prompt", "objects in the image")
+
+    if not image_path:
+        return {"status": "error", "message": "Missing image parameter."}
+
+    clean_path = str(image_path).strip()
+    if not os.path.exists(clean_path):
+        return {"status": "error", "message": f"Image not found: {clean_path}"}
+
+    try:
+        instructsam_manager.start_service()
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to start InstructSAM Service: {str(e)}"}
+
+    try:
+        api_url = f"{instructsam_manager.API_URL}/segment"
+        payload = {
+            "image_path":  clean_path,
+            "text_prompt": text_prompt,
+        }
+        response = requests.post(
+            api_url, json=payload, timeout=300,
+            proxies={"http": None, "https": None},
+        )
+
+        if response.status_code == 200:
+            result = response.json()
+            count      = result.get("count", 0)
+            objects    = result.get("objects", [])
+            detections = result.get("detections", [])
+            vis_b64    = result.get("visualization", "")
+
+            md_text = f"InstructSAM found **{count}** object(s) matching '{text_prompt}'.\n\n"
+            if vis_b64:
+                md_text += f"![InstructSAM Result]({vis_b64})"
+
+            return {
+                "status":     "success",
+                "count":      count,
+                "objects":    objects,
+                "detections": detections,
+                "output":     md_text,
+            }
+        else:
+            return {"status": "error", "message": f"InstructSAM API Error: {response.text}"}
+
+    except Exception as e:
+        return {"status": "error", "message": f"Connection failed: {str(e)}"}
+
 
     
 # --- Tool Registration ---

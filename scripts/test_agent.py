@@ -12,9 +12,12 @@ Usage:
     python scripts/test_agent.py --base-url http://127.0.0.1:8000
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
+from typing import Optional
 
 import requests
 
@@ -53,7 +56,7 @@ def send_agent_chat(
     token: str,
     prompt: str,
     image_path: str,
-    session_id: str | None = None,
+    session_id: Optional[str] = None,
 ) -> dict:
     """POST /v1/gui/agent/chat with multipart form data."""
     url = f"{base_url}/v1/gui/agent/chat"

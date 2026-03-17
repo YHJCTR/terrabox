@@ -215,26 +215,8 @@ def calculate_wri_handler(arguments: Dict[str, Any], context: Any, account: Any)
 
 
 # ------------------------------------------------------------------------------
-# Advanced Analysis (FRP, TVDI, Snow)
+# Advanced Analysis (TVDI, Snow)
 # ------------------------------------------------------------------------------
-
-def calculate_frp_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
-    """Calculate Fire Radiative Power (FRP) mask based on threshold."""
-    rasterio, np = _lazy_imports()
-
-    input_path = arguments["input_path"]
-    output_path = arguments["output_path"]
-    threshold = float(arguments.get("threshold", 0.0))
-
-    with rasterio.open(input_path) as src:
-        data = src.read(1).astype(np.float32)
-        profile = src.profile
-
-    fire_mask = (data > threshold).astype(np.uint8) * 255
-
-    _save_raster(output_path, fire_mask, profile, dtype=rasterio.uint8, nodata=0)
-    return {"output_path": output_path}
-
 
 def compute_tvdi_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """
@@ -323,6 +305,259 @@ def calc_snow_loss_stats_handler(arguments: Dict[str, Any], context: Any, accoun
     percentage = float(loss_count / valid.size)
 
     return {"percentage": percentage, "total_pixels": int(valid.size), "loss_pixels": int(loss_count)}
+
+
+# ------------------------------------------------------------------------------
+# Raster Statistics & Arithmetic
+# ------------------------------------------------------------------------------
+
+def raster_stats_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """
+    Compute descriptive statistics for a single-band raster.
+    Returns mean, std, min, max, median, sum (ignoring nodata/NaN).
+    If `stat` is specified, returns only that statistic.
+    """
+    rasterio, np = _lazy_imports()
+
+    input_path = arguments["input_path"]
+    stat = arguments.get("stat")  # optional: "mean"|"std"|"min"|"max"|"median"|"sum"
+    band = int(arguments.get("band", 1))
+
+    with rasterio.open(input_path) as src:
+        data = src.read(band).astype(np.float32)
+        nodata = src.nodata
+
+    flat = data.flatten()
+    if nodata is not None:
+        flat = flat[flat != nodata]
+    flat = flat[np.isfinite(flat)]
+
+    if flat.size == 0:
+        return {"error": "No valid pixels found"}
+
+    stats = {
+        "mean":   float(np.nanmean(flat)),
+        "std":    float(np.nanstd(flat, ddof=1)),
+        "min":    float(np.nanmin(flat)),
+        "max":    float(np.nanmax(flat)),
+        "median": float(np.nanmedian(flat)),
+        "sum":    float(np.nansum(flat)),
+        "count":  int(flat.size),
+    }
+
+    if stat:
+        if stat not in stats:
+            raise ValueError(f"Unknown stat '{stat}'. Choose from: {list(stats.keys())}")
+        return {stat: stats[stat]}
+    return stats
+
+
+def raster_diff_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Element-wise difference between two co-registered single-band rasters (A - B) → output GeoTIFF."""
+    rasterio, np = _lazy_imports()
+
+    path_a = arguments["path_a"]
+    path_b = arguments["path_b"]
+    output_path = arguments["output_path"]
+
+    with rasterio.open(path_a) as src:
+        band_a = src.read(1).astype(np.float32)
+        profile = src.profile
+
+    with rasterio.open(path_b) as src:
+        band_b = src.read(1).astype(np.float32)
+
+    diff = band_a - band_b
+    _save_raster(output_path, diff, profile, dtype=rasterio.float32, nodata=-9999)
+    return {"output_path": output_path}
+
+
+def raster_average_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Pixel-wise average (mean) of multiple co-registered single-band rasters → output GeoTIFF."""
+    rasterio, np = _lazy_imports()
+
+    input_paths = arguments["input_paths"]
+    output_path = arguments["output_path"]
+
+    if not input_paths:
+        raise ValueError("input_paths must contain at least one file")
+
+    stack = []
+    profile = None
+    for p in input_paths:
+        with rasterio.open(p) as src:
+            stack.append(src.read(1).astype(np.float32))
+            if profile is None:
+                profile = src.profile
+
+    avg = np.nanmean(np.stack(stack, axis=0), axis=0)
+    _save_raster(output_path, avg, profile, dtype=rasterio.float32, nodata=-9999)
+    return {"output_path": output_path}
+
+
+def hotspot_percentage_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """
+    Compute the fraction of valid pixels (non-NaN, non-nodata) whose value
+    exceeds a given threshold. Returns a ratio in [0.0, 1.0].
+    """
+    rasterio, np = _lazy_imports()
+
+    input_path = arguments["input_path"]
+    threshold = float(arguments["threshold"])
+
+    with rasterio.open(input_path) as src:
+        data = src.read(1).astype(np.float32)
+        nodata = src.nodata
+
+    flat = data.flatten()
+    if nodata is not None:
+        flat = flat[flat != nodata]
+    valid = flat[np.isfinite(flat)]
+
+    if valid.size == 0:
+        return {"percentage": 0.0, "count_above": 0, "total_valid": 0}
+
+    count_above = int(np.sum(valid > threshold))
+    return {
+        "percentage": float(count_above / valid.size),
+        "count_above": count_above,
+        "total_valid": int(valid.size),
+    }
+
+
+def apply_cloud_mask_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """
+    Apply a Landsat/Sentinel QA pixel band to mask cloud and cloud-shadow pixels.
+    Masked pixels are set to nodata. Works with Landsat Collection 2 QA_PIXEL (bit 3=cloud, bit 4=shadow)
+    and Sentinel-2 SCL band (values 3,8,9,10=cloud/shadow).
+    """
+    rasterio, np = _lazy_imports()
+
+    sr_path = arguments["sr_path"]
+    qa_path = arguments["qa_path"]
+    output_path = arguments["output_path"]
+    sensor = arguments.get("sensor", "landsat").lower()  # "landsat" or "sentinel2"
+
+    with rasterio.open(sr_path) as src:
+        band = src.read(1).astype(np.float32)
+        profile = src.profile
+        nodata_val = src.nodata if src.nodata is not None else -9999
+
+    with rasterio.open(qa_path) as src:
+        qa = src.read(1)
+
+    if sensor == "sentinel2":
+        # SCL: 3=cloud shadow, 8=medium cloud, 9=high cloud, 10=cirrus
+        cloud_mask = np.isin(qa, [3, 8, 9, 10])
+    else:
+        # Landsat Collection 2 QA_PIXEL: bit3=cloud, bit4=cloud shadow
+        cloud_mask = ((qa & (1 << 3)) > 0) | ((qa & (1 << 4)) > 0)
+
+    band[cloud_mask] = nodata_val
+    _save_raster(output_path, band, profile, dtype=rasterio.float32, nodata=nodata_val)
+
+    masked_count = int(np.sum(cloud_mask))
+    return {"output_path": output_path, "masked_pixels": masked_count}
+
+
+def get_percentile_value_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Return the pixel value at a given percentile in a single-band raster (ignoring nodata/NaN)."""
+    rasterio, np = _lazy_imports()
+
+    input_path = arguments["input_path"]
+    percentile = float(arguments["percentile"])
+    band = int(arguments.get("band", 1))
+
+    if not (0 <= percentile <= 100):
+        raise ValueError("percentile must be in [0, 100]")
+
+    with rasterio.open(input_path) as src:
+        data = src.read(band).astype(np.float32)
+        nodata = src.nodata
+
+    flat = data.flatten()
+    if nodata is not None:
+        flat = flat[flat != nodata]
+    valid = flat[np.isfinite(flat)]
+
+    if valid.size == 0:
+        return {"error": "No valid pixels found"}
+
+    value = float(np.percentile(valid, percentile))
+    return {"percentile": percentile, "value": value}
+
+
+# ------------------------------------------------------------------------------
+# Raster Utilities (Threshold, Counting, Skeletonization)
+# ------------------------------------------------------------------------------
+
+def threshold_segmentation_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """
+    Binary threshold segmentation on a single-band raster image.
+    Pixels > threshold → 255 (foreground); others → 0 (background).
+    """
+    rasterio, np = _lazy_imports()
+
+    input_path = arguments["input_path"]
+    threshold = float(arguments["threshold"])
+    output_path = arguments["output_path"]
+
+    with rasterio.open(input_path) as src:
+        image = src.read(1).astype(np.float32)
+        profile = src.profile
+
+    binary_image = (image > threshold).astype(np.uint8) * 255
+
+    _save_raster(output_path, binary_image, profile, dtype=rasterio.uint8, nodata=0)
+    return {"output_path": output_path}
+
+
+def count_above_threshold_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Count pixels in a single-band raster whose values exceed a given threshold."""
+    rasterio, np = _lazy_imports()
+
+    input_path = arguments["input_path"]
+    threshold = float(arguments["threshold"])
+
+    with rasterio.open(input_path) as src:
+        data = src.read(1).astype(np.float32)
+
+    count = int(np.sum(data > threshold))
+    return {"count": count}
+
+
+def count_skeleton_contours_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """
+    Read a binary image, apply erosion and skeletonization,
+    then count external contours in the skeletonized result.
+    Requires: opencv-python-headless, scikit-image.
+    """
+    try:
+        import cv2
+        import numpy as np
+        from skimage.morphology import skeletonize
+    except ImportError:
+        raise ImportError(
+            "Missing dependencies for count_skeleton_contours. "
+            "Install: pip install opencv-python-headless scikit-image"
+        )
+
+    image_path = arguments["image_path"]
+
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        raise FileNotFoundError(f"Failed to read image: {image_path}")
+
+    _, binary = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
+
+    kernel = np.ones((3, 3), np.uint8)
+    eroded = cv2.erode(binary, kernel, iterations=1)
+
+    skeleton = skeletonize(eroded > 0)
+    skeleton_uint8 = (skeleton * 255).astype(np.uint8)
+
+    contours, _ = cv2.findContours(skeleton_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return {"count": len(contours)}
 
 
 # ------------------------------------------------------------------------------
@@ -428,27 +663,7 @@ def setup(registrar):
         calculate_wri_handler,
     )
 
-    # 5. FRP
-    registrar.tool(
-        ToolSpec(
-            slug="geo_raster.calculate_frp_mask",
-            name="Calculate FRP Mask",
-            description="Generate Fire Radiative Power (FRP) binary mask based on threshold.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "input_path": {"type": "string", "description": "Path to FRP raster."},
-                    "output_path": {"type": "string", "description": "Output mask path."},
-                    "threshold": {"type": "number", "default": 0.0}
-                },
-                "required": ["input_path", "output_path"]
-            },
-            requires_connection=False
-        ),
-        calculate_frp_handler,
-    )
-
-    # 6. TVDI
+    # 5. TVDI
     registrar.tool(
         ToolSpec(
             slug="geo_raster.compute_tvdi",
@@ -484,4 +699,193 @@ def setup(registrar):
             requires_connection=False
         ),
         calc_snow_loss_stats_handler,
+    )
+
+    # 8. Threshold Segmentation
+    registrar.tool(
+        ToolSpec(
+            slug="geo_raster.threshold_segmentation",
+            name="Threshold Segmentation",
+            description="Binary threshold segmentation on a single-band raster. Pixels > threshold → 255; others → 0. Also serves as a general-purpose binary mask, e.g. for Fire Radiative Power (FRP) hotspot masking.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "input_path": {"type": "string", "description": "Path to input single-band raster."},
+                    "threshold": {"type": "number", "description": "Pixel intensity threshold."},
+                    "output_path": {"type": "string", "description": "Output GeoTIFF path for binary mask."}
+                },
+                "required": ["input_path", "threshold", "output_path"]
+            },
+            requires_connection=False
+        ),
+        threshold_segmentation_handler,
+    )
+
+    # 9. Count Above Threshold
+    registrar.tool(
+        ToolSpec(
+            slug="geo_raster.count_above_threshold",
+            name="Count Pixels Above Threshold",
+            description="Count the number of pixels in a single-band raster whose values exceed a given threshold.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "input_path": {"type": "string", "description": "Path to input raster (GeoTIFF or raster format)."},
+                    "threshold": {"type": "number", "description": "Threshold value; pixels strictly greater than this are counted."}
+                },
+                "required": ["input_path", "threshold"]
+            },
+            requires_connection=False
+        ),
+        count_above_threshold_handler,
+    )
+
+    # 10. Count Skeleton Contours
+    registrar.tool(
+        ToolSpec(
+            slug="geo_raster.count_skeleton_contours",
+            name="Count Skeleton Contours",
+            description="Apply erosion and skeletonization to a binary image, then count external contours. Useful for counting elongated or network-like objects.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "image_path": {"type": "string", "description": "Path to input binary (black-and-white) image."}
+                },
+                "required": ["image_path"]
+            },
+            requires_connection=False
+        ),
+        count_skeleton_contours_handler,
+    )
+
+    # 11. Raster Stats
+    registrar.tool(
+        ToolSpec(
+            slug="geo_raster.raster_stats",
+            name="Raster Statistics",
+            description="Compute descriptive statistics (mean, std, min, max, median, sum) for a single-band raster, ignoring nodata and NaN. Use `stat` to request only one statistic.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "input_path": {"type": "string", "description": "Path to input raster."},
+                    "band": {"type": "integer", "default": 1, "description": "Band index (1-based). Default 1."},
+                    "stat": {
+                        "type": "string",
+                        "enum": ["mean", "std", "min", "max", "median", "sum", "count"],
+                        "description": "Optional: return only this statistic. Omit to return all."
+                    }
+                },
+                "required": ["input_path"]
+            },
+            requires_connection=False
+        ),
+        raster_stats_handler,
+    )
+
+    # 12. Raster Diff
+    registrar.tool(
+        ToolSpec(
+            slug="geo_raster.raster_diff",
+            name="Raster Difference",
+            description="Compute element-wise difference (A - B) between two co-registered single-band rasters and save the result as a GeoTIFF.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path_a": {"type": "string", "description": "Path to raster A (minuend)."},
+                    "path_b": {"type": "string", "description": "Path to raster B (subtrahend)."},
+                    "output_path": {"type": "string", "description": "Output GeoTIFF path."}
+                },
+                "required": ["path_a", "path_b", "output_path"]
+            },
+            requires_connection=False
+        ),
+        raster_diff_handler,
+    )
+
+    # 13. Raster Average
+    registrar.tool(
+        ToolSpec(
+            slug="geo_raster.raster_average",
+            name="Raster Average",
+            description="Compute the pixel-wise mean of multiple co-registered single-band rasters and save as a GeoTIFF.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "input_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of input raster file paths (must be co-registered, same extent/resolution)."
+                    },
+                    "output_path": {"type": "string", "description": "Output GeoTIFF path."}
+                },
+                "required": ["input_paths", "output_path"]
+            },
+            requires_connection=False
+        ),
+        raster_average_handler,
+    )
+
+    # 14. Hotspot Percentage
+    registrar.tool(
+        ToolSpec(
+            slug="geo_raster.hotspot_percentage",
+            name="Hotspot Percentage",
+            description="Compute the fraction of valid pixels (non-NaN, non-nodata) exceeding a threshold. Returns ratio in [0.0, 1.0]. Useful for fire hotspot area estimation, flood extent ratio, etc.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "input_path": {"type": "string", "description": "Path to input raster."},
+                    "threshold": {"type": "number", "description": "Pixels strictly greater than this value are counted as hotspots."}
+                },
+                "required": ["input_path", "threshold"]
+            },
+            requires_connection=False
+        ),
+        hotspot_percentage_handler,
+    )
+
+    # 15. Apply Cloud Mask
+    registrar.tool(
+        ToolSpec(
+            slug="geo_raster.apply_cloud_mask",
+            name="Apply Cloud Mask",
+            description="Mask cloud and cloud-shadow pixels in a surface reflectance band using a Landsat QA_PIXEL band (bit3=cloud, bit4=shadow) or Sentinel-2 SCL band (values 3/8/9/10). Masked pixels are set to nodata.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "sr_path": {"type": "string", "description": "Path to input surface reflectance band."},
+                    "qa_path": {"type": "string", "description": "Path to QA pixel / SCL band raster."},
+                    "output_path": {"type": "string", "description": "Output masked GeoTIFF path."},
+                    "sensor": {
+                        "type": "string",
+                        "enum": ["landsat", "sentinel2"],
+                        "default": "landsat",
+                        "description": "Sensor type controlling QA interpretation. Default: 'landsat'."
+                    }
+                },
+                "required": ["sr_path", "qa_path", "output_path"]
+            },
+            requires_connection=False
+        ),
+        apply_cloud_mask_handler,
+    )
+
+    # 16. Get Percentile Value
+    registrar.tool(
+        ToolSpec(
+            slug="geo_raster.get_percentile_value",
+            name="Get Percentile Value",
+            description="Return the pixel value at a given percentile (0–100) from a single-band raster, ignoring nodata and NaN.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "input_path": {"type": "string", "description": "Path to input raster."},
+                    "percentile": {"type": "number", "description": "Percentile in [0, 100], e.g. 75 for the 75th percentile."},
+                    "band": {"type": "integer", "default": 1, "description": "Band index (1-based). Default 1."}
+                },
+                "required": ["input_path", "percentile"]
+            },
+            requires_connection=False
+        ),
+        get_percentile_value_handler,
     )

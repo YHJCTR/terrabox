@@ -419,6 +419,106 @@ def analyze_hotspot_direction_handler(arguments: Dict[str, Any], context: Any, a
 
 
 # ------------------------------------------------------------------------------
+# Descriptive Statistics for Time Series
+# ------------------------------------------------------------------------------
+
+def coefficient_of_variation_handler(arguments: dict, context: dict, account=None):
+    """
+    Compute the Coefficient of Variation (CV = std / mean) for a numeric list.
+    A normalized measure of dispersion: higher CV → more variable.
+    Returns NaN if mean == 0.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        raise ImportError("numpy is required. Install: pip install numpy")
+
+    x = arguments.get("x", [])
+    ddof = int(arguments.get("ddof", 1))
+
+    arr = np.asarray(x, dtype=float)
+    mean = np.mean(arr)
+    std = np.std(arr, ddof=ddof)
+
+    cv = float("nan") if mean == 0 else float(std / mean)
+    return {"cv": cv}
+
+
+def skewness_handler(arguments: dict, context: dict, account=None):
+    """
+    Compute the skewness (distribution asymmetry) of a numeric list.
+    Positive → right tail; negative → left tail; ~0 → symmetric.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        raise ImportError("numpy is required. Install: pip install numpy")
+
+    x = arguments.get("x", [])
+    bias = bool(arguments.get("bias", True))
+
+    arr = np.asarray(x, dtype=float)
+    n = len(arr)
+    mean = np.mean(arr)
+    std = np.std(arr, ddof=0 if bias else 1)
+
+    if std == 0:
+        return {"skewness": 0.0}
+
+    m3 = np.mean((arr - mean) ** 3)
+    skew = float(m3 / std ** 3)
+
+    if not bias and n > 2:
+        skew *= float(np.sqrt(n * (n - 1))) / (n - 2)
+
+    return {"skewness": skew}
+
+
+def kurtosis_handler(arguments: dict, context: dict, account=None):
+    """
+    Compute the kurtosis (tailedness) of a numeric list.
+    With fisher=True (default) returns excess kurtosis (normal dist → 0).
+    With fisher=False returns regular kurtosis (normal dist → 3).
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        raise ImportError("numpy is required. Install: pip install numpy")
+
+    x = arguments.get("x", [])
+    fisher = bool(arguments.get("fisher", True))
+
+    arr = np.asarray(x, dtype=float)
+    mean = np.mean(arr)
+    std = np.std(arr, ddof=0)
+
+    if std == 0:
+        return {"kurtosis": 0.0}
+
+    m4 = np.mean((arr - mean) ** 4)
+    kurt = float(m4 / std ** 4)
+
+    if fisher:
+        kurt -= 3.0
+
+    return {"kurtosis": kurt}
+
+
+def percentage_change_handler(arguments: dict, context: dict, account=None):
+    """
+    Compute percentage change: (new - old) / old × 100.
+    Positive → increase; negative → decrease.
+    Returns +inf if old == 0.
+    """
+    old = float(arguments["old"])
+    new = float(arguments["new"])
+
+    if old == 0:
+        return {"percentage_change": float("inf")}
+    return {"percentage_change": float((new - old) / old * 100)}
+
+
+# ------------------------------------------------------------------------------
 # Registration
 # ------------------------------------------------------------------------------
 
@@ -624,4 +724,80 @@ def setup(registrar):
             requires_connection=False
         ),
         count_spikes_handler
+    )
+
+    # 11. Coefficient of Variation
+    registrar.tool(
+        ToolSpec(
+            slug="geoanalysis.coefficient_of_variation",
+            name="Coefficient of Variation",
+            description="Compute CV = std / mean for a numeric list. Normalized measure of dispersion useful for comparing variability across time series with different scales.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "x": {"type": "array", "items": {"type": "number"}, "description": "Input data values."},
+                    "ddof": {"type": "integer", "default": 1, "description": "Degrees of freedom for std (0=population, 1=sample). Default 1."}
+                },
+                "required": ["x"]
+            },
+            requires_connection=False
+        ),
+        coefficient_of_variation_handler
+    )
+
+    # 12. Skewness
+    registrar.tool(
+        ToolSpec(
+            slug="geoanalysis.skewness",
+            name="Skewness",
+            description="Compute the skewness (asymmetry) of a numeric list. Positive = right-tailed, negative = left-tailed, ~0 = symmetric.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "x": {"type": "array", "items": {"type": "number"}, "description": "Input data values."},
+                    "bias": {"type": "boolean", "default": True, "description": "If False, apply Fisher-Pearson bias correction. Default True."}
+                },
+                "required": ["x"]
+            },
+            requires_connection=False
+        ),
+        skewness_handler
+    )
+
+    # 13. Kurtosis
+    registrar.tool(
+        ToolSpec(
+            slug="geoanalysis.kurtosis",
+            name="Kurtosis",
+            description="Compute the kurtosis (tailedness) of a numeric list. With fisher=True (default), returns excess kurtosis where normal distribution = 0.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "x": {"type": "array", "items": {"type": "number"}, "description": "Input data values."},
+                    "fisher": {"type": "boolean", "default": True, "description": "If True (default), returns excess kurtosis (normal→0). If False, returns regular kurtosis (normal→3)."}
+                },
+                "required": ["x"]
+            },
+            requires_connection=False
+        ),
+        kurtosis_handler
+    )
+
+    # 14. Percentage Change
+    registrar.tool(
+        ToolSpec(
+            slug="geoanalysis.percentage_change",
+            name="Percentage Change",
+            description="Compute percentage change between two values: (new - old) / old × 100. Useful for quantifying temporal change in index values, area measurements, etc.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "old": {"type": "number", "description": "Original (baseline) value."},
+                    "new": {"type": "number", "description": "New (comparison) value."}
+                },
+                "required": ["old", "new"]
+            },
+            requires_connection=False
+        ),
+        percentage_change_handler
     )

@@ -8,25 +8,43 @@ RUN apt-get update && apt-get install -y \
 
 RUN pip3 install --upgrade pip
 
-RUN pip3 install "setuptools<70.0" wheel packaging
-
-RUN pip3 install "numpy==1.23.5"
-
+# PyTorch 1.13.1 + CUDA 11.7
 RUN pip3 install --no-cache-dir \
-    --progress-bar on \
     torch==1.13.1+cu117 \
     torchvision==0.14.1+cu117 \
     --extra-index-url https://download.pytorch.org/whl/cu117
 
-RUN pip3 install mmcv-full \
+# MMCV + MMDet + MMSegmentation (需要从源安装 mmcv-full)
+RUN pip3 install mmcv-full==1.7.0 \
     -f https://download.openmmlab.com/mmcv/dist/cu117/torch1.13.0/index.html
 
+# RemoteSAM 官方 requirements (按顺序安装，避免版本冲突)
 COPY RemoteSAM/requirements.txt /tmp/requirements.txt
-RUN pip3 install --no-deps -r /tmp/requirements.txt && \
-    pip3 install flask opencv-python-headless scipy scikit-learn scikit-image huggingface_hub safetensors && \
-    pip3 install "setuptools<70.0" spacy thinc && \
-    pip3 install pyyaml jsonpatch terminaltables addict yapf pytest && \
-    pip3 install Pillow sympy onnx onnxruntime ninja
+
+# 先安装不依赖 numpy 的包
+RUN pip3 install --no-deps \
+    requests filelock ftfy regex h5py tqdm yacs einops termcolor pycocotools shapely
+
+# 安装指定版本的包
+RUN pip3 install \
+    "opencv-python==4.5.5.62" \
+    "matplotlib==3.6.1" \
+    "scikit-image==0.20.0" \
+    "scipy==1.9.2" \
+    "timm==0.6.11" \
+    "tokenizers==0.13.1" \
+    "transformers==4.30.2" \
+    "Pillow" \
+    "mmdet==2.28.2" \
+    "mmsegmentation==0.17.0" \
+    "scikit-learn" \
+    "pytorch-ignite" \
+    "accelerate==0.21.0" \
+    "torchmetrics" \
+    "spacy==3.4.4"
+
+# Flask for API server
+RUN pip3 install flask importlib-resources
 
 COPY RemoteSAM /app/
 WORKDIR /app

@@ -21,6 +21,7 @@ import traceback
 import cv2
 import numpy as np
 from flask import Flask, request, jsonify
+from PIL import Image
 
 # RemoteSAM source is cloned to /app in the Dockerfile; /app is already on sys.path
 # because this script lives there. The tasks/code/model.py also appends /app itself.
@@ -47,13 +48,14 @@ except Exception as e:
 
 
 def _read_image(image_path):
-    """Read and convert image; return None if path invalid or unreadable."""
+    """Read and convert image; return PIL Image or None if path invalid or unreadable."""
     if not os.path.exists(image_path):
         return None
     img = cv2.imread(image_path)
     if img is None:
         return None
-    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    return Image.fromarray(rgb)
 
 
 @app.get("/health")

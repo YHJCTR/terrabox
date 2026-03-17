@@ -1,5 +1,7 @@
 """
 Progressive-disclosure agent: 3-level tool selection + error-retry with upper bound.
+Streaming: stream_progressive_agent() runs the graph synchronously then emits the
+final response as SSE with <think> tag separation (same SSE format as stream_agent).
 
 Discovery flow (forced sequential, not agentic):
   Level 1 — LLM sees all toolkit names + descriptions  → picks a category
@@ -376,3 +378,47 @@ def run_progressive_agent(
     final = result["messages"][-1].content
     io.info(f"[FINAL]    {final!r}")
     return final
+
+
+# ---------------------------------------------------------------------------
+# Streaming entry point for progressive mode
+# ---------------------------------------------------------------------------
+
+async def stream_progressive_agent(
+    session_id: str,
+    user_message: str,
+    image_paths: list[str],
+    user,
+    db,
+    config,
+):
+    """Async generator — SSE wrapper around run_progressive_agent().
+
+    Runs the progressive graph synchronously in a thread-pool executor (to
+    avoid blocking the event loop), then emits the final response token by
+    token with <think> tag separation.  Same SSE event format as stream_agent.
+    """
+    import asyncio
+    import json
+    from .graph import ThinkParser
+
+    loop = asyncio.get_running_loop()
+    try:
+        final = await loop.run_in_executor(
+            None,
+            run_progressive_agent,
+            session_id, user_message, image_paths, user, db, config,
+        )
+    except Exception as exc:
+        yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+        return
+
+    parser = ThinkParser()
+    for ptype, text in parser.feed(final):
+        if text:
+            yield f"data: {json.dumps({'type': ptype, 'token': text}, ensure_ascii=False)}\n\n"
+    for ptype, text in parser.flush():
+        if text:
+            yield f"data: {json.dumps({'type': ptype, 'token': text}, ensure_ascii=False)}\n\n"
+
+    yield f"data: {json.dumps({'type': 'done', 'session_id': session_id})}\n\n"

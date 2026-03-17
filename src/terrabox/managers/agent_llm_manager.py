@@ -45,7 +45,13 @@ class AgentLLMServiceManager(BaseServiceManager):
     @classmethod
     def is_running(cls) -> bool:
         try:
-            resp = requests.get(f"http://{cls.HOST}:{cls.PORT}/health", timeout=1)
+            # Use proxies={} to bypass http_proxy/https_proxy env vars which
+            # would route 127.0.0.1 requests through an external proxy and fail.
+            resp = requests.get(
+                f"http://{cls.HOST}:{cls.PORT}/ping",
+                timeout=1,
+                proxies={"http": None, "https": None},
+            )
             return resp.status_code == 200
         except Exception:
             return False
@@ -102,7 +108,7 @@ class AgentLLMServiceManager(BaseServiceManager):
         )
 
         logger.info("Waiting for Agent LLM to load model...")
-        max_retries = 120  # poll every 5 s, up to 600 s
+        max_retries = 480  # poll every 5 s, up to 2400 s (40 min)
 
         for i in range(max_retries):
             if cls.is_running():

@@ -36,7 +36,11 @@ class VLLMServiceManager(BaseServiceManager):
     def is_running(cls):
         """Check if the vLLM service is reachable via its health endpoint."""
         try:
-            resp = requests.get(f"http://{cls.HOST}:{cls.PORT}/health", timeout=1)
+            resp = requests.get(
+                f"http://{cls.HOST}:{cls.PORT}/ping",
+                timeout=1,
+                proxies={"http": None, "https": None},
+            )
             return resp.status_code == 200
         except Exception:
             return False
@@ -69,7 +73,8 @@ class VLLMServiceManager(BaseServiceManager):
             "--max-model-len", "4096",
             "--limit-mm-per-prompt", "image=8",
             "--gpu-memory-utilization", "0.9",
-            "--enforce-eager"
+            "--enforce-eager",
+            "--timeout-keep-alive", "3600",
         ]
 
         cls._process = subprocess.Popen(
@@ -80,14 +85,14 @@ class VLLMServiceManager(BaseServiceManager):
         )
 
         logger.info("Waiting for vLLM to load model...")
-        max_retries = 120
+        max_retries = 480  # poll every 5 s, up to 2400 s (40 min)
 
         for i in range(max_retries):
             if cls.is_running():
                 logger.info("vLLM service is READY!")
                 return
 
-            if i % 5 == 0:
+            if i % 6 == 0:
                 logger.info(f"Still loading... ({i * 5}s elapsed)")
 
             if cls._process.poll() is not None:
