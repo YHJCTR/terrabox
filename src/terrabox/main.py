@@ -18,7 +18,7 @@ from .routers import analytics as analytics_router
 from .routers import async_tools as async_tools_router
 from .core.background_tasks import start_background_tasks, stop_background_tasks
 from .agent.router import router as agent_router
-from .utils.base_manager import ServiceRegistry
+from .managers.base_manager import ServiceRegistry
 
 try:
     from mcp.server.sse import SseServerTransport
