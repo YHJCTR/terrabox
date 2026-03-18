@@ -10,10 +10,10 @@ import yaml
 @dataclass
 class AgentConfig:
     # LLM mode
-    use_local_llm: bool = True
     # true  = local vLLM process/container; false = remote API
-    use_docker: bool = False
+    use_local_llm: bool = True
     # false = subprocess via local conda env (default); true = Docker container
+    use_docker: bool = False
 
     # Local LLM (subprocess or Docker)
     local_llm_model_path: str = os.environ.get("AGENT_LLM_MODEL_PATH", "/data1/yuhongjie2/Earth-Agent/llm/qwen/3_8B/")
