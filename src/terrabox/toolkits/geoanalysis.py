@@ -56,68 +56,59 @@ def _lazy_raster_deps():
 # ------------------------------------------------------------------------------
 
 def _parse_input(input_data):
-    """
-    智能解析函数：能处理 List, String, JSON String, 甚至 List[String]
-    """
+    “””
+    Smart parser: handles List, String, JSON String, and even List[String].
+    “””
     if input_data is None:
         return None
 
-    # === [新增逻辑] 针对 ['[1,2,3]'] 这种“列表包字符串”的解包 ===
+    # Unwrap the single-element-list-of-string pattern, e.g. ['[1,2,3]']
     if isinstance(input_data, list):
-        # 如果列表里只有一个元素，且这个元素是字符串
         if len(input_data) == 1 and isinstance(input_data[0], str):
-            # 取出来，降级为字符串处理
-            input_data = input_data[0]  
-    # ==========================================================
+            input_data = input_data[0]
 
-    # 1. 字符串处理逻辑 (JSON 或 CSV)
+    # 1. String handling (JSON or CSV)
     if isinstance(input_data, str):
         input_data = input_data.strip()
-        # 情况 A: JSON 格式 "[1, 2, 3]"
-        if input_data.startswith("[") and input_data.endswith("]"):
+        # Case A: JSON format “[1, 2, 3]”
+        if input_data.startswith(“[“) and input_data.endswith(“]”):
             try:
                 input_data = json.loads(input_data)
             except json.JSONDecodeError:
-                # 解析失败，手动去括号分割
-                input_data = input_data.strip("[]").split(",")
-        # 情况 B: 纯逗号分隔 "1, 2, 3"
+                # JSON parse failed; strip brackets and split manually
+                input_data = input_data.strip(“[]”).split(“,”)
+        # Case B: plain comma-separated “1, 2, 3”
         else:
-            input_data = input_data.split(",")
+            input_data = input_data.split(“,”)
 
-    # 2. 统一转 float 数组
+    # 2. Convert to float array
     try:
-        # 此时 input_data 应该是一个干净的列表了，如 [1, 2, 3] 或 ['1', '2', '3']
         return np.asarray(input_data, dtype=float)
     except Exception as e:
-        # 打印出来帮助调试
-        raise ValueError(f"无法将数据转换为数字列表: {input_data}。错误: {str(e)}")
+        raise ValueError(f”Cannot convert data to numeric array: {input_data}. Error: {str(e)}”)
 
 def compute_linear_trend_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
-    """Computes the linear trend (slope and intercept) of a time series."""
-    # 假设这里引入了 numpy
-    # np, _ = _lazy_stats_deps()
-    
+    “””Computes the linear trend (slope and intercept) of a time series.”””
     try:
-        y = _parse_input(arguments.get("y"))
-        x = _parse_input(arguments.get("x"))
+        y = _parse_input(arguments.get(“y”))
+        x = _parse_input(arguments.get(“x”))
     except ValueError as e:
-        return {"success": False, "error": str(e)}
+        return {“success”: False, “error”: str(e)}
 
-    # 下面的逻辑保持不变...
     if x is None:
         x = np.arange(len(y), dtype=float)
 
     if len(x) != len(y):
         return {
-            "success": False, 
-            "error": f"x 和 y 的长度必须一致 (x: {len(x)}, y: {len(y)})"
+            “success”: False,
+            “error”: f”x and y must have the same length (x: {len(x)}, y: {len(y)})”
         }
 
     try:
         A = np.vstack([x, np.ones_like(x)]).T
         a, b = np.linalg.lstsq(A, y, rcond=None)[0]
     except Exception as e:
-        return {"success": False, "error": f"拟合计算失败: {str(e)}"}
+        return {“success”: False, “error”: f”Fitting computation failed: {str(e)}”}
 
     trend_desc = "no trend"
     if a > 1e-6:

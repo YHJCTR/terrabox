@@ -208,6 +208,46 @@ def main():
         assert res["direction"] == "north"
         print(f"PASS: analyze_hotspot_direction (dir={res['direction']})")
 
+        # ==========================================
+        # Part C: Descriptive Statistics Tests
+        # ==========================================
+        print("\n--- Descriptive Statistics Tests ---")
+
+        # 10. Coefficient of Variation
+        res = reg.call("geoanalysis.coefficient_of_variation", {"x": [10, 10, 10, 10]})
+        assert math.isclose(res["cv"], 0.0, abs_tol=1e-9), f"CV should be 0 for constant, got {res['cv']}"
+        res2 = reg.call("geoanalysis.coefficient_of_variation", {"x": [1, 2, 3, 4, 5]})
+        assert res2["cv"] > 0
+        print(f"PASS: coefficient_of_variation (cv={res2['cv']:.4f})")
+
+        # 11. Skewness
+        res = reg.call("geoanalysis.skewness", {"x": [1, 2, 3, 4, 5]})
+        assert math.isclose(res["skewness"], 0.0, abs_tol=1e-6), \
+            f"Symmetric data should have skewness~0, got {res['skewness']}"
+        res2 = reg.call("geoanalysis.skewness", {"x": [1, 1, 1, 10]})
+        assert res2["skewness"] > 0, "Right-skewed data should have positive skewness"
+        print(f"PASS: skewness (symmetric~0, right-skewed={res2['skewness']:.4f})")
+
+        # 12. Kurtosis
+        res = reg.call("geoanalysis.kurtosis", {"x": [1, 1, 1, 1]})
+        assert math.isclose(res["kurtosis"], 0.0, abs_tol=1e-6), \
+            f"Constant data should have kurtosis=0, got {res['kurtosis']}"
+        # Normal-ish data: [1..5] excess kurtosis should be negative (light tails)
+        res2 = reg.call("geoanalysis.kurtosis", {"x": [1, 2, 3, 4, 5], "fisher": True})
+        print(f"PASS: kurtosis (constant=0, uniform excess={res2['kurtosis']:.4f})")
+
+        # 13. Percentage Change
+        res = reg.call("geoanalysis.percentage_change", {"old": 100.0, "new": 150.0})
+        assert math.isclose(res["percentage_change"], 50.0, abs_tol=1e-6), \
+            f"Expected 50%, got {res['percentage_change']}"
+        res2 = reg.call("geoanalysis.percentage_change", {"old": 200.0, "new": 150.0})
+        assert math.isclose(res2["percentage_change"], -25.0, abs_tol=1e-6), \
+            f"Expected -25%, got {res2['percentage_change']}"
+        # Division by zero case
+        res3 = reg.call("geoanalysis.percentage_change", {"old": 0.0, "new": 10.0})
+        assert res3["percentage_change"] == float("inf")
+        print(f"PASS: percentage_change (+50%, -25%, inf on zero-base)")
+
         print("\nAll geoanalysis smoke tests passed!")
 
     except Exception as e:

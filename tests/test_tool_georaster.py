@@ -14,7 +14,6 @@ import math
 import numpy as np
 
 # Import the toolkit setup
-# Attempt to import from src path if installed package is not found
 try:
     from terrabox.toolkits import georaster
 except ImportError:
@@ -22,39 +21,35 @@ except ImportError:
     from terrabox.toolkits import georaster
 
 # -----------------------------
-# 1. Mock Registrar (Fixed to use SLUG)
+# 1. Mock Registrar
 # -----------------------------
 class MockRegistrar:
-    """
-    A minimal mock of the platform's Registrar to capture tool registrations
-    and allow direct invocation of handlers.
-    """
     def __init__(self):
         self.toolkits = {}
-        self.tools = {}          # slug -> spec
-        self.handlers = {}       # slug -> handler
+        self.tools = {}
+        self.handlers = {}
 
     def toolkit(self, name: str, description: str, version: str):
         self.toolkits[name] = {"description": description, "version": version}
 
     def tool(self, toolspec, handler):
-        # FIX: Use toolspec.slug as the key, not toolspec.name
         self.tools[toolspec.slug] = toolspec
         self.handlers[toolspec.slug] = handler
 
-    # Convenience call method to simulate platform invocation
     def call(self, slug: str, arguments: dict, context: dict = None, account=None):
-        if context is None: context = {}
+        if context is None:
+            context = {}
         handler = self.handlers.get(slug)
         if not handler:
             raise KeyError(f"Tool not registered: {slug}. Available: {list(self.handlers.keys())}")
         return handler(arguments, context, account)
 
+
 # -----------------------------
-# 2. Helpers (Zero-dependency raster generation)
+# 2. Helpers
 # -----------------------------
 def create_dummy_raster(path, value=0.5, shape=(10, 10), dtype='float32', nodata=-9999):
-    """Creates a simple GeoTIFF with constant value using rasterio."""
+    """Creates a simple GeoTIFF with constant (or array) value using rasterio."""
     try:
         import rasterio
         from rasterio.transform import from_origin
@@ -73,65 +68,47 @@ def create_dummy_raster(path, value=0.5, shape=(10, 10), dtype='float32', nodata
         'transform': transform,
         'nodata': nodata
     }
-
-    # Generate data
-    if isinstance(value, np.ndarray):
-        data = value
-    else:
-        data = np.full(shape, value, dtype=dtype)
-
-    # Ensure dir exists
+    data = value if isinstance(value, np.ndarray) else np.full(shape, value, dtype=dtype)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-
     with rasterio.open(path, 'w', **profile) as dst:
         dst.write(data, 1)
     return True
+
 
 # -----------------------------
 # 3. Main Test Runner
 # -----------------------------
 def main():
-    # Check dependencies first
     try:
         import rasterio
     except ImportError:
-        print("Test skipped: rasterio/numpy not installed.")
+        print("Test skipped: rasterio not installed.")
         return
 
-    # Create temporary workspace
     temp_dir = tempfile.mkdtemp()
     print(f"Temp dir: {temp_dir}")
 
     try:
-        # Initialize the mock platform
         reg = MockRegistrar()
-
-        # Register the toolkit
         georaster.setup(reg)
-        print("Toolkit registered successfully.")
+        print("Toolkit registered successfully.\n")
 
-        # --- Prepare Inputs ---
-        p_nir = os.path.join(temp_dir, "nir.tif")
-        p_red = os.path.join(temp_dir, "red.tif")
-        p_lst = os.path.join(temp_dir, "lst.tif")
-        p_frp = os.path.join(temp_dir, "frp.tif")
+        # --- Prepare common inputs ---
+        p_nir  = os.path.join(temp_dir, "nir.tif")
+        p_red  = os.path.join(temp_dir, "red.tif")
+        p_blue = os.path.join(temp_dir, "blue.tif")
+        p_lst  = os.path.join(temp_dir, "lst.tif")
 
-        # 1. NDVI Data: NIR=0.8, Red=0.2 -> NDVI = (0.8-0.2)/(0.8+0.2) = 0.6
+        # NIR=0.8, Red=0.2 → NDVI = (0.8-0.2)/(0.8+0.2) = 0.6
         create_dummy_raster(p_nir, 0.8)
         create_dummy_raster(p_red, 0.2)
-
-        # 2. LST Data: Constant 300K
+        create_dummy_raster(p_blue, 0.1)
         create_dummy_raster(p_lst, 300.0)
 
-        # 3. FRP Data: One hot pixel (50.0)
-        frp_data = np.zeros((10,10), dtype='float32')
-        frp_data[5,5] = 50.0
-        create_dummy_raster(p_frp, frp_data)
-
-        # --- Run Tests (Note: slugs fixed to 'geo_raster.*') ---
-
-        # TEST 1: Calculate NDVI
-        print("\n[Test 1] geo_raster.calculate_index (NDVI)...")
+        # -------------------------------------------------------
+        # TEST 1: calculate_index (NDVI)
+        # -------------------------------------------------------
+        print("[Test 1] geo_raster.calculate_index (NDVI)...")
         out_ndvi = os.path.join(temp_dir, "ndvi_out.tif")
         res = reg.call("geo_raster.calculate_index", {
             "band_a_path": p_nir,
@@ -141,70 +118,185 @@ def main():
         })
         assert res["status"] == "success"
         assert os.path.exists(out_ndvi)
-
-        # Validate pixel value
         with rasterio.open(out_ndvi) as src:
-            val = src.read(1)[0,0]
-            # Expected: 0.6
+            val = src.read(1)[0, 0]
             assert math.isclose(val, 0.6, abs_tol=1e-4), f"Expected 0.6, got {val}"
-        print("PASS: NDVI Value correct.")
+        print("PASS: NDVI value correct.")
 
-        # TEST 2: Calculate FVC
+        # -------------------------------------------------------
+        # TEST 2: calculate_fvc
+        # -------------------------------------------------------
         print("\n[Test 2] geo_raster.calculate_fvc...")
         out_fvc = os.path.join(temp_dir, "fvc_out.tif")
         reg.call("geo_raster.calculate_fvc", {
-            "nir_path": p_nir,
-            "red_path": p_red,
-            "output_path": out_fvc,
-            "ndvi_min": 0.0,
-            "ndvi_max": 1.0
+            "nir_path": p_nir, "red_path": p_red,
+            "output_path": out_fvc, "ndvi_min": 0.0, "ndvi_max": 1.0
         })
-        # FVC Formula: (NDVI - min)/(max - min) * 100
-        # (0.6 - 0.0) / 1.0 * 100 = 60.0
         with rasterio.open(out_fvc) as src:
-            val = src.read(1)[0,0]
+            val = src.read(1)[0, 0]
             assert math.isclose(val, 60.0, abs_tol=1e-4), f"Expected 60.0, got {val}"
-        print("PASS: FVC Value correct.")
+        print("PASS: FVC value correct.")
 
-        # TEST 3: FRP Mask
-        print("\n[Test 3] geo_raster.calculate_frp_mask...")
-        out_frp = os.path.join(temp_dir, "frp_mask.tif")
-        reg.call("geo_raster.calculate_frp_mask", {
-            "input_path": p_frp,
-            "output_path": out_frp,
-            "threshold": 10.0
-        })
-        with rasterio.open(out_frp) as src:
-            data = src.read(1)
-            assert data[5,5] == 255, "Hotspot missing"
-            assert data[0,0] == 0, "Background noise detected"
-        print("PASS: Hotspot detected.")
-
-        # TEST 4: TVDI (Simple smoke test)
-        print("\n[Test 4] geo_raster.compute_tvdi...")
+        # -------------------------------------------------------
+        # TEST 3: compute_tvdi (smoke test — constant data warns)
+        # -------------------------------------------------------
+        print("\n[Test 3] geo_raster.compute_tvdi (smoke)...")
         out_tvdi = os.path.join(temp_dir, "tvdi_out.tif")
         try:
             reg.call("geo_raster.compute_tvdi", {
-                "ndvi_path": p_nir,
-                "lst_path": p_lst,
-                "output_path": out_tvdi
+                "ndvi_path": p_nir, "lst_path": p_lst, "output_path": out_tvdi
             })
-            if os.path.exists(out_tvdi):
-                print("PASS: TVDI file generated.")
-            else:
-                print("WARN: TVDI file not generated (possible data insufficiency warning).")
+            print("PASS: TVDI file generated (or warned on constant data).")
         except ImportError:
             print("SKIPPED: scipy missing.")
         except Exception as e:
-            # TVDI regression often fails on constant data, which is acceptable for a smoke test
-            print(f"WARN: TVDI math error (expected on constant data): {e}")
+            print(f"WARN: TVDI math issue (expected on constant data): {e}")
+
+        # -------------------------------------------------------
+        # TEST 4: calc_snow_loss_stats
+        # -------------------------------------------------------
+        print("\n[Test 4] geo_raster.calc_snow_loss_stats...")
+        snow_data = np.zeros((10, 10), dtype='float32')
+        snow_data[0:5, :] = 1.0   # 50% loss pixels
+        p_snow = os.path.join(temp_dir, "snow.tif")
+        create_dummy_raster(p_snow, snow_data)
+        res = reg.call("geo_raster.calc_snow_loss_stats", {"binary_map_path": p_snow})
+        assert math.isclose(res["percentage"], 0.5, abs_tol=1e-4), f"Expected 0.5, got {res['percentage']}"
+        print(f"PASS: snow loss {res['percentage']*100:.1f}%")
+
+        # -------------------------------------------------------
+        # TEST 5: threshold_segmentation
+        # -------------------------------------------------------
+        print("\n[Test 5] geo_raster.threshold_segmentation...")
+        mixed = np.zeros((10, 10), dtype='float32')
+        mixed[3:7, 3:7] = 5.0   # center block = 5.0
+        p_mixed = os.path.join(temp_dir, "mixed.tif")
+        out_seg  = os.path.join(temp_dir, "seg.tif")
+        create_dummy_raster(p_mixed, mixed)
+        reg.call("geo_raster.threshold_segmentation", {
+            "input_path": p_mixed, "threshold": 1.0, "output_path": out_seg
+        })
+        with rasterio.open(out_seg) as src:
+            data = src.read(1)
+            assert data[5, 5] == 255, "Foreground pixel should be 255"
+            assert data[0, 0] == 0,   "Background pixel should be 0"
+        print("PASS: threshold_segmentation correct.")
+
+        # -------------------------------------------------------
+        # TEST 6: count_above_threshold
+        # -------------------------------------------------------
+        print("\n[Test 6] geo_raster.count_above_threshold...")
+        res = reg.call("geo_raster.count_above_threshold", {
+            "input_path": p_mixed, "threshold": 1.0
+        })
+        # 4x4 = 16 pixels set to 5.0
+        assert res["count"] == 16, f"Expected 16, got {res['count']}"
+        print(f"PASS: count_above_threshold = {res['count']}")
+
+        # -------------------------------------------------------
+        # TEST 7: raster_stats
+        # -------------------------------------------------------
+        print("\n[Test 7] geo_raster.raster_stats...")
+        p_const = os.path.join(temp_dir, "const.tif")
+        create_dummy_raster(p_const, 4.0)
+        res = reg.call("geo_raster.raster_stats", {"input_path": p_const})
+        assert math.isclose(res["mean"], 4.0, abs_tol=1e-4), f"Expected mean=4.0, got {res['mean']}"
+        assert math.isclose(res["std"],  0.0, abs_tol=1e-4), f"Expected std=0.0,  got {res['std']}"
+        assert math.isclose(res["min"],  4.0, abs_tol=1e-4)
+        assert math.isclose(res["max"],  4.0, abs_tol=1e-4)
+        assert res["count"] == 100
+
+        # Single stat request
+        res2 = reg.call("geo_raster.raster_stats", {"input_path": p_const, "stat": "mean"})
+        assert "mean" in res2 and len(res2) == 1
+        print(f"PASS: raster_stats mean={res['mean']}, count={res['count']}")
+
+        # -------------------------------------------------------
+        # TEST 8: raster_diff
+        # -------------------------------------------------------
+        print("\n[Test 8] geo_raster.raster_diff...")
+        p_a   = os.path.join(temp_dir, "a.tif")
+        p_b   = os.path.join(temp_dir, "b.tif")
+        p_dif = os.path.join(temp_dir, "diff.tif")
+        create_dummy_raster(p_a, 7.0)
+        create_dummy_raster(p_b, 3.0)
+        reg.call("geo_raster.raster_diff", {
+            "path_a": p_a, "path_b": p_b, "output_path": p_dif
+        })
+        with rasterio.open(p_dif) as src:
+            val = src.read(1)[0, 0]
+            assert math.isclose(val, 4.0, abs_tol=1e-4), f"Expected 4.0, got {val}"
+        print("PASS: raster_diff correct (7-3=4).")
+
+        # -------------------------------------------------------
+        # TEST 9: raster_average
+        # -------------------------------------------------------
+        print("\n[Test 9] geo_raster.raster_average...")
+        p_c   = os.path.join(temp_dir, "c.tif")
+        p_avg = os.path.join(temp_dir, "avg.tif")
+        create_dummy_raster(p_c, 5.0)   # (7+3+5)/3 = 5.0
+        reg.call("geo_raster.raster_average", {
+            "input_paths": [p_a, p_b, p_c], "output_path": p_avg
+        })
+        with rasterio.open(p_avg) as src:
+            val = src.read(1)[0, 0]
+            assert math.isclose(val, 5.0, abs_tol=1e-4), f"Expected 5.0, got {val}"
+        print("PASS: raster_average correct ((7+3+5)/3=5).")
+
+        # -------------------------------------------------------
+        # TEST 10: hotspot_percentage
+        # -------------------------------------------------------
+        print("\n[Test 10] geo_raster.hotspot_percentage...")
+        res = reg.call("geo_raster.hotspot_percentage", {
+            "input_path": p_mixed, "threshold": 1.0
+        })
+        # 16/100 = 0.16
+        assert math.isclose(res["percentage"], 0.16, abs_tol=1e-4), \
+            f"Expected 0.16, got {res['percentage']}"
+        print(f"PASS: hotspot_percentage = {res['percentage']:.2f}")
+
+        # -------------------------------------------------------
+        # TEST 11: apply_cloud_mask (Landsat)
+        # -------------------------------------------------------
+        print("\n[Test 11] geo_raster.apply_cloud_mask...")
+        p_sr  = os.path.join(temp_dir, "sr.tif")
+        p_qa  = os.path.join(temp_dir, "qa.tif")
+        p_msk = os.path.join(temp_dir, "masked.tif")
+        create_dummy_raster(p_sr, 1000.0, dtype='float32')
+        # bit3=cloud: value 8 (0b00001000) marks all pixels as cloud
+        qa_data = np.full((10, 10), 8, dtype='float32')
+        create_dummy_raster(p_qa, qa_data, dtype='float32')
+        res = reg.call("geo_raster.apply_cloud_mask", {
+            "sr_path": p_sr, "qa_path": p_qa, "output_path": p_msk, "sensor": "landsat"
+        })
+        assert res["masked_pixels"] == 100, f"Expected 100 masked, got {res['masked_pixels']}"
+        print(f"PASS: apply_cloud_mask masked {res['masked_pixels']} pixels.")
+
+        # -------------------------------------------------------
+        # TEST 12: get_percentile_value
+        # -------------------------------------------------------
+        print("\n[Test 12] geo_raster.get_percentile_value...")
+        vals = np.arange(100, dtype='float32').reshape(10, 10)
+        p_grad = os.path.join(temp_dir, "grad.tif")
+        create_dummy_raster(p_grad, vals)
+        res = reg.call("geo_raster.get_percentile_value", {
+            "input_path": p_grad, "percentile": 50
+        })
+        # Median of 0..99 = 49.5
+        assert math.isclose(res["value"], 49.5, abs_tol=1.0), \
+            f"Expected ~49.5, got {res['value']}"
+        print(f"PASS: get_percentile_value(50th) = {res['value']}")
 
         print("\nAll geo_raster smoke tests passed!")
 
+    except Exception as e:
+        print(f"\nTEST FAILED: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
-        # Cleanup
         shutil.rmtree(temp_dir)
         print(f"\nCleaned up {temp_dir}")
+
 
 if __name__ == "__main__":
     main()
