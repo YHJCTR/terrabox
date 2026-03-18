@@ -1,3 +1,28 @@
+# ── Source acquisition ────────────────────────────────────────────────────────
+# BUILD_MODE=git  (default): clone RemoteSAM from GitHub — for open-source users
+# BUILD_MODE=local:           copy pre-existing local source — for internal builds
+#
+# Usage:
+#   docker build -t terrabox/remotesam:latest .                              # git (default)
+#   docker build --build-arg BUILD_MODE=local -t terrabox/remotesam:latest . # local
+#   docker build --build-arg REMOTESAM_GIT_URL=https://mirror/RemoteSAM ...  # custom URL
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Stage 1: git clone
+FROM ubuntu:22.04 AS source_git
+ARG REMOTESAM_GIT_URL=https://github.com/xiaobdul/RemoteSAM.git
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 "$REMOTESAM_GIT_URL" /app
+
+# Stage 2: local copy (build context must contain a 'RemoteSAM' directory)
+FROM ubuntu:22.04 AS source_local
+COPY RemoteSAM /app
+
+# Stage 3: select source based on BUILD_MODE
+ARG BUILD_MODE=git
+FROM source_${BUILD_MODE} AS source
+
+# Final stage
 FROM nvidia/cuda:11.8.0-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -14,18 +39,15 @@ RUN pip3 install --no-cache-dir \
     torchvision==0.14.1+cu117 \
     --extra-index-url https://download.pytorch.org/whl/cu117
 
-# MMCV + MMDet + MMSegmentation (需要从源安装 mmcv-full)
+# MMCV + MMDet + MMSegmentation (mmcv-full must be installed from the prebuilt wheel)
 RUN pip3 install mmcv-full==1.7.0 \
     -f https://download.openmmlab.com/mmcv/dist/cu117/torch1.13.0/index.html
 
-# RemoteSAM 官方 requirements (按顺序安装，避免版本冲突)
-COPY RemoteSAM/requirements.txt /tmp/requirements.txt
-
-# 先安装不依赖 numpy 的包
+# Install packages that do not depend on numpy first
 RUN pip3 install --no-deps \
     requests filelock ftfy regex h5py tqdm yacs einops termcolor pycocotools shapely
 
-# 安装指定版本的包
+# Install pinned package versions
 RUN pip3 install \
     "opencv-python==4.5.5.62" \
     "matplotlib==3.6.1" \
@@ -46,7 +68,7 @@ RUN pip3 install \
 # Flask for API server
 RUN pip3 install flask importlib-resources
 
-COPY RemoteSAM /app/
+COPY --from=source /app /app
 WORKDIR /app
 
 COPY server.py /app/docker_server.py

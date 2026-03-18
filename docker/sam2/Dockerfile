@@ -1,3 +1,28 @@
+# ── Source acquisition ────────────────────────────────────────────────────────
+# BUILD_MODE=git  (default): clone SAM2 from GitHub — for open-source users
+# BUILD_MODE=local:           copy pre-existing local source — for internal builds
+#
+# Usage:
+#   docker build -t terrabox/sam2:latest .                                   # git (default)
+#   docker build --build-arg BUILD_MODE=local -t terrabox/sam2:latest .      # local
+#   docker build --build-arg SAM2_GIT_URL=https://mirror/sam2 ...            # custom URL
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Stage 1: git clone
+FROM ubuntu:22.04 AS source_git
+ARG SAM2_GIT_URL=https://github.com/facebookresearch/sam2.git
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 "$SAM2_GIT_URL" /sam2_src
+
+# Stage 2: local copy (build context must contain a 'sam2' directory)
+FROM ubuntu:22.04 AS source_local
+COPY sam2 /sam2_src
+
+# Stage 3: select source based on BUILD_MODE
+ARG BUILD_MODE=git
+FROM source_${BUILD_MODE} AS source
+
+# Final stage
 FROM nvidia/cuda:11.8.0-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -11,8 +36,7 @@ RUN pip3 install --upgrade pip
 # PyTorch with CUDA 11.8
 RUN pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 
-# Use local SAM2 source code (excluding checkpoints via .dockerignore)
-COPY sam2 /sam2_src
+COPY --from=source /sam2_src /sam2_src
 WORKDIR /sam2_src
 # SAM2_BUILD_CUDA=0: skip compiling the CUDA extension (connected_components.cu).
 # The extension is only used for some post-processing; inference works without it.

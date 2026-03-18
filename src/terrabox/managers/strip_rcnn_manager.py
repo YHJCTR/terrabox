@@ -13,14 +13,14 @@ class StripRCNNServiceManager(BaseServiceManager):
     _instance = None
     _process = None
 
-    STRIP_RCNN_PYTHON_EXEC = "/home/yuhongjie/miniconda3/envs/strip/bin/python"
-    SERVER_SCRIPT = "/data1/yuhongjie2/Strip-RCNN/start.py"
-    WORK_DIR = "/data1/yuhongjie2/Strip-RCNN"
-    API_URL = "http://127.0.0.1:9005"
-    GPU_DEVICES = "0"
+    STRIP_RCNN_PYTHON_EXEC = os.environ.get("STRIP_RCNN_PYTHON_EXEC", "/home/yuhongjie/miniconda3/envs/strip/bin/python")
+    SERVER_SCRIPT = os.environ.get("STRIP_RCNN_SERVER_SCRIPT", "/data1/yuhongjie2/Strip-RCNN/start.py")
+    WORK_DIR = os.environ.get("STRIP_RCNN_WORK_DIR", "/data1/yuhongjie2/Strip-RCNN")
+    API_URL = "http://127.0.0.1:" + os.environ.get("STRIP_RCNN_PORT", "9005")
+    GPU_DEVICES = os.environ.get("STRIP_RCNN_GPU_DEVICES", "0")
 
-    CONFIG_PATH = "/data1/yuhongjie2/Strip-RCNN/configs/strip_rcnn/orig/strip_rcnn_s_fpn_1x_dota_le90.py"
-    CHECKPOINT_PATH = "/data1/yuhongjie2/Strip-RCNN/ckpt/stripnet_s.pth"
+    CONFIG_PATH = os.environ.get("STRIP_RCNN_CONFIG_PATH", "/data1/yuhongjie2/Strip-RCNN/configs/strip_rcnn/orig/strip_rcnn_s_fpn_1x_dota_le90.py")
+    CHECKPOINT_PATH = os.environ.get("STRIP_RCNN_CHECKPOINT_PATH", "/data1/yuhongjie2/Strip-RCNN/ckpt/stripnet_s.pth")
 
     def __new__(cls):
         if cls._instance is None:

@@ -26,9 +26,9 @@ class AgentLLMServiceManager(BaseServiceManager):
     PORT = 9100
     API_BASE = f"http://{HOST}:{PORT}/v1"
 
-    MODEL_PATH = "/data1/yuhongjie2/Earth-Agent/llm/qwen/3_8B/"
-    GPU_DEVICES = "0"
-    TENSOR_PARALLEL_SIZE = 1
+    MODEL_PATH = os.environ.get("AGENT_LLM_MODEL_PATH", "/data1/yuhongjie2/Earth-Agent/llm/qwen/3_8B/")
+    GPU_DEVICES = os.environ.get("AGENT_LLM_GPU_DEVICES", "0")
+    TENSOR_PARALLEL_SIZE = int(os.environ.get("AGENT_LLM_TENSOR_PARALLEL_SIZE", "1"))
     MAX_MODEL_LEN = 24576
 
     # Python interpreter of the vLLM-capable conda environment

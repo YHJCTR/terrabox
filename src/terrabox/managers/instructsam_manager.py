@@ -1,7 +1,7 @@
-# instructsam_manager.py — 子进程模式（非 Docker）
-# InstructSAM 依赖较重（SAM2 + Qwen + CLIP），推荐使用 Docker 模式。
-# 本文件仅供非 Docker 环境下导入时不报错；实际启动逻辑留空，
-# 请在宿主机上手动启动 InstructSAM 服务后通过此 manager 对接。
+# instructsam_manager.py — subprocess mode (non-Docker)
+# InstructSAM has heavy dependencies (SAM2 + Qwen + CLIP); Docker mode is recommended.
+# This file exists only so that non-Docker imports succeed; startup logic is intentionally
+# left as a no-op. Start the InstructSAM service manually and connect via this manager.
 import os
 import time
 import requests

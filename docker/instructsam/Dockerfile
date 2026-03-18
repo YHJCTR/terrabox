@@ -1,6 +1,6 @@
 FROM nvidia/cuda:11.8.0-devel-ubuntu22.04
 
-# ── 系统依赖（与 sam2 镜像保持一致）──────────────────────────────────────
+# ── System dependencies (matching the sam2 image) ────────────────────────────
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     python3.10 python3-pip python3.10-dev git \
@@ -9,20 +9,22 @@ RUN apt-get update && apt-get install -y \
 
 RUN pip3 install --upgrade pip
 
-# ── PyTorch（cu118，与 sam2 镜像保持一致）──────────────────────────────────
+# ── PyTorch (cu118, matching the sam2 image) ─────────────────────────────────
 RUN pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 
-# ── 从 GitHub 克隆 InstructSAM（含 third_party/sam2）────────────────────
-RUN git clone --depth 1 https://github.com/VoyagerXvoyagerx/InstructSAM.git /app/InstructSAM
+# ── Clone InstructSAM from GitHub (includes third_party/sam2) ───────────────
+# Override with --build-arg INSTRUCTSAM_GIT_URL=https://mirror/... for a mirror
+ARG INSTRUCTSAM_GIT_URL=https://github.com/VoyagerXvoyagerx/InstructSAM.git
+RUN git clone --depth 1 "$INSTRUCTSAM_GIT_URL" /app/InstructSAM
 
-# ── 安装 SAM2（InstructSAM 依赖的原始 SAM2，非 SAM2.1）──────────────────
-# SAM2_BUILD_CUDA=0：跳过 connected_components.cu 编译，推理不需要它
+# ── Install SAM2 (the original SAM2 required by InstructSAM, not SAM2.1) ─────
+# SAM2_BUILD_CUDA=0: skip connected_components.cu compilation; not needed for inference
 RUN SAM2_BUILD_CUDA=0 pip3 install -e "/app/InstructSAM/third_party/sam2"
 
-# ── 安装 InstructSAM 包本身 ───────────────────────────────────────────────
+# ── Install the InstructSAM package itself ───────────────────────────────────
 RUN pip3 install -e "/app/InstructSAM"
 
-# ── 轻量推理依赖（计数通过 HTTP 调宿主机 vLLM，不在此加载 Qwen）────────
+# ── Lightweight inference dependencies (counting done via HTTP to host vLLM, no Qwen) ──
 RUN pip3 install \
     flask \
     open_clip_torch \
@@ -32,16 +34,16 @@ RUN pip3 install \
     Pillow \
     requests
 
-# ── 服务脚本 ──────────────────────────────────────────────────────────────
+# ── Service script ────────────────────────────────────────────────────────────
 COPY server.py /app/server.py
 WORKDIR /app
 
-# ── 运行时可覆盖的环境变量 ────────────────────────────────────────────────
+# ── Runtime-overridable environment variables ─────────────────────────────────
 ENV SAM2_CHECKPOINT="/models/sam2_hiera_large.pt"
 ENV SAM2_CONFIG="sam2_hiera_l.yaml"
 ENV CLIP_MODEL_NAME="ViT-L-14"
 ENV CLIP_CHECKPOINT="/models/GeoRSCLIP-ViT-L-14.pt"
-# 宿主机 vLLM 服务（通过 --add-host host.docker.internal:host-gateway 访问）
+# Host vLLM service (accessed via --add-host host.docker.internal:host-gateway)
 ENV VLLM_API_URL="http://host.docker.internal:9000"
 ENV VLLM_MODEL_NAME="/model"
 

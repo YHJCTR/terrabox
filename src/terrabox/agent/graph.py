@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Dedicated I/O logger — writes to a fixed file for easy inspection
 # ---------------------------------------------------------------------------
-_AGENT_LOG_PATH = os.environ.get("AGENT_LOG_PATH", "/data1/yuhongjie2/agent.log")
+_AGENT_LOG_PATH = os.environ.get("AGENT_LOG_PATH", "./agent.log")
 _io_logger: logging.Logger | None = None
 
 

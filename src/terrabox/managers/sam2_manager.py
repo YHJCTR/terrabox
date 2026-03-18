@@ -12,13 +12,13 @@ class SAM2ServiceManager(BaseServiceManager):
     _process = None
     
     # Path to the isolated Python interpreter for the SAM2 conda environment
-    SAM2_PYTHON_EXEC = "/home/yuhongjie/miniconda3/envs/sam2/bin/python"
-    SERVER_SCRIPT = "/data1/yuhongjie2/sam2/sam2_server2.py"
+    SAM2_PYTHON_EXEC = os.environ.get("SAM2_PYTHON_EXEC", "/home/yuhongjie/miniconda3/envs/sam2/bin/python")
+    SERVER_SCRIPT = os.environ.get("SAM2_SERVER_SCRIPT", "/data1/yuhongjie2/sam2/sam2_server2.py")
     # Run the subprocess from the SAM2 directory so relative imports resolve correctly
-    WORK_DIR = "/data1/yuhongjie2/sam2"
+    WORK_DIR = os.environ.get("SAM2_WORK_DIR", "/data1/yuhongjie2/sam2")
 
-    API_URL = "http://127.0.0.1:9002"
-    GPU_DEVICES = "0"
+    API_URL = "http://127.0.0.1:" + os.environ.get("SAM2_PORT", "9002")
+    GPU_DEVICES = os.environ.get("SAM2_GPU_DEVICES", "0")
 
     def __new__(cls):
         if cls._instance is None:

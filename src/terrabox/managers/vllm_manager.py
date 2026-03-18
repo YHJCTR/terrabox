@@ -24,8 +24,8 @@ class VLLMServiceManager(BaseServiceManager):
         "/home/yuhongjie/miniconda3/envs/unsloth/bin/python"
     )
 
-    GPU_DEVICES = "2,3"
-    TENSOR_PARALLEL_SIZE = 2
+    GPU_DEVICES = os.environ.get("VLM_GPU_DEVICES", "2,3")
+    TENSOR_PARALLEL_SIZE = int(os.environ.get("VLM_TENSOR_PARALLEL_SIZE", "2"))
 
     def __new__(cls):
         if cls._instance is None:

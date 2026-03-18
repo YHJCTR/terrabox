@@ -1,6 +1,34 @@
+# ── Source acquisition ────────────────────────────────────────────────────────
+# BUILD_MODE=git  (default): clone Strip-RCNN from GitHub — for open-source users
+# BUILD_MODE=local:           copy pre-existing local source — for internal builds
+#
+# Strip-RCNN is a mmrotate fork that registers StripRCNN model types;
+# installing it (setup name='mmrotate') makes 'import mmrotate' expose StripRCNN to mmdet.
+# Do NOT use the upstream open-mmlab/mmrotate here; it has no StripRCNN definitions.
+#
+# Usage:
+#   docker build -t terrabox/strip-rcnn:latest .                                  # git (default)
+#   docker build --build-arg BUILD_MODE=local -t terrabox/strip-rcnn:latest .     # local
+#   docker build --build-arg STRIP_RCNN_GIT_URL=https://mirror/Strip-RCNN ...     # custom URL
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Stage 1: git clone
+FROM ubuntu:22.04 AS source_git
+ARG STRIP_RCNN_GIT_URL=https://github.com/wjy5446/Strip-RCNN.git
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 "$STRIP_RCNN_GIT_URL" /strip_rcnn
+
+# Stage 2: local copy (build context must contain a 'Strip-RCNN' directory)
+FROM ubuntu:22.04 AS source_local
+COPY Strip-RCNN /strip_rcnn
+
+# Stage 3: select source based on BUILD_MODE
+ARG BUILD_MODE=git
+FROM source_${BUILD_MODE} AS source
+
+# Continue from final stage (re-use layers from above via BuildKit cache)
 FROM nvidia/cuda:11.8.0-devel-ubuntu22.04
 # FROM docker.m.daocloud.io/nvidia/cuda:11.8.0-devel-ubuntu22.04
-# docker.xuanyuan.me  docker.m.daocloud.io  docker.1ms.run
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
@@ -9,39 +37,20 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install --upgrade pip
-
-# torch 1.13 requires numpy < 2.0; pin it before any other install to prevent numpy 2.x
 RUN pip3 install "numpy<2.0"
-
-# mmcv/mmdet are sensitive to PyTorch version; use the verified cu117/torch1.13 combination
 RUN pip3 install \
     torch==1.13.1+cu117 \
     torchvision==0.14.1+cu117 \
     --extra-index-url https://download.pytorch.org/whl/cu117
 
-# Required CUDA architecture flags for mmcv-full compilation
 ENV FORCE_CUDA=1
 ENV TORCH_CUDA_ARCH_LIST="7.0 7.5 8.0 8.6+PTX"
 
-# Pre-built mmcv-full for cu117/torch1.13
 RUN pip3 install mmcv-full \
     -f https://download.openmmlab.com/mmcv/dist/cu117/torch1.13.0/index.html
-
 RUN pip3 install mmdet==2.28.2
 
-# Use local Strip-RCNN source code (ckpt excluded via .dockerignore).
-# Strip-RCNN is a mmrotate fork that registers StripRCNN model types;
-# installing it (setup name='mmrotate') makes 'import mmrotate' expose StripRCNN to mmdet.
-# Do NOT use the upstream open-mmlab/mmrotate here; it has no StripRCNN definitions.
-#
-# Before running docker build, copy the source into the build context:
-#   cp -r /data1/yuhongjie2/Strip-RCNN docker/strip_rcnn/Strip-RCNN
-# Or use build_models.sh which handles this automatically.
-#
-# (Alternative: git clone, but requires internet access inside the build environment)
-# RUN git clone https://github.com/someuser2026/Strip-RCNN.git /strip_rcnn
-# RUN git clone https://bgithub.xyz/someuser2026/Strip-RCNN.git /strip_rcnn  # China mirror
-COPY Strip-RCNN /strip_rcnn
+COPY --from=source /strip_rcnn /strip_rcnn
 WORKDIR /strip_rcnn
 RUN pip3 install -e .
 

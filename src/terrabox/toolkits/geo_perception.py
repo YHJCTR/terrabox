@@ -214,62 +214,7 @@ def sam2_segment_handler(arguments: Dict[str, Any], context: Any, account: Any) 
         return {"status": "error", "message": f"Connection failed: {str(e)}"}
         
         
-def mock_model_handler(model_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-    image_path = arguments.get("image") or arguments.get("image_path")
-    if not image_path:
-        return {"status": "error", "message": "Missing image parameter."}
-    
-    time.sleep(1.5)
-
-    if model_name == "MSCN":
-        return {
-            "status": "success",
-            "model": "MSCN (Crowd Counting)",
-            "count": random.randint(150, 500),
-            "density_map_path": image_path.replace(".png", "_density.jpg"),
-            "description": "Successfully estimated crowd density."
-        }
-    elif model_name == "RemoteCLIP":
-        return {
-            "status": "success", 
-            "model": "RemoteCLIP (Retrieval/Classification)",
-            "top_k_classes": ["airport", "runway", "airplane"],
-            "scores": [0.92, 0.05, 0.02]
-        }
-    elif model_name == "Strip-R-CNN":
-        return {
-            "status": "success",
-            "model": "Strip-R-CNN (Detection)",
-            "objects_detected": ["ship", "ship", "buoy"],
-            "bbox_count": 3,
-            "visualization": "path/to/fake_result.jpg"
-        }
-    elif model_name == "RemoteSAM":
-        text_prompt = arguments.get("text_prompt", "object")
-        return {
-            "status": "success",
-            "model": "RemoteSAM (Visual Grounding)",
-            "prompt": text_prompt,
-            "mask_path": "path/to/mask.png",
-            "message": f"Successfully segmented '{text_prompt}' in the image."
-        }
-    elif model_name == "InstructSAM":
-        text_prompt = arguments.get("text_prompt", "object")
-        return {
-            "status": "success",
-            "model": "InstructSAM (Counting/Segmentation)",
-            "prompt": text_prompt,
-            "count": random.randint(5, 20),
-            "message": f"Found {random.randint(5,20)} instances of '{text_prompt}'."
-        }
-    
-    return {"status": "error", "message": "Unknown model"}
-
-
 # --- Wrappers ---
-
-def mscn_handler(args, ctx, acc): return mock_model_handler("MSCN", args)
-
 
 def remoteclip_analysis_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """
@@ -570,28 +515,7 @@ def setup(registrar):
         sam2_segment_handler
     )
     
-    # 3. MSCN (Classification / Crowd Counting)
-    registrar.tool(
-        ToolSpec(
-            slug="geo_perception.mscn_classify",
-            name="MSCN Classification",
-            description="Multi-Scale Context Network for crowd counting or scene classification.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "image": {
-                        "type": "string",
-                        "description": "Image to analyze. Frontend uploads the image; backend resolves the local file path."
-                    }
-                },
-                "required": ["image"]
-            },
-            requires_connection=False
-        ),
-        mscn_handler
-    )
-
-    # 4. RemoteCLIP (Retrieval / Classification)
+    # 3. RemoteCLIP (Retrieval / Classification)
     registrar.tool(
         ToolSpec(
             slug="geo_perception.remoteclip_analysis",

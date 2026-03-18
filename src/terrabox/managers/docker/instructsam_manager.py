@@ -1,23 +1,24 @@
 """
 InstructSAM Service Manager - Docker Mode
 ==========================================
-使用 'docker run' 启动 terrabox/instructsam:latest。
-设置 TERRABOX_USE_DOCKER=true 后，geo_perception.py 会导入此文件。
+Launches terrabox/instructsam:latest via 'docker run'.
+Imported by geo_perception.py when TERRABOX_USE_DOCKER=true.
 
-Volume 挂载:
-  -v /data1:/data1                          图像文件（容器内路径相同）
-  -v ${INSTRUCTSAM_MODELS_HOST}:/models:ro  模型目录（SAM2 + CLIP，不含 Qwen）
+Volume mounts:
+  -v /data1:/data1                          image files (same path inside container)
+  -v ${INSTRUCTSAM_MODELS_HOST}:/models:ro  model directory (SAM2 + CLIP, no Qwen)
 
-模型目录结构（host 侧，默认 /data1/yuhongjie2/terra_model/instructsam）:
-  sam2_hiera_large.pt       SAM2 Hiera Large 权重
-  GeoRSCLIP-ViT-L-14.pt     GeoRSCLIP CLIP 权重
+Model directory layout (host side, default /data1/yuhongjie2/terra_model/instructsam):
+  sam2_hiera_large.pt       SAM2 Hiera Large weights
+  GeoRSCLIP-ViT-L-14.pt     GeoRSCLIP CLIP weights
 
-注：计数步骤通过 HTTP 调用宿主机 vLLM 服务（port 9000）完成，无需下载 Qwen。
+Note: the counting step calls the host vLLM service (port 9000) via HTTP; Qwen is not
+downloaded inside the container.
 
-先构建镜像:
+Build the image first:
   cd docker/instructsam && docker build -t terrabox/instructsam:latest .
 
-先下载模型:
+Download models first:
   python scripts/download_instructsam_models.py --skip-qwen
 """
 
@@ -41,7 +42,7 @@ class InstructSAMDockerManager(BaseServiceManager):
     DOCKER_IMAGE   = "terrabox/instructsam:latest"
     GPU_DEVICES    = os.environ.get("INSTRUCTSAM_GPU_DEVICES", "1")
 
-    # host 侧模型目录，挂载为容器内的 /models
+    # host-side model directory, mounted as /models inside the container
     MODELS_HOST = os.environ.get(
         "INSTRUCTSAM_MODELS_HOST",
         "/data1/yuhongjie2/terra_model/instructsam",
@@ -80,7 +81,7 @@ class InstructSAMDockerManager(BaseServiceManager):
 
         subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
 
-        # InstructSAM 只加载 SAM2 + CLIP，需要约 4 GB 显存
+        # InstructSAM loads SAM2 + CLIP only, requiring ~4 GB VRAM
         gpu = allocate_gpu(
             min_free_mib=4096,
             fallback=cls.GPU_DEVICES,
@@ -92,7 +93,7 @@ class InstructSAMDockerManager(BaseServiceManager):
             "--name", cls.CONTAINER_NAME,
             "--gpus", f"device={gpu}",
             "-p", "9006:9006",
-            # 让容器通过 host.docker.internal 访问宿主机 vLLM（port 9000）
+            # Allow the container to reach the host vLLM service (port 9000)
             "--add-host", "host.docker.internal:host-gateway",
             "-v", f"{cls.DATA_MOUNT_HOST}:{cls.DATA_MOUNT_HOST}",
             "-v", f"{cls.MODELS_HOST}:/models:ro",
@@ -113,9 +114,9 @@ class InstructSAMDockerManager(BaseServiceManager):
 
         cls._start_docker()
 
-        # SAM2(~15s) + CLIP(~5s)，无 Qwen，约 30s 即可就绪
+        # SAM2 (~15s) + CLIP (~5s), no Qwen — ready in ~30s
         logger.info("Waiting for InstructSAM service (SAM2 + CLIP loading ~30s)...")
-        max_retries = 60    # 每 2s 轮询一次，最长等 120s
+        max_retries = 60    # poll every 2s, wait up to 120s total
         for i in range(max_retries):
             if cls.is_running():
                 logger.info("InstructSAM service is READY.")

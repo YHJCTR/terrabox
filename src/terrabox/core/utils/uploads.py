@@ -8,7 +8,7 @@ from typing import List
 
 from fastapi import UploadFile
 
-UPLOAD_DIR = Path(os.getenv("TERRABOX_UPLOAD_DIR", "/data1/terrabox_uploads"))
+UPLOAD_DIR = Path(os.getenv("TERRABOX_UPLOAD_DIR", "./terrabox_uploads"))
 
 
 async def save_upload_files(files: List[UploadFile]) -> List[str]:

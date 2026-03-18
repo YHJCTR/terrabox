@@ -46,6 +46,7 @@ class VLLMDockerManager(BaseServiceManager):
     DOCKER_IMAGE = os.environ.get("VLM_DOCKER_IMAGE", "terrabox/vllm:latest")
     GPU_DEVICES = os.environ.get("VLM_GPU_DEVICES", "2,3")
     TENSOR_PARALLEL_SIZE = os.environ.get("VLM_TENSOR_PARALLEL_SIZE", "2")
+    DATA_MOUNT_HOST = os.environ.get("DATA_MOUNT_HOST", "/data1")
 
     def __new__(cls):
         if cls._instance is None:
@@ -98,7 +99,7 @@ class VLLMDockerManager(BaseServiceManager):
             "-e", f"CUDA_VISIBLE_DEVICES={gpu}",
             "-p", f"{cls.PORT}:8000",   # vllm-openai image listens on 8000 internally
             "-v", f"{cls.MODEL_PATH}:/model:ro",
-            "-v", "/data1:/data1",
+            "-v", f"{cls.DATA_MOUNT_HOST}:{cls.DATA_MOUNT_HOST}",
             "--shm-size=16g",
             cls.DOCKER_IMAGE,
             "--model", "/model",
@@ -109,7 +110,7 @@ class VLLMDockerManager(BaseServiceManager):
             "--max-model-len", "4096",
             "--gpu-memory-utilization", "0.8",
             "--enforce-eager",
-            "--allowed-local-media-path", "/data1",
+            "--allowed-local-media-path", cls.DATA_MOUNT_HOST,
         ]
 
         logger.info(f"Starting vLLM container (GPU: {gpu}, model: {cls.MODEL_PATH})...")

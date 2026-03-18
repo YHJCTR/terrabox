@@ -1,22 +1,22 @@
 """
 InstructSAM Docker Server
 ==========================
-三步推理流水线（Training-Free）:
-  1. SAM2 AutomaticMaskGenerator 生成掩码候选
-  2. 宿主机 vLLM 服务（HTTP）解析指令，预测目标类别及数量
-  3. GeoRSCLIP 计算图像-文本相似度，将标签匹配到掩码
+Training-free three-step inference pipeline:
+  1. SAM2 AutomaticMaskGenerator produces mask candidates
+  2. Host vLLM service (HTTP) parses the instruction and predicts target class/count
+  3. GeoRSCLIP computes image-text similarity to match labels to masks
 
-运行时环境变量:
-  SAM2_CHECKPOINT   SAM2 权重路径          (默认 /models/sam2_hiera_large.pt)
-  SAM2_CONFIG       SAM2 hydra config 名   (默认 sam2_hiera_l.yaml)
-  CLIP_MODEL_NAME   OpenCLIP 架构          (默认 ViT-L-14)
-  CLIP_CHECKPOINT   CLIP 权重路径          (默认 /models/GeoRSCLIP-ViT-L-14.pt)
-  VLLM_API_URL      vLLM 服务地址          (默认 http://host.docker.internal:9000)
-  VLLM_MODEL_NAME   vLLM 中的模型名        (默认 /model)
+Runtime environment variables:
+  SAM2_CHECKPOINT   SAM2 weights path      (default /models/sam2_hiera_large.pt)
+  SAM2_CONFIG       SAM2 hydra config name (default sam2_hiera_l.yaml)
+  CLIP_MODEL_NAME   OpenCLIP architecture  (default ViT-L-14)
+  CLIP_CHECKPOINT   CLIP weights path      (default /models/GeoRSCLIP-ViT-L-14.pt)
+  VLLM_API_URL      vLLM service URL       (default http://host.docker.internal:9000)
+  VLLM_MODEL_NAME   model name in vLLM     (default /model)
 
 API:
-  GET  /health    健康检查
-  POST /segment   完整推理
+  GET  /health    health check
+  POST /segment   full inference
 """
 
 import os
@@ -36,7 +36,7 @@ import requests as _http
 
 app = Flask(__name__)
 
-# ── 配置 ──────────────────────────────────────────────────────────────────────
+# ── Configuration ─────────────────────────────────────────────────────────────
 DEVICE          = os.environ.get("DEVICE",          "cuda:0")
 SAM2_CHECKPOINT = os.environ.get("SAM2_CHECKPOINT", "/models/sam2_hiera_large.pt")
 SAM2_CONFIG     = os.environ.get("SAM2_CONFIG",     "sam2_hiera_l.yaml")
@@ -45,7 +45,7 @@ CLIP_CHECKPOINT = os.environ.get("CLIP_CHECKPOINT", "/models/GeoRSCLIP-ViT-L-14.
 VLLM_API_URL    = os.environ.get("VLLM_API_URL",    "http://host.docker.internal:9000")
 VLLM_MODEL_NAME = os.environ.get("VLLM_MODEL_NAME", "/model")
 
-# ── 加载 SAM2 ─────────────────────────────────────────────────────────────────
+# ── Load SAM2 ─────────────────────────────────────────────────────────────────
 print(f"[InstructSAM] Loading SAM2 from {SAM2_CHECKPOINT} ...")
 try:
     from sam2.build_sam import build_sam2
@@ -64,7 +64,7 @@ except Exception:
     traceback.print_exc()
     sys.exit(1)
 
-# ── 加载 CLIP（GeoRSCLIP / RemoteCLIP 均为 OpenCLIP 格式）───────────────────
+# ── Load CLIP (GeoRSCLIP / RemoteCLIP both use the OpenCLIP format) ──────────
 print(f"[InstructSAM] Loading CLIP ({CLIP_MODEL_NAME}) from {CLIP_CHECKPOINT} ...")
 try:
     import open_clip
@@ -83,10 +83,10 @@ print(f"[InstructSAM] Will call vLLM at {VLLM_API_URL} for counting.")
 print("[InstructSAM] All models loaded. Server starting...")
 
 
-# ── 工具函数 ───────────────────────────────────────────────────────────────────
+# ── Utility functions ─────────────────────────────────────────────────────────
 
 def _encode_image(image_path: str) -> str:
-    """将本地图像编码为 data URI，供 vLLM 的 image_url 字段使用。"""
+    """Encode a local image file as a data URI for the vLLM image_url field."""
     mime, _ = mimetypes.guess_type(image_path)
     mime = mime or "image/jpeg"
     with open(image_path, "rb") as f:
@@ -96,8 +96,9 @@ def _encode_image(image_path: str) -> str:
 
 def _count_objects_with_vllm(image_path: str, text_prompt: str) -> dict:
     """
-    调用宿主机 vLLM（OpenAI 兼容接口）解析用户指令，返回目标类别和预测数量。
-    返回: {"count": N, "objects": ["label", ...]}
+    Call the host vLLM service (OpenAI-compatible) to parse the instruction and
+    return the predicted object categories and count.
+    Returns: {"count": N, "objects": ["label", ...]}
     """
     counting_prompt = (
         f"Look at this remote sensing image.\n"
@@ -136,7 +137,7 @@ def _count_objects_with_vllm(image_path: str, text_prompt: str) -> dict:
         print(f"[InstructSAM] vLLM call failed: {e}")
         return {"count": 0, "objects": []}
 
-    # 从输出中提取 JSON
+    # Extract JSON from the generated output
     try:
         start = generated.find("{")
         end   = generated.rfind("}") + 1
@@ -151,7 +152,7 @@ def _count_objects_with_vllm(image_path: str, text_prompt: str) -> dict:
     except Exception:
         pass
 
-    # 后备：提取第一个数字
+    # Fallback: extract the first number from the output
     nums    = re.findall(r"\b\d+\b", generated)
     count   = int(nums[0]) if nums else 0
     keyword = text_prompt.strip().split()[-1].lower()
@@ -159,7 +160,7 @@ def _count_objects_with_vllm(image_path: str, text_prompt: str) -> dict:
 
 
 def _clip_image_features(image: np.ndarray, masks: list) -> np.ndarray:
-    """为每个掩码的 bbox 裁剪区域计算 CLIP 图像特征。"""
+    """Compute CLIP image features for each mask's bounding-box crop."""
     features = []
     for m in masks:
         x, y, w, h = [int(v) for v in m["bbox"]]
@@ -177,7 +178,7 @@ def _clip_image_features(image: np.ndarray, masks: list) -> np.ndarray:
 
 
 def _clip_text_features(labels: list) -> np.ndarray:
-    """为每个标签计算 CLIP 文本特征（带遥感上下文前缀）。"""
+    """Compute CLIP text features for each label with a remote-sensing context prefix."""
     prompts = [f"a satellite image of a {lb}" for lb in labels]
     tokens  = clip_tokenizer(prompts).to(DEVICE)
     with torch.no_grad():
@@ -187,7 +188,7 @@ def _clip_text_features(labels: list) -> np.ndarray:
 
 
 def _visualize(image: np.ndarray, masks: list, labels: list) -> str:
-    """绘制掩码和标签，返回 base64 PNG data URI。"""
+    """Draw masks and labels; return a base64-encoded PNG data URI."""
     vis = image.copy().astype(np.uint8)
     rng = np.random.RandomState(42)
     for m, label in zip(masks, labels):
@@ -213,8 +214,8 @@ def health_check():
 @app.route("/segment", methods=["POST"])
 def segment():
     """
-    请求体: {"image_path": "...", "text_prompt": "...", "max_masks": 150}
-    响应体: {"status", "count", "objects", "detections", "visualization"}
+    Request body: {"image_path": "...", "text_prompt": "...", "max_masks": 150}
+    Response body: {"status", "count", "objects", "detections", "visualization"}
     """
     data        = request.json or {}
     image_path  = data.get("image_path")
@@ -230,14 +231,14 @@ def segment():
             return jsonify({"error": f"Cannot read image: {image_path}"}), 400
         image = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-        # Step 1: SAM2 生成掩码候选
+        # Step 1: SAM2 generates mask candidates
         masks = mask_generator.generate(image)
         if not masks:
             return jsonify({"status": "success", "count": 0, "objects": [],
                             "detections": [], "message": "No regions found."}), 200
         masks = sorted(masks, key=lambda x: x["area"], reverse=True)[:max_masks]
 
-        # Step 2: vLLM 解析指令
+        # Step 2: vLLM parses the instruction
         count_result = _count_objects_with_vllm(image_path, text_prompt)
         count        = count_result.get("count", 0)
         objects      = count_result.get("objects", [])
@@ -247,7 +248,7 @@ def segment():
                             "detections": [],
                             "message": f"No objects matching '{text_prompt}' found."}), 200
 
-        # Step 3: CLIP 掩码-标签匹配
+        # Step 3: CLIP mask-to-label matching
         unique_labels  = list(dict.fromkeys(objects))
         mask_feats     = _clip_image_features(image, masks)
         text_feats     = _clip_text_features(unique_labels)

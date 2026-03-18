@@ -16,13 +16,13 @@ class AgentConfig:
     # false = subprocess via local conda env (default); true = Docker container
 
     # Local LLM (subprocess or Docker)
-    local_llm_model_path: str = "/data1/yuhongjie2/Earth-Agent/llm/qwen/3_8B/"
+    local_llm_model_path: str = os.environ.get("AGENT_LLM_MODEL_PATH", "/data1/yuhongjie2/Earth-Agent/llm/qwen/3_8B/")
     local_llm_host: str = "127.0.0.1"
     local_llm_port: int = 9100
-    local_llm_gpu_devices: str = "0"
+    local_llm_gpu_devices: str = os.environ.get("AGENT_LLM_GPU_DEVICES", "0")
     local_llm_tensor_parallel: int = 1
     # Non-Docker: path to the Python interpreter with vLLM installed
-    local_llm_python_exec: str = "/home/yuhongjie/miniconda3/envs/unsloth/bin/python"
+    local_llm_python_exec: str = os.environ.get("AGENT_LLM_PYTHON_EXEC", "/home/yuhongjie/miniconda3/envs/unsloth/bin/python")
     # Docker only: image name
     local_llm_docker_image: str = "terrabox/agent-llm:latest"
 

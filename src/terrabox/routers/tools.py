@@ -201,7 +201,7 @@ def make_tools_router(config: RouterConfig) -> APIRouter:
 
         saved_paths = await save_upload_files(files)
 
-        # 写回到 image/images，并兼容旧的 image_path/image_paths 命名
+        # Write back to image/images; also populate legacy image_path/image_paths keys
         if len(saved_paths) > 1:
             inputs_dict["images"] = saved_paths
             inputs_dict["image_paths"] = saved_paths  # backward compatibility
