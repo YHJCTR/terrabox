@@ -553,12 +553,12 @@ def setup(registrar):
                 "type": "object",
                 "required": ["b02", "b05", "b17", "b18", "b19", "output_path"],
                 "properties": {
-                    "b02": {"type": "string"},
-                    "b05": {"type": "string"},
-                    "b17": {"type": "string"},
-                    "b18": {"type": "string"},
-                    "b19": {"type": "string"},
-                    "output_path": {"type": "string"}
+                    "b02": {"type": "string", "description": "Path to MODIS Band 2 (Red, 858nm) raster file"},
+                    "b05": {"type": "string", "description": "Path to MODIS Band 5 (NIR, 1240nm) raster file"},
+                    "b17": {"type": "string", "description": "Path to MODIS Band 17 (water vapor, 905nm) raster file"},
+                    "b18": {"type": "string", "description": "Path to MODIS Band 18 (water vapor, 936nm) raster file"},
+                    "b19": {"type": "string", "description": "Path to MODIS Band 19 (water vapor, 940nm) raster file"},
+                    "output_path": {"type": "string", "description": "Output raster file path (4-band: PWV, T17, T18, T19)"}
                 }
             },
             requires_connection=False
@@ -576,10 +576,10 @@ def setup(registrar):
                 "type": "object",
                 "required": ["bt_path", "red_path", "nir_path", "output_path"],
                 "properties": {
-                    "bt_path": {"type": "string"},
-                    "red_path": {"type": "string"},
-                    "nir_path": {"type": "string"},
-                    "output_path": {"type": "string"}
+                    "bt_path": {"type": "string", "description": "Path to brightness temperature raster (e.g. Landsat 8 Band 10, in Kelvin)"},
+                    "red_path": {"type": "string", "description": "Path to red band raster for NDVI-based emissivity calculation"},
+                    "nir_path": {"type": "string", "description": "Path to near-infrared band raster for NDVI-based emissivity calculation"},
+                    "output_path": {"type": "string", "description": "Output raster file path for LST result (in Kelvin)"}
                 }
             },
             requires_connection=False
@@ -596,9 +596,9 @@ def setup(registrar):
                 "type": "object",
                 "required": ["band31_path", "band32_path", "output_path"],
                 "properties": {
-                    "band31_path": {"type": "string"},
-                    "band32_path": {"type": "string"},
-                    "output_path": {"type": "string"}
+                    "band31_path": {"type": "string", "description": "Path to MODIS Band 31 (TIR, 11.03μm) raster file"},
+                    "band32_path": {"type": "string", "description": "Path to MODIS Band 32 (TIR, 12.02μm) raster file"},
+                    "output_path": {"type": "string", "description": "Output raster file path for LST result (in Kelvin)"}
                 }
             },
             requires_connection=False
@@ -615,12 +615,12 @@ def setup(registrar):
                 "type": "object",
                 "required": ["band31_path", "band32_path", "emissivity31_path", "emissivity32_path", "output_path"],
                 "properties": {
-                    "band31_path": {"type": "string"},
-                    "band32_path": {"type": "string"},
-                    "emissivity31_path": {"type": "string"},
-                    "emissivity32_path": {"type": "string"},
-                    "parameter": {"type": "string", "default": "LST"},
-                    "output_path": {"type": "string"}
+                    "band31_path": {"type": "string", "description": "Path to MODIS Band 31 (TIR, 11.03μm) raster file"},
+                    "band32_path": {"type": "string", "description": "Path to MODIS Band 32 (TIR, 12.02μm) raster file"},
+                    "emissivity31_path": {"type": "string", "description": "Path to Band 31 emissivity raster (raw integer, scaled: value * 0.002 + 0.49)"},
+                    "emissivity32_path": {"type": "string", "description": "Path to Band 32 emissivity raster (raw integer, scaled: value * 0.002 + 0.49)"},
+                    "parameter": {"type": "string", "default": "LST", "description": "Output parameter type: 'LST' (land surface temperature) or 'PWV' (precipitable water vapor)"},
+                    "output_path": {"type": "string", "description": "Output raster file path"}
                 }
             },
             requires_connection=False
@@ -639,10 +639,11 @@ def setup(registrar):
                 "properties": {
                     "tir_band_paths": {
                         "type": "array",
-                        "items": {"type": "string"}
+                        "items": {"type": "string"},
+                        "description": "List of paths to thermal infrared band rasters (at least 2 bands required)"
                     },
-                    "representative_band_index": {"type": "integer", "default": 0},
-                    "output_path": {"type": "string"}
+                    "representative_band_index": {"type": "integer", "default": 0, "description": "Index (0-based) of the reference band used for final LST calculation"},
+                    "output_path": {"type": "string", "description": "Output raster file path (3-band: LST, emissivity, delta_eps)"}
                 }
             },
             requires_connection=False
@@ -659,11 +660,11 @@ def setup(registrar):
                 "type": "object",
                 "required": ["bt_day", "bt_night", "emis_day", "emis_night", "output_path"],
                 "properties": {
-                    "bt_day": {"type": "string"},
-                    "bt_night": {"type": "string"},
-                    "emis_day": {"type": "string"},
-                    "emis_night": {"type": "string"},
-                    "output_path": {"type": "string"}
+                    "bt_day": {"type": "string", "description": "Path to daytime MODIS brightness temperature raster (in Kelvin)"},
+                    "bt_night": {"type": "string", "description": "Path to nighttime MODIS brightness temperature raster (in Kelvin)"},
+                    "emis_day": {"type": "string", "description": "Path to daytime emissivity raster (raw integer, scaled: value * 0.002 + 0.49)"},
+                    "emis_night": {"type": "string", "description": "Path to nighttime emissivity raster (raw integer, scaled: value * 0.002 + 0.49)"},
+                    "output_path": {"type": "string", "description": "Output raster file path (6-band: LST_day, LST_night, BT_day, BT_night, emis_day, emis_night)"}
                 }
             },
             requires_connection=False
@@ -682,9 +683,10 @@ def setup(registrar):
                 "properties": {
                     "tir_band_paths": {
                         "type": "array",
-                        "items": {"type": "string"}
+                        "items": {"type": "string"},
+                        "description": "List of paths to 3 thermal infrared band rasters for the Three-Temperature Method"
                     },
-                    "output_path": {"type": "string"}
+                    "output_path": {"type": "string", "description": "Output raster file path (3-band: LST, emissivity_band1, emissivity_band2)"}
                 }
             },
             requires_connection=False
@@ -702,12 +704,12 @@ def setup(registrar):
                 "type": "object",
                 "required": ["red_path", "nir_path", "lst_path"],
                 "properties": {
-                    "red_path": {"type": "string"},
-                    "nir_path": {"type": "string"},
-                    "lst_path": {"type": "string"},
-                    "threshold": {"type": "number", "default": 0.3},
-                    "mode": {"type": "string", "default": "above"},
-                    "stat": {"type": "string", "default": "mean"}
+                    "red_path": {"type": "string", "description": "Path to red band raster for NDVI calculation"},
+                    "nir_path": {"type": "string", "description": "Path to near-infrared band raster for NDVI calculation"},
+                    "lst_path": {"type": "string", "description": "Path to Land Surface Temperature raster (in Kelvin)"},
+                    "threshold": {"type": "number", "default": 0.3, "description": "NDVI threshold value for pixel selection (default: 0.3)"},
+                    "mode": {"type": "string", "default": "above", "description": "Selection mode: 'above' to select pixels with NDVI >= threshold, 'below' for NDVI < threshold"},
+                    "stat": {"type": "string", "default": "mean", "description": "Statistic to compute: 'mean' or 'max'"}
                 }
             },
             requires_connection=False
@@ -725,10 +727,10 @@ def setup(registrar):
                 "type": "object",
                 "required": ["day_temp_path", "night_temp_path", "albedo_path", "output_path"],
                 "properties": {
-                    "day_temp_path": {"type": "string"},
-                    "night_temp_path": {"type": "string"},
-                    "albedo_path": {"type": "string"},
-                    "output_path": {"type": "string"}
+                    "day_temp_path": {"type": "string", "description": "Path to daytime surface temperature raster (in Kelvin)"},
+                    "night_temp_path": {"type": "string", "description": "Path to nighttime surface temperature raster (in Kelvin)"},
+                    "albedo_path": {"type": "string", "description": "Path to surface albedo raster (dimensionless, range 0–1)"},
+                    "output_path": {"type": "string", "description": "Output raster file path for Apparent Thermal Inertia values"}
                 }
             },
             requires_connection=False
@@ -746,13 +748,13 @@ def setup(registrar):
                 "type": "object",
                 "required": ["pol1_path", "pol2_path", "output_path"],
                 "properties": {
-                    "pol1_path": {"type": "string"},
-                    "pol2_path": {"type": "string"},
-                    "parameter": {"type": "string", "default": "soil_moisture"},
-                    "a": {"type": "number", "default": 0.3},
-                    "b": {"type": "number", "default": 0.1},
-                    "input_unit": {"type": "string", "default": "dB"},
-                    "output_path": {"type": "string"}
+                    "pol1_path": {"type": "string", "description": "Path to first polarization microwave brightness temperature raster (e.g. V-pol)"},
+                    "pol2_path": {"type": "string", "description": "Path to second polarization microwave brightness temperature raster (e.g. H-pol)"},
+                    "parameter": {"type": "string", "default": "soil_moisture", "description": "Target parameter: 'soil_moisture' or 'vegetation_index'"},
+                    "a": {"type": "number", "default": 0.3, "description": "Empirical coefficient 'a' in the linear model (default: 0.3)"},
+                    "b": {"type": "number", "default": 0.1, "description": "Empirical offset 'b' in the linear model (default: 0.1)"},
+                    "input_unit": {"type": "string", "default": "dB", "description": "Input data unit: 'dB' (will be converted to linear) or 'linear'"},
+                    "output_path": {"type": "string", "description": "Output raster file path for the retrieved parameter"}
                 }
             },
             requires_connection=False
@@ -769,11 +771,11 @@ def setup(registrar):
                 "type": "object",
                 "required": ["band1_path", "band2_path", "output_path"],
                 "properties": {
-                    "band1_path": {"type": "string"},
-                    "band2_path": {"type": "string"},
-                    "alpha": {"type": "number", "default": 0.7},
-                    "beta": {"type": "number", "default": 0.1},
-                    "output_path": {"type": "string"}
+                    "band1_path": {"type": "string", "description": "Path to first frequency microwave brightness temperature raster (e.g. 19 GHz)"},
+                    "band2_path": {"type": "string", "description": "Path to second frequency microwave brightness temperature raster (e.g. 37 GHz)"},
+                    "alpha": {"type": "number", "default": 0.7, "description": "Scaling coefficient for the brightness temperature difference (default: 0.7)"},
+                    "beta": {"type": "number", "default": 0.1, "description": "Offset coefficient for the retrieved parameter (default: 0.1)"},
+                    "output_path": {"type": "string", "description": "Output raster file path (2-band: BT_difference, retrieved_parameter)"}
                 }
             },
             requires_connection=False
@@ -792,17 +794,19 @@ def setup(registrar):
                 "properties": {
                     "bt_paths": {
                         "type": "array",
-                        "items": {"type": "string"}
+                        "items": {"type": "string"},
+                        "description": "List of paths to multi-frequency microwave brightness temperature rasters"
                     },
                     "diff_pairs": {
                         "type": "array",
                         "items": {
                             "type": "array",
                             "items": {"type": "integer"}
-                        }
+                        },
+                        "description": "Pairs of band indices (0-based) for difference computation, e.g. [[0,1],[1,2]]"
                     },
-                    "parameter": {"type": "string", "default": "SM"},
-                    "output_path": {"type": "string"}
+                    "parameter": {"type": "string", "default": "SM", "description": "Target parameter: 'SM' (soil moisture), 'VWC' (vegetation water content), or 'LAI' (leaf area index)"},
+                    "output_path": {"type": "string", "description": "Output raster file path for the retrieved parameter"}
                 }
             },
             requires_connection=False
@@ -822,13 +826,14 @@ def setup(registrar):
                     "bt_paths": {
                         "type": "object",
                         "properties": {
-                            "V": {"type": "string"},
-                            "H": {"type": "string"}
+                            "V": {"type": "string", "description": "Path to vertical polarization microwave brightness temperature raster"},
+                            "H": {"type": "string", "description": "Path to horizontal polarization microwave brightness temperature raster"}
                         },
-                        "required": ["V", "H"]
+                        "required": ["V", "H"],
+                        "description": "Object with 'V' and 'H' keys pointing to vertical and horizontal polarization rasters"
                     },
-                    "parameter": {"type": "string", "default": "VWC"},
-                    "output_path": {"type": "string"}
+                    "parameter": {"type": "string", "default": "VWC", "description": "Target parameter: 'VWC' (vegetation water content) or 'SM' (soil moisture)"},
+                    "output_path": {"type": "string", "description": "Output raster file path (2-band: retrieved_parameter, polarization_ratio)"}
                 }
             },
             requires_connection=False
@@ -849,14 +854,15 @@ def setup(registrar):
                     "bt_paths": {
                         "type": "object",
                         "properties": {
-                            "19V": {"type": "string"},
-                            "19H": {"type": "string"},
-                            "37V": {"type": "string"},
-                            "37H": {"type": "string"}
+                            "19V": {"type": "string", "description": "Path to 19 GHz V-pol microwave brightness temperature raster"},
+                            "19H": {"type": "string", "description": "Path to 19 GHz H-pol microwave brightness temperature raster"},
+                            "37V": {"type": "string", "description": "Path to 37 GHz V-pol microwave brightness temperature raster"},
+                            "37H": {"type": "string", "description": "Path to 37 GHz H-pol microwave brightness temperature raster"}
                         },
-                        "required": ["19V", "19H", "37V", "37H"]
+                        "required": ["19V", "19H", "37V", "37H"],
+                        "description": "Object with keys '19V', '19H', '37V', '37H' pointing to the respective microwave raster paths"
                     },
-                    "output_path": {"type": "string"}
+                    "output_path": {"type": "string", "description": "Output raster file path for sea ice concentration (0–1)"}
                 }
             },
             requires_connection=False
@@ -873,12 +879,12 @@ def setup(registrar):
                 "type": "object",
                 "required": ["input_red_path", "output_path"],
                 "properties": {
-                    "input_red_path": {"type": "string"},
-                    "method": {"type": "string", "default": "linear"},
-                    "a": {"type": "number", "default": 1.0},
-                    "b": {"type": "number", "default": 0.0},
-                    "n": {"type": "number", "default": 1.0},
-                    "output_path": {"type": "string"}
+                    "input_red_path": {"type": "string", "description": "Path to red band reflectance raster for turbidity estimation"},
+                    "method": {"type": "string", "default": "linear", "description": "Regression method: 'linear' (NTU = a*R + b), 'power' (NTU = a*R^n + b), or 'log' (NTU = a*ln(R) + b)"},
+                    "a": {"type": "number", "default": 1.0, "description": "Regression coefficient 'a' (default: 1.0)"},
+                    "b": {"type": "number", "default": 0.0, "description": "Regression offset 'b' (default: 0.0)"},
+                    "n": {"type": "number", "default": 1.0, "description": "Exponent for power-law regression (only used when method='power', default: 1.0)"},
+                    "output_path": {"type": "string", "description": "Output raster file path for turbidity in NTU"}
                 }
             },
             requires_connection=False

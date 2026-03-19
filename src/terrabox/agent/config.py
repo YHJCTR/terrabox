@@ -46,11 +46,35 @@ class AgentConfig:
     max_category_expansions: int = 2    # max expansion rounds for category_scoped mode
 
 
+_VALID_AGENT_MODES = {"standard", "progressive", "category_scoped"}
+
+
 def load_config() -> AgentConfig:
     """Load AgentConfig from agent_config.yaml (project root) or return defaults."""
+    import logging as _logging
     path = os.environ.get("AGENT_CONFIG_PATH", "agent_config.yaml")
+    data: dict = {}
     if os.path.exists(path):
-        with open(path) as f:
-            data = yaml.safe_load(f) or {}
-        return AgentConfig(**{k: v for k, v in data.items() if hasattr(AgentConfig, k)})
-    return AgentConfig()
+        try:
+            with open(path) as f:
+                data = yaml.safe_load(f) or {}
+        except Exception as exc:
+            _logging.getLogger(__name__).warning(
+                f"Failed to load agent config from {path}: {exc}. Using defaults."
+            )
+
+    config = AgentConfig(**{k: v for k, v in data.items() if hasattr(AgentConfig, k)})
+
+    if config.agent_mode not in _VALID_AGENT_MODES:
+        raise ValueError(
+            f"Invalid agent_mode {config.agent_mode!r}. "
+            f"Must be one of: {sorted(_VALID_AGENT_MODES)}"
+        )
+    if config.max_iterations <= 0:
+        raise ValueError(f"max_iterations must be > 0, got {config.max_iterations}")
+    if config.max_retries_on_error < 0:
+        raise ValueError(f"max_retries_on_error must be >= 0, got {config.max_retries_on_error}")
+    if config.max_category_expansions < 0:
+        raise ValueError(f"max_category_expansions must be >= 0, got {config.max_category_expansions}")
+
+    return config

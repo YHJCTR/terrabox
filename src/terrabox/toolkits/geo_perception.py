@@ -27,6 +27,22 @@ logger = logging.getLogger(__name__)
 
 # --- Helpers ---
 
+def _get_image_path(arguments: dict) -> str:
+    """Extract image path from arguments, trying multiple key names."""
+    path = arguments.get("image") or arguments.get("image_path")
+    if not path:
+        raise ValueError("Missing required parameter: image path (provide 'image' or 'image_path')")
+    return str(path).strip()
+
+
+def _resolve_image_path(arguments: dict) -> str:
+    """Extract and validate that the image file exists."""
+    path = _get_image_path(arguments)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Image not found: {path}")
+    return path
+
+
 def _encode_image_to_base64(image_path: str) -> str:
     """Helper: Convert local image file to data URI scheme."""
     if not os.path.exists(image_path):
@@ -167,14 +183,7 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
 
 def sam2_segment_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """Handler for SAM2 Segmentation (Full Image Box Prompt)."""
-    image_path = arguments.get("image") or arguments.get("image_path")
-    if not image_path:
-        return {"status": "error", "message": "Missing image parameter."}
-    clean_path = str(image_path).strip()
-    if clean_path.startswith("['") or clean_path.startswith('["'):
-        clean_path = clean_path[2:-2]
-    if not os.path.exists(clean_path):
-        return {"status": "error", "message": f"Image not found: {clean_path}"}
+    clean_path = _resolve_image_path(arguments)
 
     result = _call_service(sam2_manager, f"{sam2_manager.API_URL}/segment", {"image_path": clean_path}, timeout=60)
     if result.get("status") == "error":
@@ -194,8 +203,6 @@ def remoteclip_analysis_handler(arguments: Dict[str, Any], context: Any, account
     """
     Handler for RemoteCLIP Analysis.
     """
-    image_path = arguments.get("image") or arguments.get("image_path")
-
     raw_text_queries = arguments.get("text_queries")
 
     if raw_text_queries is None:
@@ -218,12 +225,7 @@ def remoteclip_analysis_handler(arguments: Dict[str, Any], context: Any, account
 
     logger.info(f"Using text_queries: {text_queries}")
 
-    if not image_path:
-        return {"status": "error", "message": "Missing image parameter."}
-
-    clean_path = str(image_path).strip()
-    if not os.path.exists(clean_path):
-        return {"status": "error", "message": f"Image not found: {clean_path}"}
+    clean_path = _resolve_image_path(arguments)
 
     result = _call_service(
         remoteclip_manager, f"{remoteclip_manager.API_URL}/analyze",
@@ -245,15 +247,8 @@ def strip_rcnn_handler(arguments: Dict[str, Any], context: Any, account: Any) ->
     """
     Handler for Strip R-CNN Detection.
     """
-    image_path = arguments.get("image") or arguments.get("image_path")
+    clean_path = _resolve_image_path(arguments)
     score_threshold = arguments.get("score_threshold", 0.3)
-
-    if not image_path:
-        return {"status": "error", "message": "Missing image parameter."}
-
-    clean_path = str(image_path).strip()
-    if not os.path.exists(clean_path):
-        return {"status": "error", "message": f"Image not found: {clean_path}"}
 
     result = _call_service(
         strip_rcnn_manager, f"{strip_rcnn_manager.API_URL}/detect",
@@ -274,13 +269,8 @@ def strip_rcnn_handler(arguments: Dict[str, Any], context: Any, account: Any) ->
 
 def remotesam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """Handler for RemoteSAM tasks."""
-    image_path = arguments.get("image") or arguments.get("image_path")
+    clean_path = _resolve_image_path(arguments)
     task_type = arguments.get("task_type")
-    if not image_path:
-        return {"status": "error", "message": "Missing image parameter."}
-    clean_path = str(image_path).strip()
-    if not os.path.exists(clean_path):
-        return {"status": "error", "message": f"Image not found: {clean_path}"}
 
     result = _call_service(
         remotesam_manager, f"{remotesam_manager.API_URL}/{task_type}",
@@ -291,13 +281,8 @@ def remotesam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> 
     return {"status": "success", "result": result, "message": f"RemoteSAM {task_type} completed."}
 def instructsam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """Handler for InstructSAM — instruction-based segmentation and counting."""
-    image_path = arguments.get("image") or arguments.get("image_path")
+    clean_path = _resolve_image_path(arguments)
     text_prompt = arguments.get("text_prompt", "objects in the image")
-    if not image_path:
-        return {"status": "error", "message": "Missing image parameter."}
-    clean_path = str(image_path).strip()
-    if not os.path.exists(clean_path):
-        return {"status": "error", "message": f"Image not found: {clean_path}"}
 
     result = _call_service(
         instructsam_manager, f"{instructsam_manager.API_URL}/segment",
