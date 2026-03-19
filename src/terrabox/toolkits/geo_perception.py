@@ -14,20 +14,15 @@ import requests
 from typing import Any, Dict, List
 from ..core.registry import ToolSpec
 
-if os.environ.get("TERRABOX_USE_DOCKER", "false").lower() == "true":
-    from ..managers.docker.vllm_manager import vllm_manager
-    from ..managers.docker.sam2_manager import sam2_manager
-    from ..managers.docker.remoteclip_manager import remoteclip_manager
-    from ..managers.docker.remotesam_manager import remotesam_manager
-    from ..managers.docker.strip_rcnn_manager import strip_rcnn_manager
-    from ..managers.docker.instructsam_manager import instructsam_manager
-else:
-    from ..managers.vllm_manager import vllm_manager
-    from ..managers.sam2_manager import sam2_manager
-    from ..managers.remoteclip_manager import remoteclip_manager
-    from ..managers.remotesam_manager import remotesam_manager
-    from ..managers.strip_rcnn_manager import strip_rcnn_manager
-    from ..managers.instructsam_manager import instructsam_manager
+from ..managers import (
+    vllm_manager,
+    sam2_manager,
+    remoteclip_manager,
+    remotesam_manager,
+    strip_rcnn_manager,
+    instructsam_manager,
+)
+
 logger = logging.getLogger(__name__)
 
 # --- Helpers ---

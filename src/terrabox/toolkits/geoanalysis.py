@@ -56,9 +56,9 @@ def _lazy_raster_deps():
 # ------------------------------------------------------------------------------
 
 def _parse_input(input_data):
-    “””
+    '''
     Smart parser: handles List, String, JSON String, and even List[String].
-    “””
+    '''
     if input_data is None:
         return None
 
@@ -70,45 +70,45 @@ def _parse_input(input_data):
     # 1. String handling (JSON or CSV)
     if isinstance(input_data, str):
         input_data = input_data.strip()
-        # Case A: JSON format “[1, 2, 3]”
-        if input_data.startswith(“[“) and input_data.endswith(“]”):
+        # Case A: JSON format "[1, 2, 3]"
+        if input_data.startswith('[') and input_data.endswith(']'):
             try:
                 input_data = json.loads(input_data)
             except json.JSONDecodeError:
                 # JSON parse failed; strip brackets and split manually
-                input_data = input_data.strip(“[]”).split(“,”)
-        # Case B: plain comma-separated “1, 2, 3”
+                input_data = input_data.strip('[]').split(',')
+        # Case B: plain comma-separated "1, 2, 3"
         else:
-            input_data = input_data.split(“,”)
+            input_data = input_data.split(',')
 
     # 2. Convert to float array
     try:
         return np.asarray(input_data, dtype=float)
     except Exception as e:
-        raise ValueError(f”Cannot convert data to numeric array: {input_data}. Error: {str(e)}”)
+        raise ValueError(f"Cannot convert data to numeric array: {input_data}. Error: {str(e)}")
 
 def compute_linear_trend_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
-    “””Computes the linear trend (slope and intercept) of a time series.”””
+    """Computes the linear trend (slope and intercept) of a time series."""
     try:
-        y = _parse_input(arguments.get(“y”))
-        x = _parse_input(arguments.get(“x”))
+        y = _parse_input(arguments.get('y'))
+        x = _parse_input(arguments.get('x'))
     except ValueError as e:
-        return {“success”: False, “error”: str(e)}
+        return {"success": False, "error": str(e)}
 
     if x is None:
         x = np.arange(len(y), dtype=float)
 
     if len(x) != len(y):
         return {
-            “success”: False,
-            “error”: f”x and y must have the same length (x: {len(x)}, y: {len(y)})”
+            "success": False,
+            "error": f"x and y must have the same length (x: {len(x)}, y: {len(y)})"
         }
 
     try:
         A = np.vstack([x, np.ones_like(x)]).T
         a, b = np.linalg.lstsq(A, y, rcond=None)[0]
     except Exception as e:
-        return {“success”: False, “error”: f”Fitting computation failed: {str(e)}”}
+        return {"success": False, "error": f"Fitting computation failed: {str(e)}"}
 
     trend_desc = "no trend"
     if a > 1e-6:
@@ -416,7 +416,7 @@ def analyze_hotspot_direction_handler(arguments: Dict[str, Any], context: Any, a
 def coefficient_of_variation_handler(arguments: dict, context: dict, account=None):
     """
     Compute the Coefficient of Variation (CV = std / mean) for a numeric list.
-    A normalized measure of dispersion: higher CV → more variable.
+    A normalized measure of dispersion: higher CV means more variable.
     Returns NaN if mean == 0.
     """
     try:
@@ -438,7 +438,7 @@ def coefficient_of_variation_handler(arguments: dict, context: dict, account=Non
 def skewness_handler(arguments: dict, context: dict, account=None):
     """
     Compute the skewness (distribution asymmetry) of a numeric list.
-    Positive → right tail; negative → left tail; ~0 → symmetric.
+    Positive means right tail; negative means left tail; ~0 means symmetric.
     """
     try:
         import numpy as np
@@ -468,8 +468,8 @@ def skewness_handler(arguments: dict, context: dict, account=None):
 def kurtosis_handler(arguments: dict, context: dict, account=None):
     """
     Compute the kurtosis (tailedness) of a numeric list.
-    With fisher=True (default) returns excess kurtosis (normal dist → 0).
-    With fisher=False returns regular kurtosis (normal dist → 3).
+    With fisher=True (default) returns excess kurtosis (normal dist means 0).
+    With fisher=False returns regular kurtosis (normal dist means 3).
     """
     try:
         import numpy as np
@@ -497,8 +497,8 @@ def kurtosis_handler(arguments: dict, context: dict, account=None):
 
 def percentage_change_handler(arguments: dict, context: dict, account=None):
     """
-    Compute percentage change: (new - old) / old × 100.
-    Positive → increase; negative → decrease.
+    Compute percentage change: (new - old) / old * 100.
+    Positive means increase; negative means decrease.
     Returns +inf if old == 0.
     """
     old = float(arguments["old"])
@@ -765,7 +765,7 @@ def setup(registrar):
                 "type": "object",
                 "properties": {
                     "x": {"type": "array", "items": {"type": "number"}, "description": "Input data values."},
-                    "fisher": {"type": "boolean", "default": True, "description": "If True (default), returns excess kurtosis (normal→0). If False, returns regular kurtosis (normal→3)."}
+                    "fisher": {"type": "boolean", "default": True, "description": "If True (default), returns excess kurtosis (normal=0). If False, returns regular kurtosis (normal=3)."}
                 },
                 "required": ["x"]
             },
@@ -779,7 +779,7 @@ def setup(registrar):
         ToolSpec(
             slug="geoanalysis.percentage_change",
             name="Percentage Change",
-            description="Compute percentage change between two values: (new - old) / old × 100. Useful for quantifying temporal change in index values, area measurements, etc.",
+            description="Compute percentage change between two values: (new - old) / old * 100. Useful for quantifying temporal change in index values, area measurements, etc.",
             parameters={
                 "type": "object",
                 "properties": {

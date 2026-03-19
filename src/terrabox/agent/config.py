@@ -37,9 +37,12 @@ class AgentConfig:
     # Agent behavior
     max_iterations: int = 15
 
-    # Progressive disclosure mode
-    enable_progressive_disclosure: bool = False  # if True, use 3-level tool discovery
-    max_retries_on_error: int = 3                # max rethink attempts before giving up
+    # Tool loading strategy: "standard" | "progressive" | "category_scoped"
+    #   standard        — load all tools at once (full ReAct)
+    #   progressive     — 3-level discovery, single-tool execution with retry
+    #   category_scoped — LLM picks categories first, then full ReAct on subset
+    agent_mode: str = "standard"
+    max_retries_on_error: int = 3  # retries for progressive mode
 
 
 def load_config() -> AgentConfig:

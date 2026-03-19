@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+
 from typing import Annotated, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -245,8 +245,8 @@ def _make_execution_node(llm, user):
         # Extract only NEW messages produced by the mini-agent
         new_messages = result["messages"][len(exec_messages):]
 
-        from .graph import _log_messages
-        _log_messages(io, new_messages)
+        from .session import log_messages
+        log_messages(io, new_messages)
 
         # Detect soft error (handler returned an error string)
         final_content = result["messages"][-1].content if result["messages"] else ""
@@ -314,20 +314,17 @@ def run_progressive_agent(
 ) -> str:
     """
     Run the progressive-disclosure agent.
-    Drop-in replacement for run_agent(); selected via AgentConfig.enable_progressive_disclosure.
+    Used when AgentConfig.agent_mode == "progressive".
     """
     from .llm import get_llm
-    from .graph import _serialize_messages, _get_io_logger, _prepare_history
+    from .session import get_io_logger, prepare_history, log_session_start, finalize_session
 
     llm = get_llm(config)
 
-    record, history = _prepare_history(session_id, user_message, image_paths, user, db)
+    record, history = prepare_history(session_id, user_message, image_paths, user, db)
 
-    _get_io_logger()
-    io = logging.getLogger("agent.io")
-    io.info("=" * 70)
-    io.info(f"[SESSION]  {session_id}  [MODE: progressive_disclosure]")
-    io.info(f"[INPUT]    prompt={user_message!r}  images={len(image_paths)}")
+    io = get_io_logger()
+    log_session_start(io, session_id, user_message, image_paths, mode="progressive_disclosure")
 
     graph = build_progressive_graph(llm, user, config.max_retries_on_error)
 
@@ -345,14 +342,7 @@ def run_progressive_agent(
         io.error(f"[ERROR]    {type(exc).__name__}: {exc}")
         raise
 
-    # Persist updated history
-    record.messages_json = _serialize_messages(result["messages"])
-    record.updated_at = datetime.utcnow()
-    db.commit()
-
-    final = result["messages"][-1].content
-    io.info(f"[FINAL]    {final!r}")
-    return final
+    return finalize_session(record, result, db, io)
 
 
 # ---------------------------------------------------------------------------
@@ -367,33 +357,7 @@ async def stream_progressive_agent(
     db,
     config,
 ):
-    """Async generator — SSE wrapper around run_progressive_agent().
-
-    Runs the progressive graph synchronously in a thread-pool executor (to
-    avoid blocking the event loop), then emits the final response token by
-    token with <think> tag separation.  Same SSE event format as stream_agent.
-    """
-    import asyncio
-    import json
-    from .graph import ThinkParser
-
-    loop = asyncio.get_running_loop()
-    try:
-        final = await loop.run_in_executor(
-            None,
-            run_progressive_agent,
-            session_id, user_message, image_paths, user, db, config,
-        )
-    except Exception as exc:
-        yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
-        return
-
-    parser = ThinkParser()
-    for ptype, text in parser.feed(final):
-        if text:
-            yield f"data: {json.dumps({'type': ptype, 'token': text}, ensure_ascii=False)}\n\n"
-    for ptype, text in parser.flush():
-        if text:
-            yield f"data: {json.dumps({'type': ptype, 'token': text}, ensure_ascii=False)}\n\n"
-
-    yield f"data: {json.dumps({'type': 'done', 'session_id': session_id})}\n\n"
+    """Async generator — SSE wrapper around run_progressive_agent()."""
+    from .session import stream_sync_agent
+    async for sse in stream_sync_agent(run_progressive_agent, session_id, user_message, image_paths, user, db, config):
+        yield sse
