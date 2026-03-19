@@ -1,5 +1,5 @@
 """
-Category-scoped agent: two-phase tool loading.
+Category-scoped agent: two-phase tool loading with dynamic expansion.
 
 Phase 1 — Category selection (single cheap LLM call):
   LLM sees all toolkit names + descriptions, picks one or more categories.
@@ -8,15 +8,21 @@ Phase 2 — Full ReAct execution:
   Only tools from the selected categories are loaded; the agent can call
   any of them freely, in any order and any number of times.
 
+Phase 3 — Expansion check (after each execution):
+  LLM evaluates the result and can:
+    a) Declare the task done  → END
+    b) Request tools from additional existing categories  → re-execute
+    c) Synthesize a new simple Python tool on the fly    → re-execute
+
 This strikes a balance between loading everything at once (context-heavy)
-and progressive mode (restricted to one tool per cycle).
+and progressive mode (restricted to one tool per cycle), while also allowing
+recovery when the initial category selection turns out to be incomplete.
 """
 from __future__ import annotations
 
 import json
 import logging
-
-from typing import Annotated
+from typing import Annotated, Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
@@ -35,6 +41,16 @@ _CATEGORY_SYSTEM = (
     "from multiple categories working together."
 )
 
+_EXPANSION_PROMPT = (
+    "You are evaluating whether more tools are needed to complete a task.\n"
+    "Respond with JSON only (no markdown fences):\n"
+    '- {"action": "done"} — task is complete or no additional tools would help\n'
+    '- {"action": "expand_categories", "categories": ["cat1", "cat2"]} '
+    "— need tools from the listed existing categories\n"
+    '- {"action": "synthesize_tool", "name": "fn_name", "description": "...", "code": "def fn_name(...): ..."}'
+    " — need a simple utility function (pure Python, no external APIs, single def statement)"
+)
+
 
 # ---------------------------------------------------------------------------
 # State
@@ -43,6 +59,10 @@ _CATEGORY_SYSTEM = (
 class CategoryAgentState(TypedDict):
     messages: Annotated[list, add_messages]
     selected_categories: list[str]
+    synthesized_tools: list[Any]   # in-memory LangChain StructuredTool objects
+    expansion_count: int
+    max_expansions: int
+    expanded: bool                 # sentinel: did expansion_node add tools this round?
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +120,13 @@ def _make_execution_node(llm, user, config):
 
         io.info(f"[EXECUTION] categories={selected}  tools={slugs}")
 
-        exec_tools = build_langchain_tools(user, slugs=slugs) if slugs else build_langchain_tools(user)
+        registry_tools = build_langchain_tools(user, slugs=slugs) if slugs else build_langchain_tools(user)
+        synth_tools = state.get("synthesized_tools", [])
+        exec_tools = registry_tools + synth_tools
+
+        if synth_tools:
+            io.info(f"[EXECUTION] +{len(synth_tools)} synthesized tool(s): {[t.name for t in synth_tools]}")
+
         agent = create_react_agent(llm, exec_tools)
 
         # Use only messages up to (and including) the latest HumanMessage as input.
@@ -120,9 +146,111 @@ def _make_execution_node(llm, user, config):
         new_messages = result["messages"][len(exec_input):]
         log_messages(io, new_messages)
 
-        return {"messages": new_messages}
+        return {"messages": new_messages, "expanded": False}
 
     return execution_node
+
+
+def _make_expansion_node(llm):
+    io = logging.getLogger("agent.io")
+
+    def expansion_node(state: CategoryAgentState) -> dict:
+        expansion_count = state.get("expansion_count", 0)
+        max_expansions = state.get("max_expansions", 2)
+
+        if expansion_count >= max_expansions:
+            io.info(f"[EXPANSION] max_expansions={max_expansions} reached, stopping")
+            return {"expanded": False}
+
+        # Gather context
+        user_msgs = [m for m in state["messages"] if isinstance(m, HumanMessage)]
+        user_request = user_msgs[-1].content if user_msgs else ""
+        ai_msgs = [m for m in state["messages"] if isinstance(m, AIMessage) and m.content]
+        last_result = ai_msgs[-1].content if ai_msgs else "(no result yet)"
+
+        # Available but not yet loaded categories
+        all_cats = {tk.name for tk in registry.list_toolkits()}
+        unused_cats = sorted(all_cats - set(state["selected_categories"]))
+        unused_text = "\n".join(f"- {c}" for c in unused_cats) or "(none — all categories already loaded)"
+
+        resp = llm.invoke([
+            SystemMessage(content=_EXPANSION_PROMPT),
+            HumanMessage(content=(
+                f"User request:\n{user_request}\n\n"
+                f"Execution result so far:\n{last_result}\n\n"
+                f"Available but not yet loaded categories:\n{unused_text}\n\n"
+                "What should we do next?"
+            )),
+        ])
+
+        raw = resp.content.strip()
+        # Strip markdown fences if the model wraps anyway
+        if raw.startswith("```"):
+            raw = "\n".join(
+                line for line in raw.splitlines()
+                if not line.startswith("```")
+            ).strip()
+
+        try:
+            decision = json.loads(raw)
+        except json.JSONDecodeError:
+            io.warning(f"[EXPANSION] failed to parse LLM response: {resp.content!r}")
+            return {"expanded": False}
+
+        action = decision.get("action", "done")
+
+        if action == "done":
+            io.info("[EXPANSION] LLM says task is done")
+            return {"expanded": False}
+
+        if action == "expand_categories":
+            new_cats = [c for c in decision.get("categories", []) if c in all_cats]
+            if not new_cats:
+                io.warning("[EXPANSION] expand_categories but no valid categories returned")
+                return {"expanded": False}
+            merged = list(dict.fromkeys(state["selected_categories"] + new_cats))
+            io.info(f"[EXPANSION] adding categories={new_cats}  total={merged}")
+            return {
+                "selected_categories": merged,
+                "expansion_count": expansion_count + 1,
+                "expanded": True,
+                "messages": [AIMessage(content=f"[Expansion {expansion_count + 1}] Adding categories: {', '.join(new_cats)}")],
+            }
+
+        if action == "synthesize_tool":
+            name = decision.get("name", "").strip()
+            description = decision.get("description", "").strip()
+            code = decision.get("code", "").strip()
+            if not (name and description and code):
+                io.warning("[EXPANSION] synthesize_tool missing required fields")
+                return {"expanded": False}
+
+            try:
+                ns: dict = {}
+                exec(compile(code, "<synthesized>", "exec"), ns)  # noqa: S102
+                fn = ns.get(name)
+                if fn is None or not callable(fn):
+                    io.warning(f"[EXPANSION] synthesized function '{name}' not found after exec")
+                    return {"expanded": False}
+            except Exception as exc:
+                io.warning(f"[EXPANSION] synthesized code exec failed: {exc}")
+                return {"expanded": False}
+
+            from langchain_core.tools import StructuredTool
+            lc_tool = StructuredTool.from_function(func=fn, name=name, description=description)
+            existing = list(state.get("synthesized_tools", []))
+            io.info(f"[EXPANSION] synthesized tool: {name}")
+            return {
+                "synthesized_tools": existing + [lc_tool],
+                "expansion_count": expansion_count + 1,
+                "expanded": True,
+                "messages": [AIMessage(content=f"[Expansion {expansion_count + 1}] Synthesized tool: `{name}`")],
+            }
+
+        io.warning(f"[EXPANSION] unknown action: {action!r}")
+        return {"expanded": False}
+
+    return expansion_node
 
 
 # ---------------------------------------------------------------------------
@@ -133,9 +261,16 @@ def build_category_graph(llm, user, config):
     builder = StateGraph(CategoryAgentState)
     builder.add_node("selection_node", _make_selection_node(llm))
     builder.add_node("execution_node", _make_execution_node(llm, user, config))
+    builder.add_node("expansion_node", _make_expansion_node(llm))
+
     builder.set_entry_point("selection_node")
     builder.add_edge("selection_node", "execution_node")
-    builder.add_edge("execution_node", END)
+    builder.add_edge("execution_node", "expansion_node")
+    builder.add_conditional_edges(
+        "expansion_node",
+        lambda s: "execution_node" if s.get("expanded") else END,
+        {"execution_node": "execution_node", END: END},
+    )
     return builder.compile()
 
 
@@ -164,6 +299,10 @@ def run_category_agent(
     initial_state: CategoryAgentState = {
         "messages": history,
         "selected_categories": [],
+        "synthesized_tools": [],
+        "expansion_count": 0,
+        "max_expansions": config.max_category_expansions,
+        "expanded": False,
     }
 
     try:

@@ -42,7 +42,8 @@ class AgentConfig:
     #   progressive     — 3-level discovery, single-tool execution with retry
     #   category_scoped — LLM picks categories first, then full ReAct on subset
     agent_mode: str = "standard"
-    max_retries_on_error: int = 3  # retries for progressive mode
+    max_retries_on_error: int = 3       # retries for progressive mode
+    max_category_expansions: int = 2    # max expansion rounds for category_scoped mode
 
 
 def load_config() -> AgentConfig:
