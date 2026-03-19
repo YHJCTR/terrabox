@@ -25,9 +25,14 @@ from __future__ import annotations
 
 import atexit
 import logging
+import os
 import signal
+import subprocess
 import threading
+import time
 from typing import List, Set, Type
+
+import requests
 
 logger = logging.getLogger("base_manager")
 
@@ -145,3 +150,86 @@ class BaseServiceManager:
             ServiceRegistry.register(inner_cls)
 
         cls.start_service = classmethod(_wrapped_start)
+
+
+_subprocess_logger = logging.getLogger("subprocess_manager")
+
+
+class SubprocessServiceManager(BaseServiceManager):
+    """Base class for subprocess-based GPU service managers.
+
+    Subclasses declare class variables only; all lifecycle logic lives here.
+    Override _check_paths() to add extra pre-start file checks, or
+    _build_cmd() to customize the subprocess command.
+    """
+
+    _instance = None
+    _process = None
+
+    SERVICE_NAME: str = "Service"
+    PYTHON_EXEC: str = ""
+    SERVER_SCRIPT: str = ""
+    WORK_DIR: str = ""
+    API_URL: str = "http://127.0.0.1:9000"
+    GPU_DEVICES: str = "0"
+    MAX_RETRIES: int = 30
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    @classmethod
+    def is_running(cls) -> bool:
+        try:
+            return requests.get(
+                f"{cls.API_URL}/health", timeout=1,
+                proxies={"http": None, "https": None},
+            ).status_code == 200
+        except Exception:
+            return False
+
+    @classmethod
+    def _check_paths(cls) -> None:
+        """Raise FileNotFoundError if required files are missing."""
+        if not os.path.exists(cls.SERVER_SCRIPT):
+            raise FileNotFoundError(f"Server script not found at: {cls.SERVER_SCRIPT}")
+
+    @classmethod
+    def _build_cmd(cls) -> list:
+        """Return the subprocess command list."""
+        return [cls.PYTHON_EXEC, cls.SERVER_SCRIPT]
+
+    @classmethod
+    def start_service(cls) -> None:
+        if cls.is_running():
+            return
+        cls._check_paths()
+        _subprocess_logger.info(f"Starting {cls.SERVICE_NAME} Service from {cls.WORK_DIR}...")
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = cls.GPU_DEVICES
+        env["PYTHONPATH"] = f"{cls.WORK_DIR}:{env.get('PYTHONPATH', '')}"
+        log_name = cls.SERVICE_NAME.lower().replace(" ", "_").replace("-", "_")
+        cls._process = subprocess.Popen(
+            cls._build_cmd(),
+            cwd=cls.WORK_DIR,
+            env=env,
+            stdout=open(os.path.join(cls.WORK_DIR, f"{log_name}_stdout.log"), "w"),
+            stderr=open(os.path.join(cls.WORK_DIR, f"{log_name}_stderr.log"), "w"),
+        )
+        for _ in range(cls.MAX_RETRIES):
+            if cls.is_running():
+                _subprocess_logger.info(f"{cls.SERVICE_NAME} Service is READY.")
+                return
+            time.sleep(1)
+        cls.stop_service()
+        raise RuntimeError(
+            f"{cls.SERVICE_NAME} service failed to start. Check logs in {cls.WORK_DIR}/"
+        )
+
+    @classmethod
+    def stop_service(cls) -> None:
+        if cls._process:
+            _subprocess_logger.info(f"Stopping {cls.SERVICE_NAME} Service...")
+            cls._process.terminate()
+            cls._process = None

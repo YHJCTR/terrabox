@@ -7,15 +7,14 @@ Advanced AI perception tools including Multi-image VLM analysis.
 import json
 import ast
 import logging
-
 import os
 import base64
 import mimetypes
 import requests
 from typing import Any, Dict, List
 from ..core.registry import ToolSpec
-import os as _os
-if _os.environ.get("TERRABOX_USE_DOCKER", "false").lower() == "true":
+
+if os.environ.get("TERRABOX_USE_DOCKER", "false").lower() == "true":
     from ..managers.docker.vllm_manager import vllm_manager
     from ..managers.docker.sam2_manager import sam2_manager
     from ..managers.docker.remoteclip_manager import remoteclip_manager
@@ -37,15 +36,28 @@ def _encode_image_to_base64(image_path: str) -> str:
     """Helper: Convert local image file to data URI scheme."""
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"Image not found: {image_path}")
-        
     mime_type, _ = mimetypes.guess_type(image_path)
     if not mime_type:
         mime_type = "image/jpeg"
-        
     with open(image_path, "rb") as image_file:
         encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-        
     return f"data:{mime_type};base64,{encoded_string}"
+
+
+def _call_service(manager, url: str, payload: dict, timeout: int = 120) -> dict:
+    """Start *manager* if not running, POST to *url*, return parsed JSON or error dict."""
+    try:
+        manager.start_service()
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to start service: {e}"}
+    try:
+        resp = requests.post(url, json=payload, timeout=timeout, proxies={"http": None, "https": None})
+        if resp.status_code == 200:
+            return resp.json()
+        return {"status": "error", "message": f"API error {resp.status_code}: {resp.text}"}
+    except Exception as e:
+        return {"status": "error", "message": f"Connection failed: {e}"}
+
 
 # --- Handlers ---
 
@@ -61,8 +73,7 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
     if not raw_images:
          return {"status": "error", "message": "Missing images parameter."}
 
-    logger.info(f"DEBUG INPUT: Type={type(raw_images)} Value={raw_images}")
-    print(f"DEBUG INPUT: Type={type(raw_images)} Value={raw_images}")
+    logger.debug(f"raw_images: type={type(raw_images)} value={raw_images}")
 
     image_paths = []
 
@@ -100,8 +111,7 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
         else:
             image_paths = [s]
 
-    logger.info(f"DEBUG PARSED PATHS: {image_paths}")
-    print(f"DEBUG PARSED PATHS: {image_paths}")
+    logger.debug(f"parsed image_paths: {image_paths}")
 
     prompt = arguments.get("prompt", "Analyze these images.")
     max_tokens = arguments.get("max_tokens", 512)
@@ -161,57 +171,26 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
 
 
 def sam2_segment_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
-    """
-    Handler for SAM2 Segmentation (Full Image Box Prompt).
-    """
+    """Handler for SAM2 Segmentation (Full Image Box Prompt)."""
     image_path = arguments.get("image") or arguments.get("image_path")
     if not image_path:
         return {"status": "error", "message": "Missing image parameter."}
-
-    # Strip list-string artifacts e.g. "['path']" → "path"
     clean_path = str(image_path).strip()
     if clean_path.startswith("['") or clean_path.startswith('["'):
         clean_path = clean_path[2:-2]
-
     if not os.path.exists(clean_path):
         return {"status": "error", "message": f"Image not found: {clean_path}"}
 
-    try:
-        sam2_manager.start_service()
-    except Exception as e:
-        return {"status": "error", "message": f"Failed to start SAM2 Service: {str(e)}"}
+    result = _call_service(sam2_manager, f"{sam2_manager.API_URL}/segment", {"image_path": clean_path}, timeout=60)
+    if result.get("status") == "error":
+        return result
 
-    try:
-        api_url = f"{sam2_manager.API_URL}/segment"
-        payload = {"image_path": clean_path}
-        
-        response = requests.post(
-            api_url, json=payload, timeout=60,
-            proxies={"http": None, "https": None},
-        )
-
-        if response.status_code == 200:
-            result = response.json()
-
-            if result.get("status") == "error":
-                return {"status": "error", "message": result.get("message", "SAM2 returned an error.")}
-
-            vis_b64 = result.get("visualization")
-            count = result.get("count", 0)
-
-            md_text = f"SAM2 Segmentation Complete. Found {count} regions.\n\n"
-            if vis_b64:
-                md_text += f"![Segmentation Result]({vis_b64})"
-
-            return {
-                "status": "success",
-                "output": md_text,
-            }
-        else:
-            return {"status": "error", "message": f"SAM2 API Error: {response.text}"}
-            
-    except Exception as e:
-        return {"status": "error", "message": f"Connection failed: {str(e)}"}
+    vis_b64 = result.get("visualization")
+    count = result.get("count", 0)
+    md_text = f"SAM2 Segmentation Complete. Found {count} regions.\n\n"
+    if vis_b64:
+        md_text += f"![Segmentation Result]({vis_b64})"
+    return {"status": "success", "output": md_text}
         
         
 # --- Wrappers ---
@@ -251,38 +230,18 @@ def remoteclip_analysis_handler(arguments: Dict[str, Any], context: Any, account
     if not os.path.exists(clean_path):
         return {"status": "error", "message": f"Image not found: {clean_path}"}
 
-    try:
-        remoteclip_manager.start_service()
-    except Exception as e:
-        return {"status": "error", "message": f"Failed to start RemoteCLIP Service: {str(e)}"}
-
-    try:
-        api_url = f"{remoteclip_manager.API_URL}/analyze"
-        payload = {
-            "image_path": clean_path,
-            "text_queries": text_queries
-        }
-
-        print(f"Sending payload: {payload}")
-        response = requests.post(
-            api_url, json=payload, timeout=120,
-            proxies={"http": None, "https": None},
-        )
-
-        if response.status_code == 200:
-            result = response.json()
-            return {
-                "status": "success",
-                "predictions": result.get("predictions"),
-                "message": "RemoteCLIP analysis completed.",
-                "used_queries": text_queries
-            }
-
-        else:
-            return {"status": "error", "message": f"RemoteCLIP API Error: {response.text}"}
-
-    except Exception as e:
-        return {"status": "error", "message": f"Connection failed: {str(e)}"}
+    result = _call_service(
+        remoteclip_manager, f"{remoteclip_manager.API_URL}/analyze",
+        {"image_path": clean_path, "text_queries": text_queries},
+    )
+    if result.get("status") == "error":
+        return result
+    return {
+        "status": "success",
+        "predictions": result.get("predictions"),
+        "message": "RemoteCLIP analysis completed.",
+        "used_queries": text_queries,
+    }
 
 
 
@@ -301,157 +260,70 @@ def strip_rcnn_handler(arguments: Dict[str, Any], context: Any, account: Any) ->
     if not os.path.exists(clean_path):
         return {"status": "error", "message": f"Image not found: {clean_path}"}
 
-    try:
-        strip_rcnn_manager.start_service()
-    except Exception as e:
-        return {"status": "error", "message": f"Failed to start Strip R-CNN Service: {str(e)}"}
-
-    try:
-        api_url = f"{strip_rcnn_manager.API_URL}/detect"
-        payload = {
-            "image_path": clean_path,
-            "score_threshold": score_threshold
+    result = _call_service(
+        strip_rcnn_manager, f"{strip_rcnn_manager.API_URL}/detect",
+        {"image_path": clean_path, "score_threshold": score_threshold},
+    )
+    if result.get("status") == "error":
+        return result
+    if result.get("success"):
+        return {
+            "status": "success",
+            "detections": result.get("detections"),
+            "image_size": result.get("image_size"),
+            "num_detections": result.get("num_detections"),
+            "message": f"Strip R-CNN detection completed. Found {result.get('num_detections')} objects.",
         }
-
-        response = requests.post(
-            api_url, json=payload, timeout=120,
-            proxies={"http": None, "https": None},
-        )
-
-        if response.status_code == 200:
-            result = response.json()
-            if result.get("success"):
-                return {
-                    "status": "success",
-                    "detections": result.get("detections"),
-                    "image_size": result.get("image_size"),
-                    "num_detections": result.get("num_detections"),
-                    "message": f"Strip R-CNN detection completed. Found {result.get('num_detections')} objects."
-                }
-            else:
-                return {"status": "error", "message": f"Detection failed: {result.get('error')}"}
-        else:
-            return {"status": "error", "message": f"Strip R-CNN API Error: {response.text}"}
-
-    except Exception as e:
-        return {"status": "error", "message": f"Connection failed: {str(e)}"}
-
-
-def _encode_image_to_base64(image_path: str) -> str:
-    """Helper: Convert local image file to data URI scheme."""
-    if not os.path.exists(image_path):
-        raise FileNotFoundError(f"Image not found: {image_path}")
-
-    mime_type, _ = mimetypes.guess_type(image_path)
-    if not mime_type:
-        mime_type = "image/jpeg"
-
-    with open(image_path, "rb") as image_file:
-        encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-
-    return f"data:{mime_type};base64,{encoded_string}"
+    return {"status": "error", "message": f"Detection failed: {result.get('error')}"}
 
 
 def remotesam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
-    """
-    Handler for RemoteSAM tasks.
-    """
+    """Handler for RemoteSAM tasks."""
     image_path = arguments.get("image") or arguments.get("image_path")
     task_type = arguments.get("task_type")
-    sentence = arguments.get("sentence", "")
-    classnames = arguments.get("classnames", [])
-
     if not image_path:
         return {"status": "error", "message": "Missing image parameter."}
-
     clean_path = str(image_path).strip()
     if not os.path.exists(clean_path):
         return {"status": "error", "message": f"Image not found: {clean_path}"}
 
-    try:
-        remotesam_manager.start_service()
-    except Exception as e:
-        return {"status": "error", "message": f"Failed to start RemoteSAM Service: {str(e)}"}
-
-    try:
-        api_url = f"{remotesam_manager.API_URL}/{task_type}"
-        payload = {
-            "image_path": clean_path,
-            "sentence": sentence,
-            "classnames": classnames
-        }
-
-        response = requests.post(
-            api_url, json=payload, timeout=120,
-            proxies={"http": None, "https": None},
-        )
-        print(payload)
-        if response.status_code == 200:
-            result = response.json()
-            return {
-                "status": "success",
-                "result": result,
-                "message": f"RemoteSAM {task_type} completed."
-            }
-        else:
-            return {"status": "error", "message": f"RemoteSAM API Error: {response.text}"}
-
-    except Exception as e:
-        return {"status": "error", "message": f"Connection failed: {str(e)}"}
+    result = _call_service(
+        remotesam_manager, f"{remotesam_manager.API_URL}/{task_type}",
+        {"image_path": clean_path, "sentence": arguments.get("sentence", ""), "classnames": arguments.get("classnames", [])},
+    )
+    if result.get("status") == "error":
+        return result
+    return {"status": "success", "result": result, "message": f"RemoteSAM {task_type} completed."}
 def instructsam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
-    """
-    Handler for InstructSAM — instruction-based segmentation and counting.
-    Pipeline: SAM2 mask proposals → Qwen2.5-VL counting → CLIP matching.
-    """
-    image_path  = arguments.get("image") or arguments.get("image_path")
+    """Handler for InstructSAM — instruction-based segmentation and counting."""
+    image_path = arguments.get("image") or arguments.get("image_path")
     text_prompt = arguments.get("text_prompt", "objects in the image")
-
     if not image_path:
         return {"status": "error", "message": "Missing image parameter."}
-
     clean_path = str(image_path).strip()
     if not os.path.exists(clean_path):
         return {"status": "error", "message": f"Image not found: {clean_path}"}
 
-    try:
-        instructsam_manager.start_service()
-    except Exception as e:
-        return {"status": "error", "message": f"Failed to start InstructSAM Service: {str(e)}"}
+    result = _call_service(
+        instructsam_manager, f"{instructsam_manager.API_URL}/segment",
+        {"image_path": clean_path, "text_prompt": text_prompt},
+        timeout=300,
+    )
+    if result.get("status") == "error":
+        return result
 
-    try:
-        api_url = f"{instructsam_manager.API_URL}/segment"
-        payload = {
-            "image_path":  clean_path,
-            "text_prompt": text_prompt,
-        }
-        response = requests.post(
-            api_url, json=payload, timeout=300,
-            proxies={"http": None, "https": None},
-        )
-
-        if response.status_code == 200:
-            result = response.json()
-            count      = result.get("count", 0)
-            objects    = result.get("objects", [])
-            detections = result.get("detections", [])
-            vis_b64    = result.get("visualization", "")
-
-            md_text = f"InstructSAM found **{count}** object(s) matching '{text_prompt}'.\n\n"
-            if vis_b64:
-                md_text += f"![InstructSAM Result]({vis_b64})"
-
-            return {
-                "status":     "success",
-                "count":      count,
-                "objects":    objects,
-                "detections": detections,
-                "output":     md_text,
-            }
-        else:
-            return {"status": "error", "message": f"InstructSAM API Error: {response.text}"}
-
-    except Exception as e:
-        return {"status": "error", "message": f"Connection failed: {str(e)}"}
+    count = result.get("count", 0)
+    vis_b64 = result.get("visualization", "")
+    md_text = f"InstructSAM found **{count}** object(s) matching '{text_prompt}'.\n\n"
+    if vis_b64:
+        md_text += f"![InstructSAM Result]({vis_b64})"
+    return {
+        "status": "success",
+        "count": count,
+        "objects": result.get("objects", []),
+        "detections": result.get("detections", []),
+        "output": md_text,
+    }
 
 
     

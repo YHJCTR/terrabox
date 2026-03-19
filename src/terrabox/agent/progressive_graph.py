@@ -245,15 +245,8 @@ def _make_execution_node(llm, user):
         # Extract only NEW messages produced by the mini-agent
         new_messages = result["messages"][len(exec_messages):]
 
-        # Log them
-        for msg in new_messages:
-            if isinstance(msg, AIMessage):
-                if msg.content:
-                    io.info(f"[LLM OUTPUT]\n{msg.content}")
-                for tc in getattr(msg, "tool_calls", []):
-                    io.info(f"[TOOL CALL] {tc['name']}  args={tc['args']}")
-            elif isinstance(msg, ToolMessage):
-                io.info(f"[TOOL RESULT] {getattr(msg, 'name', '')}  →  {msg.content}")
+        from .graph import _log_messages
+        _log_messages(io, new_messages)
 
         # Detect soft error (handler returned an error string)
         final_content = result["messages"][-1].content if result["messages"] else ""
@@ -323,34 +316,16 @@ def run_progressive_agent(
     Run the progressive-disclosure agent.
     Drop-in replacement for run_agent(); selected via AgentConfig.enable_progressive_disclosure.
     """
-    from ..db.models import AgentSession
     from .llm import get_llm
-    from .graph import _deserialize_messages, _serialize_messages, _get_io_logger
+    from .graph import _serialize_messages, _get_io_logger, _prepare_history
 
     llm = get_llm(config)
 
-    content = user_message
-    if image_paths:
-        paths_str = ", ".join(image_paths)
-        content += (
-            f"\n\n[Uploaded image file(s) — use these local paths when calling image tools: {paths_str}]"
-        )
+    record, history = _prepare_history(session_id, user_message, image_paths, user, db)
 
-    # Load / create session record
-    record = db.query(AgentSession).filter_by(id=session_id, user_id_fk=user.id).first()
-    if record is None:
-        record = AgentSession(id=session_id, user_id_fk=user.id, messages_json="[]")
-        db.add(record)
-        db.flush()
-
-    history = _deserialize_messages(record.messages_json)
-    history.append(HumanMessage(content=content))
-
-    # Ensure the io logger (with its file handler) is initialised before use
     _get_io_logger()
     io = logging.getLogger("agent.io")
-    sep = "=" * 70
-    io.info(sep)
+    io.info("=" * 70)
     io.info(f"[SESSION]  {session_id}  [MODE: progressive_disclosure]")
     io.info(f"[INPUT]    prompt={user_message!r}  images={len(image_paths)}")
 

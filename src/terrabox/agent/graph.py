@@ -58,6 +58,40 @@ def _deserialize_messages(json_str: str) -> list:
     return messages_from_dict(data) if data else []
 
 
+def _prepare_history(session_id: str, user_message: str, image_paths: list, user, db: Session):
+    """Load/create session record, build history with annotated message.
+
+    Returns (record, history) where history already includes the new HumanMessage.
+    """
+    from ..db.models import AgentSession
+    content = user_message
+    if image_paths:
+        content += (
+            f"\n\n[Uploaded image file(s) — use these local paths when calling image tools: "
+            f"{', '.join(image_paths)}]"
+        )
+    record = db.query(AgentSession).filter_by(id=session_id, user_id_fk=user.id).first()
+    if record is None:
+        record = AgentSession(id=session_id, user_id_fk=user.id, messages_json="[]")
+        db.add(record)
+        db.flush()
+    history = _deserialize_messages(record.messages_json)
+    history.append(HumanMessage(content=content))
+    return record, history
+
+
+def _log_messages(io: logging.Logger, messages: list) -> None:
+    """Log a list of agent messages to the io logger."""
+    for msg in messages:
+        if isinstance(msg, AIMessage):
+            if msg.content:
+                io.info(f"[LLM OUTPUT]\n{msg.content}")
+            for tc in getattr(msg, "tool_calls", []):
+                io.info(f"[TOOL CALL] {tc['name']}  args={tc['args']}")
+        elif isinstance(msg, ToolMessage):
+            io.info(f"[TOOL RESULT] {getattr(msg, 'name', '')}  →  {msg.content}")
+
+
 # ---------------------------------------------------------------------------
 # Session management helpers
 # ---------------------------------------------------------------------------
@@ -97,7 +131,6 @@ def run_agent(
     Returns the agent's final text response.
     """
     from langgraph.prebuilt import create_react_agent
-    from ..db.models import AgentSession
 
     config = load_config()
 
@@ -109,27 +142,10 @@ def run_agent(
     tools = build_langchain_tools(user)
     graph = create_react_agent(llm, tools)
 
-    # Append image paths to the user message so the agent knows about them
-    content = user_message
-    if image_paths:
-        paths_str = ", ".join(image_paths)
-        content += (
-            f"\n\n[Uploaded image file(s) — use these local paths when calling image tools: {paths_str}]"
-        )
-
-    # Load conversation history from DB (create record on first use)
-    record = db.query(AgentSession).filter_by(id=session_id, user_id_fk=user.id).first()
-    if record is None:
-        record = AgentSession(id=session_id, user_id_fk=user.id, messages_json="[]")
-        db.add(record)
-        db.flush()
-
-    history = _deserialize_messages(record.messages_json)
-    history.append(HumanMessage(content=content))
+    record, history = _prepare_history(session_id, user_message, image_paths, user, db)
 
     io = _get_io_logger()
-    sep = "=" * 70
-    io.info(sep)
+    io.info("=" * 70)
     io.info(f"[SESSION]  {session_id}")
     io.info(f"[INPUT]    prompt={user_message!r}  images={len(image_paths)}")
 
@@ -142,16 +158,7 @@ def run_agent(
         io.error(f"[ERROR]    {type(exc).__name__}: {exc}")
         raise
 
-    # Log every new message produced by this turn (skip the HumanMessage we just added)
-    new_messages = result["messages"][len(history):]
-    for msg in new_messages:
-        if isinstance(msg, AIMessage):
-            if msg.content:
-                io.info(f"[LLM OUTPUT]\n{msg.content}")
-            for tc in getattr(msg, "tool_calls", []):
-                io.info(f"[TOOL CALL] {tc['name']}  args={tc['args']}")
-        elif isinstance(msg, ToolMessage):
-            io.info(f"[TOOL RESULT] {getattr(msg, 'name', '')}  →  {msg.content}")
+    _log_messages(io, result["messages"][len(history):])
 
     # Persist updated history to DB
     record.messages_json = _serialize_messages(result["messages"])
@@ -231,7 +238,6 @@ async def stream_agent(
         data: {"type": "error",    "message": "..."}  ← on exception
     """
     from langgraph.prebuilt import create_react_agent
-    from ..db.models import AgentSession
 
     # Send an immediate SSE keepalive before any heavy processing.
     # This prevents SSH tunnels / intermediate proxies from closing the
@@ -259,21 +265,7 @@ async def stream_agent(
         tools = build_langchain_tools(user)
         graph = create_react_agent(llm, tools)
 
-        content = user_message
-        if image_paths:
-            paths_str = ", ".join(image_paths)
-            content += (
-                f"\n\n[Uploaded image file(s) — use these local paths when calling image tools: {paths_str}]"
-            )
-
-        record = db.query(AgentSession).filter_by(id=session_id, user_id_fk=user.id).first()
-        if record is None:
-            record = AgentSession(id=session_id, user_id_fk=user.id, messages_json="[]")
-            db.add(record)
-            db.flush()
-
-        history = _deserialize_messages(record.messages_json)
-        history.append(HumanMessage(content=content))
+        record, history = _prepare_history(session_id, user_message, image_paths, user, db)
     except Exception as exc:
         io.error(f"[SETUP ERROR] {type(exc).__name__}: {exc}")
         yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
