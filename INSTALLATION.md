@@ -49,7 +49,7 @@ tool is first called — you do not need to launch them manually.
 
 ## 2. Model Weights
 
-All AI services require pre-downloaded model weights. Run `download_weights.sh` once
+All AI services require pre-downloaded model weights. Run `scripts/download_weights.sh` once
 before starting any service. The script downloads each model to `./models/<name>/` by
 default and prints the exact paths to put in your `.env` / `agent_config.yaml`.
 
@@ -63,7 +63,7 @@ pip install gdown             # required for Strip-RCNN (Google Drive)
 ### Download all weights
 
 ```bash
-./download_weights.sh
+scripts/download_weights.sh
 ```
 
 The Agent LLM and VLM model IDs default to `Qwen/Qwen3-8B` and
@@ -72,13 +72,13 @@ The Agent LLM and VLM model IDs default to `Qwen/Qwen3-8B` and
 ```bash
 AGENT_LLM_HF_REPO=your-org/your-llm \
 VLM_HF_REPO=your-org/your-vlm \
-./download_weights.sh
+scripts/download_weights.sh
 ```
 
 Skip models you already have or do not need:
 
 ```bash
-./download_weights.sh --skip-agent --skip-vlm
+scripts/download_weights.sh --skip-agent --skip-vlm
 ```
 
 Available skip flags: `--skip-agent`, `--skip-vlm`, `--skip-sam2`,
@@ -87,7 +87,7 @@ Available skip flags: `--skip-agent`, `--skip-vlm`, `--skip-sam2`,
 If HuggingFace is slow or blocked, use a mirror:
 
 ```bash
-HF_ENDPOINT=https://hf-mirror.com ./download_weights.sh
+HF_ENDPOINT=https://hf-mirror.com scripts/download_weights.sh
 ```
 
 ### Weights reference
@@ -119,7 +119,7 @@ Each directory can be overridden via an environment variable before running the 
 ```bash
 SAM2_CKPT_DIR=/data1/models/sam2 \
 REMOTECLIP_DIR=/data1/models/clip \
-./download_weights.sh --skip-agent --skip-vlm
+scripts/download_weights.sh --skip-agent --skip-vlm
 ```
 
 ---
@@ -241,7 +241,7 @@ DATA_MOUNT_HOST=/data1
 
 ## 5. Building Docker Images
 
-`build_models.sh` supports two source-acquisition modes:
+`scripts/build_models.sh` supports two source-acquisition modes:
 
 | Mode | How source code is obtained | Use case |
 |------|----------------------------|----------|
@@ -252,10 +252,10 @@ DATA_MOUNT_HOST=/data1
 
 ```bash
 # Open-source users — clone from GitHub
-BUILD_MODE=git ./build_models.sh
+BUILD_MODE=git scripts/build_models.sh
 
 # Internal users — copy from local source (default)
-./build_models.sh
+scripts/build_models.sh
 
 # With mirror URLs (when GitHub is slow or blocked)
 BUILD_MODE=git \
@@ -263,7 +263,7 @@ BUILD_MODE=git \
   REMOTESAM_GIT_URL=https://bgithub.xyz/xiaobdul/RemoteSAM.git \
   STRIP_RCNN_GIT_URL=https://bgithub.xyz/wjy5446/Strip-RCNN.git \
   INSTRUCTSAM_GIT_URL=https://bgithub.xyz/VoyagerXvoyagerx/InstructSAM.git \
-  ./build_models.sh
+  scripts/build_models.sh
 ```
 
 This produces the following images:
@@ -314,6 +314,13 @@ rm -rf ./sam2
 
 The Agent LLM drives the reasoning loop. It is configured separately from the perception
 models via `agent_config.yaml` in the project root.
+
+> **First-time setup:** copy the example config and fill in your values:
+> ```bash
+> cp agent_config.example.yaml agent_config.yaml
+> ```
+> `agent_config.yaml` is gitignored so your local model paths and API keys stay off
+> version control.
 
 ### Option A: Remote API (simplest)
 

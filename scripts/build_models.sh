@@ -8,10 +8,10 @@
 #   git             — clone from GitHub at build time (for open-source users)
 #
 # Usage examples:
-#   ./build_models.sh                           # local mode (default, uses paths below)
-#   BUILD_MODE=git ./build_models.sh            # git mode (no local source needed)
+#   ./scripts/build_models.sh                           # local mode (default, uses paths below)
+#   BUILD_MODE=git ./scripts/build_models.sh            # git mode (no local source needed)
 #   BUILD_MODE=git SAM2_GIT_URL=https://bgithub.xyz/facebookresearch/sam2.git \
-#     ./build_models.sh                         # git mode with custom mirror URL
+#     ./scripts/build_models.sh                         # git mode with custom mirror URL
 
 set -e  # Exit on error
 
@@ -23,7 +23,7 @@ NC='\033[0m' # No Color
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$SCRIPT_DIR"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Build mode: local (default, backward-compatible) or git (open-source friendly)
 BUILD_MODE="${BUILD_MODE:-local}"

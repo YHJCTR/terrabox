@@ -6,22 +6,22 @@
 # in .env (perception models) or agent_config.yaml (Agent LLM).
 #
 # Usage:
-#   ./download_weights.sh                              # download everything
-#   ./download_weights.sh --skip-agent --skip-vlm     # skip specific models
-#   HF_ENDPOINT=https://hf-mirror.com ./download_weights.sh   # China mirror
+#   ./scripts/download_weights.sh                              # download everything
+#   ./scripts/download_weights.sh --skip-agent --skip-vlm     # skip specific models
+#   HF_ENDPOINT=https://hf-mirror.com ./scripts/download_weights.sh   # China mirror
 #
 # HuggingFace model IDs (set to your preferred model):
 #   AGENT_LLM_HF_REPO   HuggingFace repo for the Agent LLM  (default: Qwen/Qwen3-8B)
 #   VLM_HF_REPO         HuggingFace repo for the vision LLM (default: Qwen/Qwen2.5-VL-7B-Instruct)
 #
 # Destination directories (override via environment variables):
-#   AGENT_LLM_DIR   default: ./models/agent_llm
-#   VLM_DIR         default: ./models/vlm
-#   SAM2_CKPT_DIR   default: ./models/sam2_checkpoints
-#   REMOTECLIP_DIR  default: ./models/remoteclip
-#   REMOTESAM_DIR   default: ./models/remotesam
-#   STRIP_RCNN_DIR  default: ./models/strip_rcnn
-#   INSTRUCTSAM_DIR default: ./models/instructsam
+#   AGENT_LLM_DIR   default: <project_root>/models/agent_llm
+#   VLM_DIR         default: <project_root>/models/vlm
+#   SAM2_CKPT_DIR   default: <project_root>/models/sam2_checkpoints
+#   REMOTECLIP_DIR  default: <project_root>/models/remoteclip
+#   REMOTESAM_DIR   default: <project_root>/models/remotesam
+#   STRIP_RCNN_DIR  default: <project_root>/models/strip_rcnn
+#   INSTRUCTSAM_DIR default: <project_root>/models/instructsam
 
 set -e
 
@@ -33,19 +33,20 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── Model IDs ────────────────────────────────────────────────────────────────
 AGENT_LLM_HF_REPO="${AGENT_LLM_HF_REPO:-Qwen/Qwen3-8B}"
 VLM_HF_REPO="${VLM_HF_REPO:-Qwen/Qwen2.5-VL-7B-Instruct}"
 
 # ── Destination directories ───────────────────────────────────────────────────
-AGENT_LLM_DIR="${AGENT_LLM_DIR:-$SCRIPT_DIR/models/agent_llm}"
-VLM_DIR="${VLM_DIR:-$SCRIPT_DIR/models/vlm}"
-SAM2_CKPT_DIR="${SAM2_CKPT_DIR:-$SCRIPT_DIR/models/sam2_checkpoints}"
-REMOTECLIP_DIR="${REMOTECLIP_DIR:-$SCRIPT_DIR/models/remoteclip}"
-REMOTESAM_DIR="${REMOTESAM_DIR:-$SCRIPT_DIR/models/remotesam}"
-STRIP_RCNN_DIR="${STRIP_RCNN_DIR:-$SCRIPT_DIR/models/strip_rcnn}"
-INSTRUCTSAM_DIR="${INSTRUCTSAM_DIR:-$SCRIPT_DIR/models/instructsam}"
+AGENT_LLM_DIR="${AGENT_LLM_DIR:-$PROJECT_ROOT/models/agent_llm}"
+VLM_DIR="${VLM_DIR:-$PROJECT_ROOT/models/vlm}"
+SAM2_CKPT_DIR="${SAM2_CKPT_DIR:-$PROJECT_ROOT/models/sam2_checkpoints}"
+REMOTECLIP_DIR="${REMOTECLIP_DIR:-$PROJECT_ROOT/models/remoteclip}"
+REMOTESAM_DIR="${REMOTESAM_DIR:-$PROJECT_ROOT/models/remotesam}"
+STRIP_RCNN_DIR="${STRIP_RCNN_DIR:-$PROJECT_ROOT/models/strip_rcnn}"
+INSTRUCTSAM_DIR="${INSTRUCTSAM_DIR:-$PROJECT_ROOT/models/instructsam}"
 
 # ── HuggingFace endpoint (override for China mirror) ─────────────────────────
 export HF_ENDPOINT="${HF_ENDPOINT:-https://huggingface.co}"

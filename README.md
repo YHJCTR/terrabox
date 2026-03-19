@@ -164,6 +164,17 @@ curl -X POST "http://localhost:8000/v1/register" \
   }'
 ```
 
+### AI Models & Agent (optional)
+
+To enable AI-powered tools (VLM image analysis, SAM2 segmentation, Agent reasoning loop,
+and other geo-perception capabilities), follow the separate setup guide:
+**[INSTALLATION.md](INSTALLATION.md)**
+
+It covers model weight download, subprocess vs Docker deployment, and Agent LLM
+configuration (`agent_config.yaml`).
+
+---
+
 ## User Guide
 
 ### Basic Usage Flow

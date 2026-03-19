@@ -87,28 +87,16 @@ def download_sam2(dest_dir: Path):
 
 # ── 2. GeoRSCLIP ViT-L-14 ─────────────────────────────────────────────────────
 def download_georsclip(dest_dir: Path):
-    print("\n[2/3] GeoRSCLIP ViT-L-14 (~0.9 GB)")
-    _require("huggingface_hub")
-    from huggingface_hub import hf_hub_download
-
+    print("\n[2/3] GeoRSCLIP ViT-L-14 (~1.6 GB)")
+    
     dest = dest_dir / "GeoRSCLIP-ViT-L-14.pt"
     if dest.exists():
         print(_yellow(f"  [SKIP] {dest.name} already exists."))
         return
 
-    print("  Downloading from HuggingFace: XShadow/GeoRSCLIP ...")
-    # GeoRSCLIP 在 HuggingFace 上的文件名
-    downloaded = hf_hub_download(
-        repo_id="XShadow/GeoRSCLIP",
-        filename="GeoRSCLIP-ViT-L-14.pt",
-        local_dir=str(dest_dir),
-        local_dir_use_symlinks=False,
-    )
-    # hf_hub_download 会放到子目录，重命名到标准位置
-    downloaded_path = Path(downloaded)
-    if downloaded_path != dest:
-        downloaded_path.rename(dest)
-    print(f"  {_green('Done')}  →  {dest}")
+    # Direct download URL from HuggingFace (Zilun/GeoRSCLIP)
+    url = "https://huggingface.co/Zilun/GeoRSCLIP/resolve/main/ckpt/RS5M_ViT-L-14.pt?download=true"
+    _download_file(url, dest, "GeoRSCLIP-ViT-L-14.pt")
 
 
 # ── 3. Qwen2.5-VL-7B-Instruct ─────────────────────────────────────────────────
