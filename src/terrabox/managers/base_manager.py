@@ -46,6 +46,7 @@ class ServiceRegistry:
 
     _registry: List[Type["BaseServiceManager"]] = []
     _stopped: Set[Type["BaseServiceManager"]] = set()
+    _last_used: dict = {}           # manager_cls -> float (time.time() of last start)
     _lock: threading.Lock = threading.Lock()
     _handlers_installed: bool = False
 
@@ -83,6 +84,61 @@ class ServiceRegistry:
             finally:
                 with cls._lock:
                     cls._stopped.add(manager_cls)
+
+    @classmethod
+    def mark_used(cls, manager_cls: Type["BaseServiceManager"]) -> None:
+        """Record that a service was successfully started/reused right now."""
+        with cls._lock:
+            cls._last_used[manager_cls] = time.time()
+
+    @classmethod
+    def evict_lru_for_gpu(
+        cls,
+        min_free_mib: int,
+        exclude_cls: Type["BaseServiceManager"],
+        count: int = 1,
+    ) -> None:
+        """Stop LRU-registered services (excluding exclude_cls) until GPU has enough free memory.
+
+        After each eviction waits 3 s for the container to release GPU memory before re-checking.
+        Evicted managers are removed from the registry so they can be re-registered on next start.
+        """
+        from .gpu_allocator import has_free_gpu, has_free_gpus
+
+        def _enough() -> bool:
+            return has_free_gpus(count, min_free_mib) if count > 1 else has_free_gpu(min_free_mib)
+
+        if _enough():
+            return
+
+        with cls._lock:
+            candidates = sorted(
+                [m for m in cls._registry if m is not exclude_cls and m not in cls._stopped],
+                key=lambda m: cls._last_used.get(m, 0.0),
+            )
+
+        for manager_cls in candidates:
+            if _enough():
+                return
+            try:
+                if not manager_cls.is_running():
+                    continue
+                logger.info(
+                    f"GPU eviction: stopping {manager_cls.__name__} "
+                    f"(last used: {cls._last_used.get(manager_cls, 0.0):.0f})"
+                )
+                manager_cls.stop_service()
+                with cls._lock:
+                    try:
+                        cls._registry.remove(manager_cls)
+                    except ValueError:
+                        pass
+                    cls._stopped.discard(manager_cls)
+                    cls._last_used.pop(manager_cls, None)
+                logger.info(f"Evicted {manager_cls.__name__}. Waiting for GPU memory release...")
+                time.sleep(3)
+            except Exception as exc:
+                logger.warning(f"Error evicting {manager_cls.__name__}: {exc}")
 
     @classmethod
     def _install_handlers(cls) -> None:
@@ -148,8 +204,52 @@ class BaseServiceManager:
             raw_fn(inner_cls, *args, **kwargs)
             # Register only on successful return (no exception)
             ServiceRegistry.register(inner_cls)
+            ServiceRegistry.mark_used(inner_cls)
 
         cls.start_service = classmethod(_wrapped_start)
+
+    @classmethod
+    def _ensure_gpu(cls, min_free_mib: int, env_var: str | None = None) -> str:
+        """Return a GPU ID, evicting LRU services first if GPU memory is insufficient.
+
+        If env_var is set and non-empty, returns its value immediately (user-pinned GPU).
+        Falls back to cls.GPU_DEVICES if dynamic allocation fails after eviction.
+        """
+        from .gpu_allocator import allocate_gpu, has_free_gpu
+
+        if env_var:
+            val = os.environ.get(env_var, "").strip()
+            if val:
+                return val
+
+        if not has_free_gpu(min_free_mib):
+            ServiceRegistry.evict_lru_for_gpu(min_free_mib, exclude_cls=cls, count=1)
+
+        return allocate_gpu(
+            min_free_mib=min_free_mib,
+            fallback=getattr(cls, "GPU_DEVICES", "0"),
+            env_var=None,
+        )
+
+    @classmethod
+    def _ensure_gpus(cls, count: int, min_free_mib: int, env_var: str | None = None) -> str:
+        """Multi-GPU variant of _ensure_gpu. Returns comma-separated GPU IDs."""
+        from .gpu_allocator import allocate_gpus, has_free_gpus
+
+        if env_var:
+            val = os.environ.get(env_var, "").strip()
+            if val:
+                return val
+
+        if not has_free_gpus(count, min_free_mib):
+            ServiceRegistry.evict_lru_for_gpu(min_free_mib, exclude_cls=cls, count=count)
+
+        return allocate_gpus(
+            count=count,
+            min_free_mib=min_free_mib,
+            fallback=getattr(cls, "GPU_DEVICES", "0"),
+            env_var=None,
+        )
 
 
 _subprocess_logger = logging.getLogger("subprocess_manager")

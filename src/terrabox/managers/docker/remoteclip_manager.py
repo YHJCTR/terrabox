@@ -17,7 +17,6 @@ import time
 import os
 import requests
 import logging
-from ..gpu_allocator import allocate_gpu
 from ..base_manager import BaseServiceManager
 
 logger = logging.getLogger("docker.remoteclip_manager")
@@ -66,9 +65,8 @@ class RemoteCLIPDockerManager(BaseServiceManager):
 
         subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
 
-        gpu = allocate_gpu(
+        gpu = cls._ensure_gpu(
             min_free_mib=4096,
-            fallback=cls.GPU_DEVICES,
             env_var="REMOTECLIP_GPU_DEVICES",
         )
 

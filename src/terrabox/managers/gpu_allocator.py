@@ -5,7 +5,7 @@ Queries available GPU memory via nvidia-smi and selects the GPU(s) with the
 most free memory at container start time.
 
 Usage:
-    from terrabox.utils.gpu_allocator import allocate_gpu, allocate_gpus
+    from terrabox.managers.gpu_allocator import allocate_gpu, allocate_gpus
 
     gpu_id  = allocate_gpu()           # Single GPU → e.g. "2"
     gpu_ids = allocate_gpus(count=2)   # Multi-GPU  → e.g. "0,3"
@@ -167,3 +167,20 @@ def allocate_gpus(
         f"(free: {[g['free_mib'] for g in chosen]} MiB)."
     )
     return ids
+
+
+def has_free_gpu(min_free_mib: int) -> bool:
+    """Return True if at least one GPU has >= min_free_mib MiB of free memory."""
+    try:
+        return any(g["free_mib"] >= min_free_mib for g in _query_gpu_free_memory())
+    except Exception:
+        return True  # Cannot query — assume OK; allocate_gpu fallback will handle it
+
+
+def has_free_gpus(count: int, min_free_mib: int) -> bool:
+    """Return True if at least `count` GPUs each have >= min_free_mib MiB of free memory."""
+    try:
+        eligible = [g for g in _query_gpu_free_memory() if g["free_mib"] >= min_free_mib]
+        return len(eligible) >= count
+    except Exception:
+        return True

@@ -16,7 +16,6 @@ import time
 
 import requests
 
-from ..gpu_allocator import allocate_gpus
 from ..base_manager import BaseServiceManager
 
 logger = logging.getLogger("docker.agent_llm_manager")
@@ -91,10 +90,9 @@ class AgentLLMDockerManager(BaseServiceManager):
             # Remove any stopped container with the same name
             subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
 
-            gpu = allocate_gpus(
+            gpu = cls._ensure_gpus(
                 count=int(cls.TENSOR_PARALLEL_SIZE),
                 min_free_mib=8192,
-                fallback=cls.GPU_DEVICES,
                 env_var="AGENT_LLM_GPU_DEVICES",
             )
 

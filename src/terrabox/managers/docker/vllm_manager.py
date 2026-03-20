@@ -21,7 +21,6 @@ import time
 import os
 import requests
 import logging
-from ..gpu_allocator import allocate_gpus
 from ..base_manager import BaseServiceManager
 
 logger = logging.getLogger("docker.vllm_manager")
@@ -81,10 +80,9 @@ class VLLMDockerManager(BaseServiceManager):
         # Remove any stopped container with the same name to avoid "name already in use"
         subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
 
-        gpu = allocate_gpus(
+        gpu = cls._ensure_gpus(
             count=int(cls.TENSOR_PARALLEL_SIZE),
             min_free_mib=16384,
-            fallback=cls.GPU_DEVICES,
             env_var="VLM_GPU_DEVICES",
         )
 

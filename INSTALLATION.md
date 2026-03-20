@@ -1,318 +1,134 @@
 # Perception Models & Agent — Installation Guide
 
-This guide covers how to install and configure the AI perception model services and the
-Agent LLM. For the main Terrabox API installation (Python environment, database, startup),
-see [README.md](README.md).
+For main Terrabox API setup (Python env, database, startup) see [README.md](README.md).
 
 ---
 
-## Table of Contents
+## 1. Services
 
-1. [Service Overview](#1-service-overview)
-2. [Model Weights](#2-model-weights)
-3. [Perception Models — Non-Docker Mode](#3-perception-models--non-docker-mode)
-4. [Perception Models — Docker Mode](#4-perception-models--docker-mode)
-5. [Building Docker Images](#5-building-docker-images)
-   - [Build all images at once](#build-all-images-at-once)
-   - [Build a single image](#build-a-single-image)
-6. [Agent LLM](#6-agent-llm)
-   - [Option A: Remote API](#option-a-remote-api-simplest)
-   - [Option B: Local LLM subprocess](#option-b-local-llm-subprocess)
-   - [Option C: Local LLM Docker container](#option-c-local-llm-docker-container)
-7. [Port Reference](#7-port-reference)
+Seven AI services start on demand — no manual launch needed.
 
----
+| Service | Port | Mode |
+|---------|------|------|
+| vLLM (vision) | 9000 | subprocess or Docker |
+| SAM2 | 9002 | subprocess or Docker |
+| RemoteCLIP | 9003 | subprocess or Docker |
+| RemoteSAM | 9004 | subprocess or Docker |
+| Strip-RCNN | 9005 | subprocess or Docker |
+| InstructSAM | 9006 | subprocess or Docker |
+| Agent LLM | 9100 | subprocess or Docker |
 
-## 1. Service Overview
-
-Terrabox manages seven AI services. Each is started on demand when the corresponding
-tool is first called — you do not need to launch them manually.
-
-| Service | Port | Description |
-|---------|------|-------------|
-| vLLM (vision) | 9000 | Vision-language model |
-| SAM2 | 9002 | Segment Anything Model 2 — general image segmentation |
-| RemoteCLIP | 9003 | Zero-shot classification and retrieval for remote sensing |
-| RemoteSAM | 9004 | Text-prompted segmentation for remote sensing images |
-| Strip-RCNN | 9005 | Rotated object detection on aerial imagery (DOTA) |
-| InstructSAM | 9006 | Instruction-driven instance segmentation and counting |
-| Agent LLM | 9100 | LLM powering the Agent reasoning loop |
-
-**Deployment mode** is controlled by `TERRABOX_USE_DOCKER` in `.env`:
-
-| Value | Mode | Description |
-|-------|------|-------------|
-| `false` (default) | Subprocess | Each service runs as a subprocess inside its own conda environment |
-| `true` | Docker | Each service runs inside an isolated Docker container |
+Deployment mode: set `TERRABOX_USE_DOCKER=false` (default) or `true` in `.env`.
 
 ---
 
 ## 2. Model Weights
 
-All AI services require pre-downloaded model weights. Run `scripts/download_weights.sh` once
-before starting any service. The script downloads each model to `./models/<name>/` by
-default and prints the exact paths to put in your `.env` / `agent_config.yaml`.
-
-### Prerequisites
-
 ```bash
-pip install huggingface_hub   # provides huggingface-cli
-pip install gdown             # required for Strip-RCNN (Google Drive)
+pip install huggingface_hub gdown   # prerequisites
+scripts/download_weights.sh         # downloads all models to ./models/
 ```
 
-### Download all weights
+Common options:
 
 ```bash
-scripts/download_weights.sh
+scripts/download_weights.sh --skip-agent --skip-vlm          # skip specific models
+AGENT_LLM_HF_REPO=your-org/your-llm scripts/download_weights.sh  # custom model
+HF_ENDPOINT=https://hf-mirror.com scripts/download_weights.sh    # mirror
 ```
 
-The Agent LLM and VLM model IDs default to `Qwen/Qwen3-8B` and
-`Qwen/Qwen2.5-VL-7B-Instruct`. Override them before running the script:
-
-```bash
-AGENT_LLM_HF_REPO=your-org/your-llm \
-VLM_HF_REPO=your-org/your-vlm \
-scripts/download_weights.sh
-```
-
-Skip models you already have or do not need:
-
-```bash
-scripts/download_weights.sh --skip-agent --skip-vlm
-```
-
-Available skip flags: `--skip-agent`, `--skip-vlm`, `--skip-sam2`,
-`--skip-remoteclip`, `--skip-remotesam`, `--skip-strip-rcnn`, `--skip-instructsam`
-
-If HuggingFace is slow or blocked, use a mirror:
-
-```bash
-HF_ENDPOINT=https://hf-mirror.com scripts/download_weights.sh
-```
+Skip flags: `--skip-agent` `--skip-vlm` `--skip-sam2` `--skip-remoteclip` `--skip-remotesam` `--skip-strip-rcnn` `--skip-instructsam`
 
 ### Weights reference
 
-| Service | Downloaded file(s) | Default directory | `agent_config.yaml` key | `.env` key (fallback) |
-|---------|-------------------|-------------------|-------------------------|-----------------------|
-| Agent LLM | `Qwen3-8B/` (full dir) | `models/agent_llm/` | `local_llm_model_path` | — |
-| VLM | `Qwen2.5-VL-7B-Instruct/` (full dir) | `models/vlm/` | `vlm_model_path` | `VLM_MODEL_PATH` |
-| SAM2 (subprocess) | `sam2.1_hiera_large.pt` | `models/sam2_checkpoints/` | `sam2_work_dir` | `SAM2_WORK_DIR` |
-| SAM2 (Docker) | `sam2.1_hiera_large.pt` | `models/sam2_checkpoints/` | `sam2_checkpoint_host` | `SAM2_CHECKPOINT_HOST` |
-| RemoteCLIP | `RemoteCLIP-ViT-L-14.pt` | `models/remoteclip/` | `remoteclip_ckpt_host` | `REMOTECLIP_CKPT_HOST` |
-| RemoteSAM | `swin_base_patch4_window12_384_22k.pth` | `models/remotesam/` | `remotesam_checkpoint_host` | `REMOTESAM_CHECKPOINT_HOST` |
-| Strip-RCNN | `stripnet_s.pth` | `models/strip_rcnn/` | `strip_rcnn_ckpt_host` | `STRIP_RCNN_CKPT_HOST` |
-| InstructSAM | `sam2_hiera_large.pt` + `GeoRSCLIP-ViT-L-14.pt` | `models/instructsam/` | `instructsam_models_host` | `INSTRUCTSAM_MODELS_HOST` |
+| Service | File(s) | Default dir | `agent_config.yaml` key |
+|---------|---------|-------------|--------------------------|
+| Agent LLM | `Qwen3-8B/` | `models/agent_llm/` | `local_llm_model_path` |
+| VLM | `Qwen2.5-VL-7B-Instruct/` | `models/vlm/` | `vlm_model_path` |
+| SAM2 | `sam2.1_hiera_large.pt` | `models/sam2_checkpoints/` | `sam2_checkpoint_host` (Docker) / `sam2_work_dir` (subprocess) |
+| RemoteCLIP | `RemoteCLIP-ViT-L-14.pt` | `models/remoteclip/` | `remoteclip_ckpt_host` |
+| RemoteSAM | `swin_base_patch4_window12_384_22k.pth` | `models/remotesam/` | `remotesam_checkpoint_host` |
+| Strip-RCNN | `stripnet_s.pth` | `models/strip_rcnn/` | `strip_rcnn_ckpt_host` |
+| InstructSAM | `sam2_hiera_large.pt` + `GeoRSCLIP-ViT-L-14.pt` | `models/instructsam/` | `instructsam_models_host` |
 
-> **Note on InstructSAM vs SAM2:** InstructSAM uses an older SAM2 release
-> (`sam2_hiera_large.pt`, July 2024). The standalone SAM2 service uses the newer
-> `sam2.1_hiera_large.pt` (September 2024). These are different files stored in
-> separate directories.
-
-> **Note on RemoteSAM BERT:** `bert-base-uncased` is downloaded automatically by
-> HuggingFace `transformers` on first run. In Docker mode, pre-cache it by running
-> the container once with internet access, or mount your HuggingFace cache via
-> `HF_CACHE_HOST` in `.env.docker`.
-
-### Override destination directories
-
-Each directory can be overridden via an environment variable before running the script:
-
-```bash
-SAM2_CKPT_DIR=/data1/models/sam2 \
-REMOTECLIP_DIR=/data1/models/clip \
-scripts/download_weights.sh --skip-agent --skip-vlm
-```
+> InstructSAM uses `sam2_hiera_large.pt` (July 2024), distinct from SAM2's `sam2.1_hiera_large.pt` (Sep 2024).
 
 ---
 
-## 3. Perception Models — Non-Docker Mode
+## 3. Non-Docker Mode (subprocess)
 
-### Prerequisites
+Requires a separate conda environment for each model. See each model's upstream README for env setup.
 
-- conda installed
-- A separate conda environment created and configured for each model
-- Model weights downloaded to local disk
-- Refer to each model's upstream repository README for environment setup instructions
+Add paths to `agent_config.yaml` (gitignored, recommended) or `.env` (fallback). See `agent_config.example.yaml` for all available keys.
 
-### Configuration
-
-**Option A — `agent_config.yaml` (recommended)**
-
-Add the perception service paths to your existing `agent_config.yaml` (which you already
-created for the Agent LLM). This is the preferred approach: the file is gitignored so your
-machine-specific paths never end up in version control.
+**`agent_config.yaml` — key paths:**
 
 ```yaml
 use_docker: false
 
-# ── vLLM vision model (port 9000) ────────────────────────────────────────────
-vlm_model_path: /path/to/your/vlm_model/
+vlm_model_path: /path/to/vlm_model/
 vlm_python_exec: /path/to/conda/envs/YOUR_ENV/bin/python
-vlm_port: 9000
 vlm_gpu_devices: "0"
-vlm_tensor_parallel: 1
-vlm_max_model_len: 4096
-vlm_gpu_memory_utilization: 0.9
 
-# ── SAM2 (port 9002) ─────────────────────────────────────────────────────────
 sam2_python_exec: /path/to/conda/envs/sam2/bin/python
 sam2_server_script: /path/to/sam2/sam2_server2.py
 sam2_work_dir: /path/to/sam2
-sam2_port: 9002
-sam2_gpu_devices: "0"
 
-# ── RemoteCLIP (port 9003) ───────────────────────────────────────────────────
 remoteclip_python_exec: /path/to/conda/envs/RemoteCLIP/bin/python
 remoteclip_server_script: /path/to/RemoteCLIP/start2.py
 remoteclip_work_dir: /path/to/RemoteCLIP
-remoteclip_port: 9003
-remoteclip_gpu_devices: "0"
 
-# ── RemoteSAM (port 9004) ────────────────────────────────────────────────────
 remotesam_python_exec: /path/to/conda/envs/RemoteSAM/bin/python
 remotesam_server_script: /path/to/RemoteSAM/start.py
 remotesam_work_dir: /path/to/RemoteSAM
-remotesam_port: 9004
-remotesam_gpu_devices: "0"
 
-# ── Strip-RCNN (port 9005) ───────────────────────────────────────────────────
 strip_rcnn_python_exec: /path/to/conda/envs/strip/bin/python
 strip_rcnn_server_script: /path/to/Strip-RCNN/start.py
 strip_rcnn_work_dir: /path/to/Strip-RCNN
-strip_rcnn_port: 9005
-strip_rcnn_gpu_devices: "0"
 strip_rcnn_config_path: /path/to/Strip-RCNN/configs/strip_rcnn/orig/strip_rcnn_s_fpn_1x_dota_le90.py
 strip_rcnn_checkpoint_path: /path/to/Strip-RCNN/ckpt/stripnet_s.pth
 ```
 
-See `agent_config.example.yaml` for the full list of available keys.
+Ports default to 9000/9002–9006; override with `vlm_port`, `sam2_port`, etc.
 
 ---
 
-**Option B — `.env` file (legacy fallback)**
+## 4. Docker Mode
 
-The environment variable approach still works as a fallback when the corresponding key is
-absent from `agent_config.yaml`. Copy the example and fill in your paths:
+Requires Docker + NVIDIA Container Toolkit. Build images first (see §5).
 
-```bash
-cp .env.example .env
+Add volume paths to `agent_config.yaml`:
+
+```yaml
+use_docker: true
+
+vlm_model_path: /host/path/to/vlm_model/
+vlm_gpu_devices: "0"
+
+sam2_checkpoint_host: /host/path/to/sam2/checkpoints
+sam2_config_host: /host/path/to/sam2/configs
+
+remoteclip_ckpt_host: /host/path/to/RemoteCLIP/checkpoints
+
+remotesam_checkpoint_host: /host/path/to/RemoteSAM/pretrained_weights
+
+strip_rcnn_ckpt_host: /host/path/to/Strip-RCNN/ckpt
+strip_rcnn_config_host: /host/path/to/Strip-RCNN/configs
+
+instructsam_models_host: /host/path/to/instructsam/models  # needs sam2_hiera_large.pt + GeoRSCLIP-ViT-L-14.pt
+
+docker_data_mount_host: /data1  # mounted at the same path in all containers
 ```
-
-```dotenv
-TERRABOX_USE_DOCKER=false
-
-# ── vLLM (vision-language model, port 9000) ──────────────────────────────────
-VLLM_PYTHON_EXEC=/your/conda/envs/YOUR_ENV/bin/python
-VLM_MODEL_PATH=/path/to/your/qwen_vl_model/
-VLM_GPU_DEVICES=0
-VLM_TENSOR_PARALLEL_SIZE=1
-
-# ── SAM2 (port 9002) ─────────────────────────────────────────────────────────
-SAM2_PYTHON_EXEC=/your/conda/envs/sam2/bin/python
-SAM2_SERVER_SCRIPT=/path/to/sam2/sam2_server2.py
-SAM2_WORK_DIR=/path/to/sam2
-SAM2_GPU_DEVICES=0
-
-# ── RemoteCLIP (port 9003) ───────────────────────────────────────────────────
-REMOTECLIP_PYTHON_EXEC=/your/conda/envs/RemoteCLIP/bin/python
-REMOTECLIP_SERVER_SCRIPT=/path/to/RemoteCLIP/start2.py
-REMOTECLIP_WORK_DIR=/path/to/RemoteCLIP
-REMOTECLIP_GPU_DEVICES=0
-
-# ── RemoteSAM (port 9004) ────────────────────────────────────────────────────
-REMOTESAM_PYTHON_EXEC=/your/conda/envs/RemoteSAM/bin/python
-REMOTESAM_SERVER_SCRIPT=/path/to/RemoteSAM/start.py
-REMOTESAM_WORK_DIR=/path/to/RemoteSAM
-REMOTESAM_GPU_DEVICES=0
-
-# ── Strip-RCNN (port 9005) ───────────────────────────────────────────────────
-STRIP_RCNN_PYTHON_EXEC=/your/conda/envs/strip/bin/python
-STRIP_RCNN_SERVER_SCRIPT=/path/to/Strip-RCNN/start.py
-STRIP_RCNN_WORK_DIR=/path/to/Strip-RCNN
-STRIP_RCNN_GPU_DEVICES=0
-STRIP_RCNN_CONFIG_PATH=/path/to/Strip-RCNN/configs/strip_rcnn/orig/strip_rcnn_s_fpn_1x_dota_le90.py
-STRIP_RCNN_CHECKPOINT_PATH=/path/to/Strip-RCNN/ckpt/stripnet_s.pth
-```
-
-Port numbers can be overridden via `*_PORT` variables in `.env`, or `*_port` keys in `agent_config.yaml`.
-
----
-
-## 4. Perception Models — Docker Mode
-
-### Prerequisites
-
-- Docker with NVIDIA Container Toolkit installed
-- All perception model images built (see [Section 4](#4-building-docker-images))
-- Model weights downloaded to the host machine
-
-### Configuration
-
-```bash
-cp .env.docker.example .env
-```
-
-Replace the placeholder paths with host-side paths to your weights:
-
-```dotenv
-TERRABOX_USE_DOCKER=true
-
-# ── vLLM ─────────────────────────────────────────────────────────────────────
-VLM_MODEL_PATH=/host/path/to/qwen_vl_model/    # mounted as /model inside container
-VLM_GPU_DEVICES=0
-VLM_TENSOR_PARALLEL_SIZE=1
-
-# ── SAM2 ─────────────────────────────────────────────────────────────────────
-SAM2_GPU_DEVICES=0
-SAM2_CHECKPOINT_HOST=/host/path/to/sam2/checkpoints  # contains sam2.1_hiera_large.pt
-SAM2_CONFIG_HOST=/host/path/to/sam2/sam2/configs      # sam2 configs directory
-
-# ── RemoteCLIP ───────────────────────────────────────────────────────────────
-REMOTECLIP_GPU_DEVICES=0
-REMOTECLIP_CKPT_HOST=/host/path/to/RemoteCLIP/checkpoints
-
-# ── RemoteSAM ────────────────────────────────────────────────────────────────
-REMOTESAM_GPU_DEVICES=0
-REMOTESAM_CHECKPOINT_HOST=/host/path/to/RemoteSAM/pretrained_weights
-
-# ── Strip-RCNN ───────────────────────────────────────────────────────────────
-STRIP_RCNN_GPU_DEVICES=0
-STRIP_RCNN_CKPT_HOST=/host/path/to/Strip-RCNN/ckpt
-STRIP_RCNN_CONFIG_HOST=/host/path/to/Strip-RCNN/configs
-
-# ── InstructSAM ──────────────────────────────────────────────────────────────
-INSTRUCTSAM_GPU_DEVICES=0
-# Directory must contain: sam2_hiera_large.pt and GeoRSCLIP-ViT-L-14.pt
-INSTRUCTSAM_MODELS_HOST=/host/path/to/instructsam/models
-
-# ── Image data root (mounted at the same path in all containers) ──────────────
-DATA_MOUNT_HOST=/data1
-```
-
-> **Note on `DATA_MOUNT_HOST`**: All containers mount this directory at the same host
-> path. Image file paths passed to tool calls must reside under this directory.
 
 ---
 
 ## 5. Building Docker Images
 
-`scripts/build_models.sh` supports two source-acquisition modes:
-
-| Mode | How source code is obtained | Use case |
-|------|----------------------------|----------|
-| `BUILD_MODE=local` (default) | Copied from the host machine | Internal builds; fast, no internet needed |
-| `BUILD_MODE=git` | Cloned from GitHub at build time | Open-source users; no local source needed |
-
-### Build all images at once
-
 ```bash
-# Open-source users — clone from GitHub
-BUILD_MODE=git scripts/build_models.sh
+BUILD_MODE=git scripts/build_models.sh    # clone source from GitHub (open-source)
+scripts/build_models.sh                   # copy from local source (default)
 
-# Internal users — copy from local source (default)
-scripts/build_models.sh
-
-# With mirror URLs (when GitHub is slow or blocked)
+# Mirror URLs when GitHub is slow
 BUILD_MODE=git \
   SAM2_GIT_URL=https://bgithub.xyz/facebookresearch/sam2.git \
   REMOTESAM_GIT_URL=https://bgithub.xyz/xiaobdul/RemoteSAM.git \
@@ -321,122 +137,53 @@ BUILD_MODE=git \
   scripts/build_models.sh
 ```
 
-This produces the following images:
+Images: `terrabox/vllm:latest` `terrabox/sam2:latest` `terrabox/remoteclip:latest` `terrabox/remotesam:latest` `terrabox/strip-rcnn:latest` `terrabox/instructsam:latest` `terrabox/agent-llm:latest`
 
-| Image | Port |
-|-------|------|
-| `terrabox/sam2:latest` | 9002 |
-| `terrabox/remoteclip:latest` | 9003 |
-| `terrabox/remotesam:latest` | 9004 |
-| `terrabox/strip-rcnn:latest` | 9005 |
-| `terrabox/instructsam:latest` | 9006 |
-| `terrabox/vllm:latest` | 9000 |
-| `terrabox/agent-llm:latest` | 9100 |
-
-### Build a single image
-
-Example for SAM2 (substitute the directory and ARG name for other models):
+Single image build example:
 
 ```bash
-cd docker/sam2
-
-# git mode (default) — no local source needed
-docker build -t terrabox/sam2:latest .
-
-# git mode with a mirror URL
-docker build --build-arg SAM2_GIT_URL=https://mirror/sam2.git \
-             -t terrabox/sam2:latest .
-
-# local mode — copy source into the build context first
-cp -r /path/to/sam2 ./sam2
-docker build --build-arg BUILD_MODE=local -t terrabox/sam2:latest .
-rm -rf ./sam2
+cd docker/sam2 && docker build -t terrabox/sam2:latest .
+# With mirror: docker build --build-arg SAM2_GIT_URL=https://mirror/sam2.git -t terrabox/sam2:latest .
 ```
-
-`ARG` names for each image:
-
-| Image directory | ARG name | Default URL |
-|-----------------|----------|-------------|
-| `docker/sam2` | `SAM2_GIT_URL` | github.com/facebookresearch/sam2 |
-| `docker/remotesam` | `REMOTESAM_GIT_URL` | github.com/xiaobdul/RemoteSAM |
-| `docker/strip_rcnn` | `STRIP_RCNN_GIT_URL` | github.com/wjy5446/Strip-RCNN |
-| `docker/instructsam` | `INSTRUCTSAM_GIT_URL` | github.com/VoyagerXvoyagerx/InstructSAM |
-| `docker/remoteclip`, `docker/vllm`, `docker/agent_llm` | — | no third-party source |
 
 ---
 
 ## 6. Agent LLM
 
-The Agent LLM drives the reasoning loop. It is configured separately from the perception
-models via `agent_config.yaml` in the project root.
+First-time setup:
 
-> **First-time setup:** copy the example config and fill in your values:
-> ```bash
-> cp agent_config.example.yaml agent_config.yaml
-> ```
-> `agent_config.yaml` is gitignored so your local model paths and API keys stay off
-> version control.
+```bash
+cp agent_config.example.yaml agent_config.yaml
+```
 
-### Option A: Remote API (simplest)
-
-No GPU required. Works with any OpenAI-compatible API (OpenAI, DeepSeek, Qwen, etc.).
-
-Edit `agent_config.yaml`:
+**Option A — Remote API** (no GPU needed):
 
 ```yaml
 use_local_llm: false
-
-remote_llm_api_base: https://api.openai.com/v1   # or any compatible endpoint
-remote_llm_api_key: "sk-your-key-here"
+remote_llm_api_base: https://api.openai.com/v1
+remote_llm_api_key: "sk-your-key"
 remote_llm_model: gpt-4o
 ```
 
----
-
-### Option B: Local LLM subprocess
-
-Runs the LLM as a child process using a local conda environment with vLLM installed.
-
-```bash
-# Install vLLM in your conda env (if not already installed)
-pip install vllm
-```
-
-Edit `agent_config.yaml`:
+**Option B — Local subprocess** (`pip install vllm` in your conda env):
 
 ```yaml
 use_local_llm: true
 use_docker: false
-
-local_llm_model_path: /path/to/your/llm_model/         # model weights directory
-local_llm_python_exec: /your/conda/envs/ENV/bin/python  # Python with vllm installed
-local_llm_host: 127.0.0.1
-local_llm_port: 9100
-local_llm_gpu_devices: "0"         # GPU index; comma-separated for multi-GPU
-local_llm_tensor_parallel: 1       # must match number of GPUs
-local_llm_max_model_len: 24576     # context window size (keep below 24960 for 8B models)
+local_llm_model_path: /path/to/llm_model/
+local_llm_python_exec: /your/conda/envs/ENV/bin/python
+local_llm_gpu_devices: "0"
+local_llm_tensor_parallel: 1
+local_llm_max_model_len: 24576
 ```
 
----
-
-### Option C: Local LLM Docker container
-
-Uses the pre-built `terrabox/agent-llm:latest` image. Build it first if needed:
-
-```bash
-cd docker/agent_llm && docker build -t terrabox/agent-llm:latest .
-```
-
-Edit `agent_config.yaml`:
+**Option C — Local Docker container** (`cd docker/agent_llm && docker build -t terrabox/agent-llm:latest .`):
 
 ```yaml
 use_local_llm: true
 use_docker: true
-
-local_llm_model_path: /host/path/to/your/llm_model/  # mounted as /model inside container
+local_llm_model_path: /host/path/to/llm_model/
 local_llm_docker_image: terrabox/agent-llm:latest
-local_llm_host: 127.0.0.1
-local_llm_port: 9100
 local_llm_gpu_devices: "0"
 local_llm_tensor_parallel: 1
 local_llm_max_model_len: 24576
@@ -446,19 +193,15 @@ local_llm_max_model_len: 24576
 
 ## 7. Port Reference
 
-| Service | Port | Notes |
-|---------|------|-------|
-| Terrabox API | **8000** | Main FastAPI entry point |
-| vLLM (vision) | **9000** | Vision-language model |
-| SAM2 | **9002** | |
-| RemoteCLIP | **9003** | |
-| RemoteSAM | **9004** | |
-| Strip-RCNN | **9005** | |
-| InstructSAM | **9006** | |
-| Agent LLM | **9100** | Separate from port 9000 to avoid conflicts |
+| Service | Port |
+|---------|------|
+| Terrabox API | 8000 |
+| vLLM (vision) | 9000 |
+| SAM2 | 9002 |
+| RemoteCLIP | 9003 |
+| RemoteSAM | 9004 |
+| Strip-RCNN | 9005 |
+| InstructSAM | 9006 |
+| Agent LLM | 9100 |
 
-To change a port, uncomment and set the corresponding `*_PORT` variable in `.env`:
-
-```dotenv
-SAM2_PORT=9012
-```
+Override any port with `sam2_port: 9012` in `agent_config.yaml` (or `SAM2_PORT=9012` in `.env`).

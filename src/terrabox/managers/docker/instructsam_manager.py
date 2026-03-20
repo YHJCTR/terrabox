@@ -27,7 +27,6 @@ import time
 import os
 import requests
 import logging
-from ..gpu_allocator import allocate_gpu
 from ..base_manager import BaseServiceManager
 
 logger = logging.getLogger("docker.instructsam_manager")
@@ -79,9 +78,8 @@ class InstructSAMDockerManager(BaseServiceManager):
         subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
 
         # InstructSAM loads SAM2 + CLIP only, requiring ~4 GB VRAM
-        gpu = allocate_gpu(
+        gpu = cls._ensure_gpu(
             min_free_mib=4096,
-            fallback=cls.GPU_DEVICES,
             env_var="INSTRUCTSAM_GPU_DEVICES",
         )
 
@@ -95,6 +93,7 @@ class InstructSAMDockerManager(BaseServiceManager):
             "--add-host", "host.docker.internal:host-gateway",
             "-v", f"{cls.DATA_MOUNT_HOST}:{cls.DATA_MOUNT_HOST}",
             "-v", f"{cls.MODELS_HOST}:/models:ro",
+            "-e", "DEVICE=cuda:0",  # Use first GPU visible to container
             cls.DOCKER_IMAGE,
         ]
 
