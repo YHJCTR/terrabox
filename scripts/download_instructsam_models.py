@@ -36,14 +36,14 @@ import sys
 import hashlib
 from pathlib import Path
 
-# ── 颜色输出 ──────────────────────────────────────────────────────────────────
+# ── Color output ──────────────────────────────────────────────────────────────
 def _green(s):  return f"\033[32m{s}\033[0m"
 def _yellow(s): return f"\033[33m{s}\033[0m"
 def _red(s):    return f"\033[31m{s}\033[0m"
 
 
 def _require(pkg: str):
-    """检查 Python 包是否可用，给出友好提示。"""
+    """Check if a Python package is available; print a friendly hint and exit if not."""
     import importlib
     if importlib.util.find_spec(pkg) is None:
         print(_red(f"[ERROR] Required package '{pkg}' not found."))
@@ -51,9 +51,9 @@ def _require(pkg: str):
         sys.exit(1)
 
 
-# ── 单文件 wget 下载（带进度条）────────────────────────────────────────────────
+# ── Single-file download with progress bar ────────────────────────────────────
 def _download_file(url: str, dest: Path, desc: str = ""):
-    """使用 requests 流式下载单个文件，显示进度。"""
+    """Stream-download a single file using requests and show a progress bar."""
     import requests
 
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -79,7 +79,7 @@ def _download_file(url: str, dest: Path, desc: str = ""):
 # ── 1. SAM2 Hiera Large ────────────────────────────────────────────────────────
 def download_sam2(dest_dir: Path):
     print("\n[1/3] SAM2 Hiera Large (~2.5 GB)")
-    # 官方下载地址来自 facebook/sam2 仓库的 checkpoints/download_ckpts.sh
+    # Official URL from facebook/sam2 repo: checkpoints/download_ckpts.sh
     url  = "https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_large.pt"
     dest = dest_dir / "sam2_hiera_large.pt"
     _download_file(url, dest, "sam2_hiera_large.pt")
@@ -121,7 +121,7 @@ def download_qwen(dest_dir: Path):
     print(f"  {_green('Done')}  →  {qwen_dir}")
 
 
-# ── 验证 ──────────────────────────────────────────────────────────────────────
+# ── Verification ──────────────────────────────────────────────────────────────
 def verify(dest_dir: Path, skip_qwen: bool):
     print("\n── Verification ──────────────────────────────────────────────────────")
     checks = [

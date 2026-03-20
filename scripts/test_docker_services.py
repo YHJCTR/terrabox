@@ -151,7 +151,7 @@ SERVICES = {
     "instructsam": {
         # InstructSAM (NeurIPS 2025): Training-Free instruction-based segmentation.
         # Pipeline: SAM2 mask proposals → vLLM counting (HTTP) → GeoRSCLIP matching.
-        # 镜像与 sam2 使用相同基础: nvidia/cuda:11.8.0-devel-ubuntu22.04
+        # Uses the same base image as sam2: nvidia/cuda:11.8.0-devel-ubuntu22.04
         # Models: /data1/yuhongjie2/terra_model/instructsam/
         #   sam2_hiera_large.pt  |  GeoRSCLIP-ViT-L-14.pt
         # Download first:  python scripts/download_instructsam_models.py --skip-qwen
@@ -419,7 +419,7 @@ def test_instructsam(api_url: str, image_path: str) -> dict:
         "passed":     passed,
         "status":     result.get("status"),
         "count":      count,
-        "objects":    result.get("objects", [])[:5],   # 最多显示 5 个
+        "objects":    result.get("objects", [])[:5],   # show at most 5
         "error":      result.get("error"),
     }
 

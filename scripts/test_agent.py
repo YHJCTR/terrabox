@@ -2,13 +2,13 @@
 """
 Agent Chat Integration Test
 ============================
-模拟前端向 Agent 发送带图片的请求，验证完整的 Agent → LLM → Tool 调用链路。
+Simulate frontend sending image requests to Agent, verifying the full Agent → LLM → Tool call chain.
 
 Usage:
     python scripts/test_agent.py
     python scripts/test_agent.py --image /data1/yuhongjie2/test.png
     python scripts/test_agent.py --email user@example.com --password secret
-    python scripts/test_agent.py --token <jwt_token>   # 跳过登录，直接用 token
+    python scripts/test_agent.py --token <jwt_token>   # skip login, use token directly
     python scripts/test_agent.py --base-url http://127.0.0.1:8000
 """
 
@@ -29,7 +29,7 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_EMAIL    = "admin@terrabox.local"
 DEFAULT_PASSWORD = "admin"
 DEFAULT_IMAGE    = "/data1/yuhongjie2/test.png"
-DEFAULT_PROMPT   = "帮我用vlm工具查看图像中有什么"
+DEFAULT_PROMPT   = "Use the VLM tool to analyze what is in this image"
 
 
 # ---------------------------------------------------------------------------
