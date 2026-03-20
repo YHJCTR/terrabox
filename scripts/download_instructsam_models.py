@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-InstructSAM 模型下载脚本
-========================
-将 InstructSAM 所需的全部模型下载到指定目录。
+InstructSAM Model Download Script
+==================================
+Downloads all models required by InstructSAM to the specified directory.
 
-所需模型（来自 InstructSAM GitHub: https://github.com/VoyagerXvoyagerx/InstructSAM）:
+Required models (from InstructSAM GitHub: https://github.com/VoyagerXvoyagerx/InstructSAM):
   1. SAM2 Hiera Large         ~2.5 GB   facebook/sam2-hiera-large
-  2. GeoRSCLIP ViT-L-14       ~0.9 GB   XShadow/GeoRSCLIP
-  3. Qwen2.5-VL-7B-Instruct   ~15  GB   Qwen/Qwen2.5-VL-7B-Instruct  [可选]
+  2. GeoRSCLIP ViT-L-14       ~1.6 GB   Zilun/GeoRSCLIP
+  3. Qwen2.5-VL-7B-Instruct   ~15  GB   Qwen/Qwen2.5-VL-7B-Instruct  [optional]
 
-注：默认架构中计数步骤调用宿主机已有的 vLLM 服务（port 9000），
-    无需下载 Qwen。如需独立运行可加 --model qwen 单独下载。
+Note: The default architecture calls the host's vLLM service (port 9000) for counting,
+      so Qwen download is optional. Use --model qwen to download separately.
 
-默认保存路径: /data1/yuhongjie2/terra_model/instructsam/
+Default save path: /data1/yuhongjie2/terra_model/instructsam/
 
-目录结构（下载后）:
+Directory structure (after download):
   instructsam/
   ├── sam2_hiera_large.pt
   ├── GeoRSCLIP-ViT-L-14.pt
@@ -23,11 +23,11 @@ InstructSAM 模型下载脚本
       ├── model-00001-of-...safetensors
       └── ...
 
-用法:
+Usage:
   python scripts/download_instructsam_models.py
   python scripts/download_instructsam_models.py --dest /your/path
-  python scripts/download_instructsam_models.py --skip-qwen   # 跳过大模型
-  python scripts/download_instructsam_models.py --model sam2  # 只下载某项
+  python scripts/download_instructsam_models.py --skip-qwen   # skip large model
+  python scripts/download_instructsam_models.py --model sam2  # download specific model
 """
 
 import argparse
@@ -99,7 +99,7 @@ def download_georsclip(dest_dir: Path):
     _download_file(url, dest, "GeoRSCLIP-ViT-L-14.pt")
 
 
-# ── 3. Qwen2.5-VL-7B-Instruct ─────────────────────────────────────────────────
+# ── 3. Qwen2.5-VL-7B-Instruct (optional, for InstructSAM counting) ─────────────
 def download_qwen(dest_dir: Path):
     print("\n[3/3] Qwen2.5-VL-7B-Instruct (~15 GB)")
     _require("huggingface_hub")

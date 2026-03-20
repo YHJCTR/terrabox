@@ -44,7 +44,7 @@ Skip flags: `--skip-agent` `--skip-vlm` `--skip-sam2` `--skip-remoteclip` `--ski
 | Service | File(s) | Default dir | `agent_config.yaml` key |
 |---------|---------|-------------|--------------------------|
 | Agent LLM | `Qwen3-8B/` | `models/agent_llm/` | `local_llm_model_path` |
-| VLM | `Qwen2.5-VL-7B-Instruct/` | `models/vlm/` | `vlm_model_path` |
+| VLM | `NightPro/qwen3vl-8b-4bit-disasterM3/` | `models/vlm/` | `vlm_model_path` |
 | SAM2 | `sam2.1_hiera_large.pt` | `models/sam2_checkpoints/` | `sam2_checkpoint_host` (Docker) / `sam2_work_dir` (subprocess) |
 | RemoteCLIP | `RemoteCLIP-ViT-L-14.pt` | `models/remoteclip/` | `remoteclip_ckpt_host` |
 | RemoteSAM | `swin_base_patch4_window12_384_22k.pth` | `models/remotesam/` | `remotesam_checkpoint_host` |

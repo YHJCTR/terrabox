@@ -264,8 +264,9 @@ def main():
         p_msk = os.path.join(temp_dir, "masked.tif")
         create_dummy_raster(p_sr, 1000.0, dtype='float32')
         # bit3=cloud: value 8 (0b00001000) marks all pixels as cloud
-        qa_data = np.full((10, 10), 8, dtype='float32')
-        create_dummy_raster(p_qa, qa_data, dtype='float32')
+        # Must use integer dtype so numpy bitwise ops work inside the handler
+        qa_data = np.full((10, 10), 8, dtype='int16')
+        create_dummy_raster(p_qa, qa_data, dtype='int16')
         res = reg.call("geo_raster.apply_cloud_mask", {
             "sr_path": p_sr, "qa_path": p_qa, "output_path": p_msk, "sensor": "landsat"
         })
@@ -286,6 +287,70 @@ def main():
         assert math.isclose(res["value"], 49.5, abs_tol=1.0), \
             f"Expected ~49.5, got {res['value']}"
         print(f"PASS: get_percentile_value(50th) = {res['value']}")
+
+        # -------------------------------------------------------
+        # TEST 13: calculate_evi
+        # -------------------------------------------------------
+        print("\n[Test 13] geo_raster.calculate_evi...")
+        out_evi = os.path.join(temp_dir, "evi_out.tif")
+        # Reuse existing rasters: NIR=0.8, Red=0.2, Blue=0.1 (defaults: G=2.5, C1=6, C2=7.5, L=1)
+        # Expected: 2.5*(0.8-0.2)/(0.8+6*0.2-7.5*0.1+1+1e-6) = 1.5/2.25 ≈ 0.6667
+        res = reg.call("geo_raster.calculate_evi", {
+            "nir_path": p_nir, "red_path": p_red, "blue_path": p_blue,
+            "output_path": out_evi
+        })
+        assert os.path.exists(out_evi), "EVI output file not created"
+        with rasterio.open(out_evi) as src:
+            val = src.read(1)[0, 0]
+            expected_evi = 2.5 * (0.8 - 0.2) / (0.8 + 6.0 * 0.2 - 7.5 * 0.1 + 1.0 + 1e-6)
+            assert math.isclose(val, expected_evi, abs_tol=1e-2), \
+                f"Expected EVI≈{expected_evi:.4f}, got {val}"
+        print(f"PASS: calculate_evi ≈ {val:.4f}")
+
+        # -------------------------------------------------------
+        # TEST 14: calculate_wri
+        # -------------------------------------------------------
+        print("\n[Test 14] geo_raster.calculate_wri...")
+        # Create separate rasters for WRI: Green=0.3, NIR=0.4, SWIR=0.1; reuse Red=0.2
+        # WRI = (Green+Red)/(NIR+SWIR+1e-6) = (0.3+0.2)/(0.4+0.1+1e-6) = 0.5/0.5 ≈ 1.0
+        p_green = os.path.join(temp_dir, "green.tif")
+        p_nir2  = os.path.join(temp_dir, "nir2.tif")
+        p_swir  = os.path.join(temp_dir, "swir.tif")
+        out_wri = os.path.join(temp_dir, "wri_out.tif")
+        create_dummy_raster(p_green, 0.3)
+        create_dummy_raster(p_nir2,  0.4)
+        create_dummy_raster(p_swir,  0.1)
+        res = reg.call("geo_raster.calculate_wri", {
+            "green_path": p_green, "red_path": p_red,
+            "nir_path": p_nir2,   "swir_path": p_swir,
+            "output_path": out_wri
+        })
+        assert os.path.exists(out_wri), "WRI output file not created"
+        with rasterio.open(out_wri) as src:
+            val = src.read(1)[0, 0]
+            expected_wri = (0.3 + 0.2) / (0.4 + 0.1 + 1e-6)
+            assert math.isclose(val, expected_wri, abs_tol=1e-2), \
+                f"Expected WRI≈{expected_wri:.4f}, got {val}"
+        print(f"PASS: calculate_wri ≈ {val:.4f}")
+
+        # -------------------------------------------------------
+        # TEST 15: count_skeleton_contours
+        # -------------------------------------------------------
+        print("\n[Test 15] geo_raster.count_skeleton_contours...")
+        try:
+            import cv2
+            from skimage.morphology import skeletonize  # noqa: F401 — confirm both deps exist
+            # Create a black image with two separate white filled rectangles
+            img = np.zeros((100, 100), dtype=np.uint8)
+            img[10:40, 10:40] = 255   # left rectangle
+            img[10:40, 60:90] = 255   # right rectangle
+            p_skel = os.path.join(temp_dir, "skel_input.png")
+            cv2.imwrite(p_skel, img)
+            res = reg.call("geo_raster.count_skeleton_contours", {"image_path": p_skel})
+            assert res["count"] >= 1, f"Expected at least 1 contour, got {res['count']}"
+            print(f"PASS: count_skeleton_contours detected {res['count']} contour(s).")
+        except ImportError:
+            print("SKIPPED: cv2 or scikit-image not installed.")
 
         print("\nAll geo_raster smoke tests passed!")
 

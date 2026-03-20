@@ -12,7 +12,7 @@
 #
 # HuggingFace model IDs (set to your preferred model):
 #   AGENT_LLM_HF_REPO   HuggingFace repo for the Agent LLM  (default: Qwen/Qwen3-8B)
-#   VLM_HF_REPO         HuggingFace repo for the vision LLM (default: Qwen/Qwen2.5-VL-7B-Instruct)
+#   VLM_HF_REPO         HuggingFace repo for the vision LLM (default: NightPro/qwen3vl-8b-4bit-disasterM3)
 #
 # Destination directories (override via environment variables):
 #   AGENT_LLM_DIR   default: <project_root>/models/agent_llm
@@ -37,7 +37,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── Model IDs ────────────────────────────────────────────────────────────────
 AGENT_LLM_HF_REPO="${AGENT_LLM_HF_REPO:-Qwen/Qwen3-8B}"
-VLM_HF_REPO="${VLM_HF_REPO:-Qwen/Qwen2.5-VL-7B-Instruct}"
+VLM_HF_REPO="${VLM_HF_REPO:-NightPro/qwen3vl-8b-4bit-disasterM3}"
 
 # ── Destination directories ───────────────────────────────────────────────────
 AGENT_LLM_DIR="${AGENT_LLM_DIR:-$PROJECT_ROOT/models/agent_llm}"
