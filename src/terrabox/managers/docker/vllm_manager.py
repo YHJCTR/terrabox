@@ -35,18 +35,17 @@ class VLLMDockerManager(BaseServiceManager):
     API_BASE = f"http://{HOST}:{PORT}/v1"
 
     # Host path to model directory, mounted as /model inside the container
-    MODEL_PATH = os.environ.get(
-        "VLM_MODEL_PATH",
-        "/data1/yuhongjie2/sft/qwen3vl_8b_4bit_finetune/merged_model/"
-    )
+    MODEL_PATH = os.environ.get("VLM_MODEL_PATH", "")
     # In-container path used as the model identifier in vLLM API requests
     MODEL_NAME = os.environ.get("VLM_MODEL_NAME", "/model")
 
     CONTAINER_NAME = "terrabox-vllm"
     DOCKER_IMAGE = os.environ.get("VLM_DOCKER_IMAGE", "terrabox/vllm:latest")
-    GPU_DEVICES = os.environ.get("VLM_GPU_DEVICES", "2,3")
-    TENSOR_PARALLEL_SIZE = os.environ.get("VLM_TENSOR_PARALLEL_SIZE", "2")
+    GPU_DEVICES = os.environ.get("VLM_GPU_DEVICES", "0")
+    TENSOR_PARALLEL_SIZE = os.environ.get("VLM_TENSOR_PARALLEL_SIZE", "1")
     DATA_MOUNT_HOST = os.environ.get("DATA_MOUNT_HOST", "/data1")
+    MAX_MODEL_LEN = 4096
+    GPU_MEMORY_UTILIZATION = 0.8
 
     def __new__(cls):
         if cls._instance is None:
@@ -97,7 +96,7 @@ class VLLMDockerManager(BaseServiceManager):
             # unlike NVIDIA_VISIBLE_DEVICES which --gpus all overrides).
             "--gpus", "all",
             "-e", f"CUDA_VISIBLE_DEVICES={gpu}",
-            "-p", f"{cls.PORT}:8000",   # vllm-openai image listens on 8000 internally
+            "-p", f"{cls.PORT}:8000",
             "-v", f"{cls.MODEL_PATH}:/model:ro",
             "-v", f"{cls.DATA_MOUNT_HOST}:{cls.DATA_MOUNT_HOST}",
             "--shm-size=16g",
@@ -107,8 +106,8 @@ class VLLMDockerManager(BaseServiceManager):
             "--host", "0.0.0.0",
             "--port", "8000",
             "--tensor-parallel-size", cls.TENSOR_PARALLEL_SIZE,
-            "--max-model-len", "4096",
-            "--gpu-memory-utilization", "0.8",
+            "--max-model-len", str(cls.MAX_MODEL_LEN),
+            "--gpu-memory-utilization", str(cls.GPU_MEMORY_UTILIZATION),
             "--enforce-eager",
             "--allowed-local-media-path", cls.DATA_MOUNT_HOST,
         ]
@@ -130,6 +129,19 @@ class VLLMDockerManager(BaseServiceManager):
 
     @classmethod
     def start_service(cls):
+        try:
+            from ...agent.config import load_raw_yaml
+            d = load_raw_yaml()
+            if "vlm_model_path"             in d: cls.MODEL_PATH             = str(d["vlm_model_path"])
+            if "vlm_port"                   in d: cls.PORT                   = int(d["vlm_port"]); cls.API_BASE = f"http://{cls.HOST}:{cls.PORT}/v1"
+            if "vlm_gpu_devices"            in d: cls.GPU_DEVICES            = str(d["vlm_gpu_devices"])
+            if "vlm_tensor_parallel"        in d: cls.TENSOR_PARALLEL_SIZE   = str(int(d["vlm_tensor_parallel"]))
+            if "vlm_max_model_len"          in d: cls.MAX_MODEL_LEN          = int(d["vlm_max_model_len"])
+            if "vlm_gpu_memory_utilization" in d: cls.GPU_MEMORY_UTILIZATION = float(d["vlm_gpu_memory_utilization"])
+            if "docker_data_mount_host"     in d: cls.DATA_MOUNT_HOST        = str(d["docker_data_mount_host"])
+        except Exception:
+            pass
+
         if cls.is_running():
             return
 

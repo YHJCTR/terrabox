@@ -78,3 +78,23 @@ def load_config() -> AgentConfig:
         raise ValueError(f"max_category_expansions must be >= 0, got {config.max_category_expansions}")
 
     return config
+
+
+_yaml_cache: "dict | None" = None
+
+
+def load_raw_yaml() -> dict:
+    """Return the full agent_config.yaml as a dict (cached, no schema filtering).
+    Used by service managers to read their own config keys without going through AgentConfig."""
+    global _yaml_cache
+    if _yaml_cache is not None:
+        return _yaml_cache
+    path = os.environ.get("AGENT_CONFIG_PATH", "agent_config.yaml")
+    _yaml_cache = {}
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                _yaml_cache = yaml.safe_load(f) or {}
+        except Exception:
+            pass
+    return _yaml_cache

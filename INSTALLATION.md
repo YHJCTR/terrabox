@@ -30,7 +30,7 @@ tool is first called — you do not need to launch them manually.
 
 | Service | Port | Description |
 |---------|------|-------------|
-| vLLM (vision) | 9000 | Vision-language model (Qwen-VL or compatible) |
+| vLLM (vision) | 9000 | Vision-language model |
 | SAM2 | 9002 | Segment Anything Model 2 — general image segmentation |
 | RemoteCLIP | 9003 | Zero-shot classification and retrieval for remote sensing |
 | RemoteSAM | 9004 | Text-prompted segmentation for remote sensing images |
@@ -92,15 +92,16 @@ HF_ENDPOINT=https://hf-mirror.com scripts/download_weights.sh
 
 ### Weights reference
 
-| Service | Downloaded file(s) | Default directory | `.env` / config key |
-|---------|-------------------|-------------------|---------------------|
-| Agent LLM | `Qwen3-8B/` (full dir) | `models/agent_llm/` | `agent_config.yaml` → `local_llm_model_path` |
-| VLM | `Qwen2.5-VL-7B-Instruct/` (full dir) | `models/vlm/` | `VLM_MODEL_PATH` |
-| SAM2 | `sam2.1_hiera_large.pt` | `models/sam2_checkpoints/` | `SAM2_CHECKPOINT_HOST` (Docker) / `SAM2_WORK_DIR` (subprocess) |
-| RemoteCLIP | `RemoteCLIP-ViT-L-14.pt` | `models/remoteclip/` | `REMOTECLIP_CKPT_HOST` |
-| RemoteSAM | `swin_base_patch4_window12_384_22k.pth` | `models/remotesam/` | `REMOTESAM_CHECKPOINT_HOST` |
-| Strip-RCNN | `stripnet_s.pth` | `models/strip_rcnn/` | `STRIP_RCNN_CKPT_HOST` |
-| InstructSAM | `sam2_hiera_large.pt` + `GeoRSCLIP-ViT-L-14.pt` | `models/instructsam/` | `INSTRUCTSAM_MODELS_HOST` |
+| Service | Downloaded file(s) | Default directory | `agent_config.yaml` key | `.env` key (fallback) |
+|---------|-------------------|-------------------|-------------------------|-----------------------|
+| Agent LLM | `Qwen3-8B/` (full dir) | `models/agent_llm/` | `local_llm_model_path` | — |
+| VLM | `Qwen2.5-VL-7B-Instruct/` (full dir) | `models/vlm/` | `vlm_model_path` | `VLM_MODEL_PATH` |
+| SAM2 (subprocess) | `sam2.1_hiera_large.pt` | `models/sam2_checkpoints/` | `sam2_work_dir` | `SAM2_WORK_DIR` |
+| SAM2 (Docker) | `sam2.1_hiera_large.pt` | `models/sam2_checkpoints/` | `sam2_checkpoint_host` | `SAM2_CHECKPOINT_HOST` |
+| RemoteCLIP | `RemoteCLIP-ViT-L-14.pt` | `models/remoteclip/` | `remoteclip_ckpt_host` | `REMOTECLIP_CKPT_HOST` |
+| RemoteSAM | `swin_base_patch4_window12_384_22k.pth` | `models/remotesam/` | `remotesam_checkpoint_host` | `REMOTESAM_CHECKPOINT_HOST` |
+| Strip-RCNN | `stripnet_s.pth` | `models/strip_rcnn/` | `strip_rcnn_ckpt_host` | `STRIP_RCNN_CKPT_HOST` |
+| InstructSAM | `sam2_hiera_large.pt` + `GeoRSCLIP-ViT-L-14.pt` | `models/instructsam/` | `instructsam_models_host` | `INSTRUCTSAM_MODELS_HOST` |
 
 > **Note on InstructSAM vs SAM2:** InstructSAM uses an older SAM2 release
 > (`sam2_hiera_large.pt`, July 2024). The standalone SAM2 service uses the newer
@@ -135,21 +136,75 @@ scripts/download_weights.sh --skip-agent --skip-vlm
 
 ### Configuration
 
-Copy the example file and edit it:
+**Option A — `agent_config.yaml` (recommended)**
+
+Add the perception service paths to your existing `agent_config.yaml` (which you already
+created for the Agent LLM). This is the preferred approach: the file is gitignored so your
+machine-specific paths never end up in version control.
+
+```yaml
+use_docker: false
+
+# ── vLLM vision model (port 9000) ────────────────────────────────────────────
+vlm_model_path: /path/to/your/vlm_model/
+vlm_python_exec: /path/to/conda/envs/YOUR_ENV/bin/python
+vlm_port: 9000
+vlm_gpu_devices: "0"
+vlm_tensor_parallel: 1
+vlm_max_model_len: 4096
+vlm_gpu_memory_utilization: 0.9
+
+# ── SAM2 (port 9002) ─────────────────────────────────────────────────────────
+sam2_python_exec: /path/to/conda/envs/sam2/bin/python
+sam2_server_script: /path/to/sam2/sam2_server2.py
+sam2_work_dir: /path/to/sam2
+sam2_port: 9002
+sam2_gpu_devices: "0"
+
+# ── RemoteCLIP (port 9003) ───────────────────────────────────────────────────
+remoteclip_python_exec: /path/to/conda/envs/RemoteCLIP/bin/python
+remoteclip_server_script: /path/to/RemoteCLIP/start2.py
+remoteclip_work_dir: /path/to/RemoteCLIP
+remoteclip_port: 9003
+remoteclip_gpu_devices: "0"
+
+# ── RemoteSAM (port 9004) ────────────────────────────────────────────────────
+remotesam_python_exec: /path/to/conda/envs/RemoteSAM/bin/python
+remotesam_server_script: /path/to/RemoteSAM/start.py
+remotesam_work_dir: /path/to/RemoteSAM
+remotesam_port: 9004
+remotesam_gpu_devices: "0"
+
+# ── Strip-RCNN (port 9005) ───────────────────────────────────────────────────
+strip_rcnn_python_exec: /path/to/conda/envs/strip/bin/python
+strip_rcnn_server_script: /path/to/Strip-RCNN/start.py
+strip_rcnn_work_dir: /path/to/Strip-RCNN
+strip_rcnn_port: 9005
+strip_rcnn_gpu_devices: "0"
+strip_rcnn_config_path: /path/to/Strip-RCNN/configs/strip_rcnn/orig/strip_rcnn_s_fpn_1x_dota_le90.py
+strip_rcnn_checkpoint_path: /path/to/Strip-RCNN/ckpt/stripnet_s.pth
+```
+
+See `agent_config.example.yaml` for the full list of available keys.
+
+---
+
+**Option B — `.env` file (legacy fallback)**
+
+The environment variable approach still works as a fallback when the corresponding key is
+absent from `agent_config.yaml`. Copy the example and fill in your paths:
 
 ```bash
 cp .env.example .env
 ```
 
-Replace the placeholder paths with your actual paths:
-
 ```dotenv
 TERRABOX_USE_DOCKER=false
 
 # ── vLLM (vision-language model, port 9000) ──────────────────────────────────
-VLLM_PYTHON_EXEC=/your/conda/envs/YOUR_ENV/bin/python   # conda env with vllm installed
-VLM_MODEL_PATH=/path/to/your/qwen_vl_model/             # model weights directory
-VLM_GPU_DEVICES=0                                        # GPU index(es)
+VLLM_PYTHON_EXEC=/your/conda/envs/YOUR_ENV/bin/python
+VLM_MODEL_PATH=/path/to/your/qwen_vl_model/
+VLM_GPU_DEVICES=0
 VLM_TENSOR_PARALLEL_SIZE=1
 
 # ── SAM2 (port 9002) ─────────────────────────────────────────────────────────
@@ -179,7 +234,7 @@ STRIP_RCNN_CONFIG_PATH=/path/to/Strip-RCNN/configs/strip_rcnn/orig/strip_rcnn_s_
 STRIP_RCNN_CHECKPOINT_PATH=/path/to/Strip-RCNN/ckpt/stripnet_s.pth
 ```
 
-Port numbers can be overridden by uncommenting the corresponding `*_PORT` variable.
+Port numbers can be overridden via `*_PORT` variables in `.env`, or `*_port` keys in `agent_config.yaml`.
 
 ---
 

@@ -26,16 +26,12 @@ logger = logging.getLogger("docker.remoteclip_manager")
 class RemoteCLIPDockerManager(BaseServiceManager):
     _instance = None
 
-    API_URL = "http://127.0.0.1:9003"
+    API_URL = "http://127.0.0.1:" + os.environ.get("REMOTECLIP_PORT", "9003")
 
-    CONTAINER_NAME = "terrabox-remoteclip"
-    DOCKER_IMAGE = "terrabox/remoteclip:latest"
-    GPU_DEVICES = os.environ.get("REMOTECLIP_GPU_DEVICES", "3")
-
-    CKPT_HOST = os.environ.get(
-        "REMOTECLIP_CKPT_HOST",
-        "/data1/yuhongjie2/RemoteCLIP/checkpoints"
-    )
+    CONTAINER_NAME  = "terrabox-remoteclip"
+    DOCKER_IMAGE    = "terrabox/remoteclip:latest"
+    GPU_DEVICES     = os.environ.get("REMOTECLIP_GPU_DEVICES", "0")
+    CKPT_HOST       = os.environ.get("REMOTECLIP_CKPT_HOST", "")
     DATA_MOUNT_HOST = os.environ.get("DATA_MOUNT_HOST", "/data1")
 
     def __new__(cls):
@@ -80,7 +76,7 @@ class RemoteCLIPDockerManager(BaseServiceManager):
             "docker", "run", "-d",
             "--name", cls.CONTAINER_NAME,
             "--gpus", f"device={gpu}",
-            "-p", "9003:9003",
+            "-p", f"{cls.API_URL.rsplit(':', 1)[-1]}:{cls.API_URL.rsplit(':', 1)[-1]}",
             "-v", f"{cls.DATA_MOUNT_HOST}:{cls.DATA_MOUNT_HOST}",
             "-v", f"{cls.CKPT_HOST}:/checkpoints:ro",
             "-e", "REMOTECLIP_CKPT_DIR=/checkpoints",
@@ -96,6 +92,16 @@ class RemoteCLIPDockerManager(BaseServiceManager):
 
     @classmethod
     def start_service(cls):
+        try:
+            from ...agent.config import load_raw_yaml
+            d = load_raw_yaml()
+            if "remoteclip_ckpt_host"     in d: cls.CKPT_HOST       = str(d["remoteclip_ckpt_host"])
+            if "remoteclip_gpu_devices"   in d: cls.GPU_DEVICES     = str(d["remoteclip_gpu_devices"])
+            if "docker_data_mount_host"   in d: cls.DATA_MOUNT_HOST = str(d["docker_data_mount_host"])
+            if "remoteclip_port"          in d: cls.API_URL         = f"http://127.0.0.1:{int(d['remoteclip_port'])}"
+        except Exception:
+            pass
+
         if cls.is_running():
             return
 

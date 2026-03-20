@@ -41,3 +41,63 @@ max_iterations: 15            # maximum tool-call rounds
 agent_mode: standard          # "standard" | "progressive" | "category_scoped"
 max_retries_on_error: 3       # retries for progressive mode
 max_category_expansions: 2    # max expansion rounds for category_scoped mode
+
+# ============================================================
+# Perception Service Paths — Subprocess mode (use_docker: false)
+# ============================================================
+
+# ── vLLM vision model (port 9000) ────────────────────────────────────────────
+vlm_model_path: /path/to/your/vlm_model/
+vlm_python_exec: /path/to/conda/envs/YOUR_ENV/bin/python
+vlm_port: 9000
+vlm_gpu_devices: "0"
+vlm_tensor_parallel: 1
+vlm_max_model_len: 4096
+vlm_gpu_memory_utilization: 0.9
+
+# ── SAM2 (port 9002) ─────────────────────────────────────────────────────────
+sam2_python_exec: /path/to/conda/envs/sam2/bin/python
+sam2_server_script: /path/to/sam2/sam2_server2.py
+sam2_work_dir: /path/to/sam2
+sam2_port: 9002
+sam2_gpu_devices: "0"
+
+# ── RemoteCLIP (port 9003) ───────────────────────────────────────────────────
+remoteclip_python_exec: /path/to/conda/envs/RemoteCLIP/bin/python
+remoteclip_server_script: /path/to/RemoteCLIP/start2.py
+remoteclip_work_dir: /path/to/RemoteCLIP
+remoteclip_port: 9003
+remoteclip_gpu_devices: "0"
+
+# ── RemoteSAM (port 9004) ────────────────────────────────────────────────────
+remotesam_python_exec: /path/to/conda/envs/RemoteSAM/bin/python
+remotesam_server_script: /path/to/RemoteSAM/start.py
+remotesam_work_dir: /path/to/RemoteSAM
+remotesam_port: 9004
+remotesam_gpu_devices: "0"
+
+# ── Strip-RCNN (port 9005) ───────────────────────────────────────────────────
+strip_rcnn_python_exec: /path/to/conda/envs/strip/bin/python
+strip_rcnn_server_script: /path/to/Strip-RCNN/start.py
+strip_rcnn_work_dir: /path/to/Strip-RCNN
+strip_rcnn_port: 9005
+strip_rcnn_gpu_devices: "0"
+strip_rcnn_config_path: /path/to/Strip-RCNN/configs/strip_rcnn/orig/strip_rcnn_s_fpn_1x_dota_le90.py
+strip_rcnn_checkpoint_path: /path/to/Strip-RCNN/ckpt/stripnet_s.pth
+
+# ── InstructSAM (port 9006, manual start only in subprocess mode) ─────────────
+instructsam_port: 9006
+
+# ============================================================
+# Perception Service Paths — Docker mode (use_docker: true)
+# ============================================================
+
+# Host-side volume paths (mounted read-only into each container)
+sam2_checkpoint_host: /path/to/sam2/checkpoints
+sam2_config_host: /path/to/sam2/configs
+remoteclip_ckpt_host: /path/to/RemoteCLIP/checkpoints
+remotesam_checkpoint_host: /path/to/RemoteSAM/pretrained_weights
+strip_rcnn_ckpt_host: /path/to/Strip-RCNN/ckpt
+strip_rcnn_config_host: /path/to/Strip-RCNN/configs
+instructsam_models_host: /path/to/instructsam/models
+docker_data_mount_host: /data1

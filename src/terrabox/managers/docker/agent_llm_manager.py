@@ -10,6 +10,7 @@ Container name: terrabox-agent-llm
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import time
 
@@ -29,7 +30,7 @@ class AgentLLMDockerManager(BaseServiceManager):
     CONTAINER_NAME = "terrabox-agent-llm"
 
     # Runtime values — overwritten by start_service(config)
-    MODEL_PATH = "/data1/yuhongjie2/Earth-Agent/llm/qwen/3_8B/"
+    MODEL_PATH = os.environ.get("AGENT_LLM_MODEL_PATH", "")
     GPU_DEVICES = "0"
     TENSOR_PARALLEL_SIZE = "1"
     DOCKER_IMAGE = "terrabox/agent-llm:latest"

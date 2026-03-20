@@ -36,17 +36,14 @@ logger = logging.getLogger("docker.instructsam_manager")
 class InstructSAMDockerManager(BaseServiceManager):
     _instance = None
 
-    API_URL = "http://127.0.0.1:9006"
+    API_URL = "http://127.0.0.1:" + os.environ.get("INSTRUCTSAM_PORT", "9006")
 
     CONTAINER_NAME = "terrabox-instructsam"
     DOCKER_IMAGE   = "terrabox/instructsam:latest"
-    GPU_DEVICES    = os.environ.get("INSTRUCTSAM_GPU_DEVICES", "1")
+    GPU_DEVICES    = os.environ.get("INSTRUCTSAM_GPU_DEVICES", "0")
 
     # host-side model directory, mounted as /models inside the container
-    MODELS_HOST = os.environ.get(
-        "INSTRUCTSAM_MODELS_HOST",
-        "/data1/yuhongjie2/terra_model/instructsam",
-    )
+    MODELS_HOST     = os.environ.get("INSTRUCTSAM_MODELS_HOST", "")
     DATA_MOUNT_HOST = os.environ.get("DATA_MOUNT_HOST", "/data1")
 
     def __new__(cls):
@@ -88,11 +85,12 @@ class InstructSAMDockerManager(BaseServiceManager):
             env_var="INSTRUCTSAM_GPU_DEVICES",
         )
 
+        port = cls.API_URL.rsplit(":", 1)[-1]
         cmd = [
             "docker", "run", "-d",
             "--name", cls.CONTAINER_NAME,
             "--gpus", f"device={gpu}",
-            "-p", "9006:9006",
+            "-p", f"{port}:{port}",
             # Allow the container to reach the host vLLM service (port 9000)
             "--add-host", "host.docker.internal:host-gateway",
             "-v", f"{cls.DATA_MOUNT_HOST}:{cls.DATA_MOUNT_HOST}",
@@ -109,6 +107,16 @@ class InstructSAMDockerManager(BaseServiceManager):
 
     @classmethod
     def start_service(cls):
+        try:
+            from ...agent.config import load_raw_yaml
+            d = load_raw_yaml()
+            if "instructsam_models_host" in d: cls.MODELS_HOST     = str(d["instructsam_models_host"])
+            if "instructsam_gpu_devices" in d: cls.GPU_DEVICES     = str(d["instructsam_gpu_devices"])
+            if "docker_data_mount_host"  in d: cls.DATA_MOUNT_HOST = str(d["docker_data_mount_host"])
+            if "instructsam_port"        in d: cls.API_URL         = f"http://127.0.0.1:{int(d['instructsam_port'])}"
+        except Exception:
+            pass
+
         if cls.is_running():
             return
 

@@ -14,7 +14,7 @@ logger = logging.getLogger("instructsam_manager")
 class InstructSAMServiceManager(BaseServiceManager):
     _instance = None
 
-    API_URL = "http://127.0.0.1:9006"
+    API_URL = "http://127.0.0.1:" + os.environ.get("INSTRUCTSAM_PORT", "9006")
 
     def __new__(cls):
         if cls._instance is None:
@@ -34,6 +34,14 @@ class InstructSAMServiceManager(BaseServiceManager):
 
     @classmethod
     def start_service(cls):
+        try:
+            from ..agent.config import load_raw_yaml
+            d = load_raw_yaml()
+            host = str(d.get("instructsam_host", "127.0.0.1"))
+            port = int(d.get("instructsam_port", cls.API_URL.rsplit(":", 1)[-1]))
+            cls.API_URL = f"http://{host}:{port}"
+        except Exception:
+            pass
         if cls.is_running():
             return
         raise RuntimeError(

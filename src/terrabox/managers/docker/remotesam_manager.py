@@ -31,23 +31,14 @@ logger = logging.getLogger("docker.remotesam_manager")
 class RemoteSAMDockerManager(BaseServiceManager):
     _instance = None
 
-    API_URL = "http://127.0.0.1:9004"
+    API_URL = "http://127.0.0.1:" + os.environ.get("REMOTESAM_PORT", "9004")
 
-    CONTAINER_NAME = "terrabox-remotesam"
-    DOCKER_IMAGE = "terrabox/remotesam:latest"
-    GPU_DEVICES = os.environ.get("REMOTESAM_GPU_DEVICES", "3")
-
-    # pretrained_weights directory on the host — mounted as /checkpoints inside the container
-    CHECKPOINT_HOST = os.environ.get(
-        "REMOTESAM_CHECKPOINT_HOST",
-        "/data1/yuhongjie2/RemoteSAM/pretrained_weights",
-    )
+    CONTAINER_NAME  = "terrabox-remotesam"
+    DOCKER_IMAGE    = "terrabox/remotesam:latest"
+    GPU_DEVICES     = os.environ.get("REMOTESAM_GPU_DEVICES", "0")
+    CHECKPOINT_HOST = os.environ.get("REMOTESAM_CHECKPOINT_HOST", "")
     DATA_MOUNT_HOST = os.environ.get("DATA_MOUNT_HOST", "/data1")
-    # HuggingFace cache on the host — must contain bert-base-uncased and the EPOC model
-    HF_CACHE_HOST = os.environ.get(
-        "HF_CACHE_HOST",
-        os.path.expanduser("~/.cache/huggingface"),
-    )
+    HF_CACHE_HOST   = os.environ.get("HF_CACHE_HOST", os.path.expanduser("~/.cache/huggingface"))
 
     def __new__(cls):
         if cls._instance is None:
@@ -91,7 +82,7 @@ class RemoteSAMDockerManager(BaseServiceManager):
             "docker", "run", "-d",
             "--name", cls.CONTAINER_NAME,
             "--gpus", f"device={gpu}",
-            "-p", "9004:9004",
+            "-p", f"{cls.API_URL.rsplit(':', 1)[-1]}:{cls.API_URL.rsplit(':', 1)[-1]}",
             "-v", f"{cls.DATA_MOUNT_HOST}:{cls.DATA_MOUNT_HOST}",
             # Mount pretrained_weights as /checkpoints (source code is baked into the image)
             "-v", f"{cls.CHECKPOINT_HOST}:/checkpoints:ro",
@@ -113,6 +104,16 @@ class RemoteSAMDockerManager(BaseServiceManager):
 
     @classmethod
     def start_service(cls):
+        try:
+            from ...agent.config import load_raw_yaml
+            d = load_raw_yaml()
+            if "remotesam_checkpoint_host" in d: cls.CHECKPOINT_HOST = str(d["remotesam_checkpoint_host"])
+            if "remotesam_gpu_devices"     in d: cls.GPU_DEVICES     = str(d["remotesam_gpu_devices"])
+            if "docker_data_mount_host"    in d: cls.DATA_MOUNT_HOST = str(d["docker_data_mount_host"])
+            if "remotesam_port"            in d: cls.API_URL         = f"http://127.0.0.1:{int(d['remotesam_port'])}"
+        except Exception:
+            pass
+
         if cls.is_running():
             return
 

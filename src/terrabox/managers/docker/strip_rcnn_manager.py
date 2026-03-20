@@ -34,31 +34,18 @@ logger = logging.getLogger("docker.strip_rcnn_manager")
 class StripRCNNDockerManager(BaseServiceManager):
     _instance = None
 
-    API_URL = "http://127.0.0.1:9005"
+    API_URL = "http://127.0.0.1:" + os.environ.get("STRIP_RCNN_PORT", "9005")
 
-    CONTAINER_NAME = "terrabox-strip-rcnn"
-    DOCKER_IMAGE = "terrabox/strip-rcnn:latest"
-    GPU_DEVICES = os.environ.get("STRIP_RCNN_GPU_DEVICES", "0")
-
-    CKPT_HOST = os.environ.get(
-        "STRIP_RCNN_CKPT_HOST",
-        "/data1/yuhongjie2/Strip-RCNN/ckpt"
-    )
-    CONFIG_HOST = os.environ.get(
-        "STRIP_RCNN_CONFIG_HOST",
-        "/data1/yuhongjie2/Strip-RCNN/configs"
-    )
+    CONTAINER_NAME  = "terrabox-strip-rcnn"
+    DOCKER_IMAGE    = "terrabox/strip-rcnn:latest"
+    GPU_DEVICES     = os.environ.get("STRIP_RCNN_GPU_DEVICES", "0")
+    CKPT_HOST       = os.environ.get("STRIP_RCNN_CKPT_HOST", "")
+    CONFIG_HOST     = os.environ.get("STRIP_RCNN_CONFIG_HOST", "")
     DATA_MOUNT_HOST = os.environ.get("DATA_MOUNT_HOST", "/data1")
 
     # In-container paths passed as argparse arguments to start.py
-    CONFIG_IN_CONTAINER = os.environ.get(
-        "STRIP_RCNN_CONFIG_IN_CONTAINER",
-        "/configs/strip_rcnn/orig/strip_rcnn_s_fpn_1x_dota_le90.py"
-    )
-    CHECKPOINT_IN_CONTAINER = os.environ.get(
-        "STRIP_RCNN_CHECKPOINT_IN_CONTAINER",
-        "/ckpt/stripnet_s.pth"
-    )
+    CONFIG_IN_CONTAINER     = os.environ.get("STRIP_RCNN_CONFIG_IN_CONTAINER", "/configs/strip_rcnn/orig/strip_rcnn_s_fpn_1x_dota_le90.py")
+    CHECKPOINT_IN_CONTAINER = os.environ.get("STRIP_RCNN_CHECKPOINT_IN_CONTAINER", "/ckpt/stripnet_s.pth")
 
     def __new__(cls):
         if cls._instance is None:
@@ -102,7 +89,7 @@ class StripRCNNDockerManager(BaseServiceManager):
             "docker", "run", "-d",
             "--name", cls.CONTAINER_NAME,
             "--gpus", f"device={gpu}",
-            "-p", "9005:9005",
+            "-p", f"{cls.API_URL.rsplit(':', 1)[-1]}:{cls.API_URL.rsplit(':', 1)[-1]}",
             "-v", f"{cls.DATA_MOUNT_HOST}:{cls.DATA_MOUNT_HOST}",
             "-v", f"{cls.CKPT_HOST}:/ckpt:ro",
             "-v", f"{cls.CONFIG_HOST}:/configs:ro",
@@ -111,7 +98,7 @@ class StripRCNNDockerManager(BaseServiceManager):
             "--checkpoint", cls.CHECKPOINT_IN_CONTAINER,
             "--device", "cuda:0",
             "--host", "0.0.0.0",
-            "--port", "9005",
+            "--port", cls.API_URL.rsplit(":", 1)[-1],
         ]
 
         logger.info(f"Starting Strip-RCNN container (GPU: {gpu})...")
@@ -123,6 +110,17 @@ class StripRCNNDockerManager(BaseServiceManager):
 
     @classmethod
     def start_service(cls):
+        try:
+            from ...agent.config import load_raw_yaml
+            d = load_raw_yaml()
+            if "strip_rcnn_ckpt_host"     in d: cls.CKPT_HOST       = str(d["strip_rcnn_ckpt_host"])
+            if "strip_rcnn_config_host"   in d: cls.CONFIG_HOST     = str(d["strip_rcnn_config_host"])
+            if "strip_rcnn_gpu_devices"   in d: cls.GPU_DEVICES     = str(d["strip_rcnn_gpu_devices"])
+            if "docker_data_mount_host"   in d: cls.DATA_MOUNT_HOST = str(d["docker_data_mount_host"])
+            if "strip_rcnn_port"          in d: cls.API_URL         = f"http://127.0.0.1:{int(d['strip_rcnn_port'])}"
+        except Exception:
+            pass
+
         if cls.is_running():
             return
 

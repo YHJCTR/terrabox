@@ -27,21 +27,13 @@ logger = logging.getLogger("docker.sam2_manager")
 class SAM2DockerManager(BaseServiceManager):
     _instance = None
 
-    API_URL = "http://127.0.0.1:9002"
+    API_URL = "http://127.0.0.1:" + os.environ.get("SAM2_PORT", "9002")
 
-    CONTAINER_NAME = "terrabox-sam2"
-    DOCKER_IMAGE = "terrabox/sam2:latest"
-    GPU_DEVICES = os.environ.get("SAM2_GPU_DEVICES", "0")
-
-    # Host paths used as volume mount sources
-    CHECKPOINT_HOST = os.environ.get(
-        "SAM2_CHECKPOINT_HOST",
-        "/data1/yuhongjie2/sam2/checkpoints"
-    )
-    CONFIG_HOST = os.environ.get(
-        "SAM2_CONFIG_HOST",
-        "/data1/yuhongjie2/sam2/sam2/configs"
-    )
+    CONTAINER_NAME  = "terrabox-sam2"
+    DOCKER_IMAGE    = "terrabox/sam2:latest"
+    GPU_DEVICES     = os.environ.get("SAM2_GPU_DEVICES", "0")
+    CHECKPOINT_HOST = os.environ.get("SAM2_CHECKPOINT_HOST", "")
+    CONFIG_HOST     = os.environ.get("SAM2_CONFIG_HOST", "")
     DATA_MOUNT_HOST = os.environ.get("DATA_MOUNT_HOST", "/data1")
 
     def __new__(cls):
@@ -86,7 +78,7 @@ class SAM2DockerManager(BaseServiceManager):
             "docker", "run", "-d",
             "--name", cls.CONTAINER_NAME,
             "--gpus", f"device={gpu}",
-            "-p", "9002:9002",
+            "-p", f"{cls.API_URL.rsplit(':', 1)[-1]}:{cls.API_URL.rsplit(':', 1)[-1]}",
             # Mount data directory at the same path so image paths are identical inside the container
             "-v", f"{cls.DATA_MOUNT_HOST}:{cls.DATA_MOUNT_HOST}",
             "-v", f"{cls.CHECKPOINT_HOST}:/checkpoints:ro",
@@ -106,6 +98,17 @@ class SAM2DockerManager(BaseServiceManager):
 
     @classmethod
     def start_service(cls):
+        try:
+            from ...agent.config import load_raw_yaml
+            d = load_raw_yaml()
+            if "sam2_checkpoint_host" in d: cls.CHECKPOINT_HOST = str(d["sam2_checkpoint_host"])
+            if "sam2_config_host"     in d: cls.CONFIG_HOST     = str(d["sam2_config_host"])
+            if "sam2_gpu_devices"     in d: cls.GPU_DEVICES     = str(d["sam2_gpu_devices"])
+            if "docker_data_mount_host" in d: cls.DATA_MOUNT_HOST = str(d["docker_data_mount_host"])
+            if "sam2_port"            in d: cls.API_URL         = f"http://127.0.0.1:{int(d['sam2_port'])}"
+        except Exception:
+            pass
+
         if cls.is_running():
             return
 
