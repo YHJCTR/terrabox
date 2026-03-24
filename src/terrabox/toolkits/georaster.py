@@ -561,6 +561,176 @@ def count_skeleton_contours_handler(arguments: Dict[str, Any], context: Any, acc
 
 
 # ------------------------------------------------------------------------------
+# Fire Monitoring Tools
+# ------------------------------------------------------------------------------
+
+def calculate_frp_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """
+    Generate a binary fire mask from a Fire Radiative Power (FRP) raster.
+    Pixels with FRP > threshold (default 0) are marked as fire (255); others 0.
+    Saves result as GeoTIFF and returns fire pixel count and coverage percentage.
+    """
+    rasterio, np = _lazy_imports()
+
+    input_path = arguments["input_path"]
+    output_path = arguments["output_path"]
+    threshold = float(arguments.get("threshold", 0))
+
+    with rasterio.open(input_path) as src:
+        frp = src.read(1).astype(np.float32)
+        profile = src.profile
+        nodata = src.nodata
+
+    valid_mask = np.isfinite(frp)
+    if nodata is not None:
+        valid_mask &= (frp != nodata)
+
+    fire_mask = (valid_mask & (frp > threshold)).astype(np.uint8) * 255
+    fire_count = int(np.sum(fire_mask > 0))
+    total_valid = int(np.sum(valid_mask))
+
+    _save_raster(output_path, fire_mask, profile, dtype=rasterio.uint8, nodata=0)
+
+    return {
+        "status": "success",
+        "output_path": output_path,
+        "fire_pixels": fire_count,
+        "total_valid_pixels": total_valid,
+        "fire_coverage": float(fire_count / total_valid) if total_valid > 0 else 0.0,
+    }
+
+
+def count_fire_pixels_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """
+    Count fire pixels in one or multiple rasters.
+    For each input raster, count pixels exceeding the FRP threshold.
+    Returns per-image counts and aggregate statistics.
+    """
+    rasterio, np = _lazy_imports()
+
+    input_paths = arguments.get("input_paths") or [arguments.get("input_path")]
+    input_paths = [p for p in input_paths if p]
+    threshold = float(arguments.get("threshold", 0))
+
+    if not input_paths:
+        raise ValueError("Provide 'input_paths' (list) or 'input_path' (single file)")
+
+    results = []
+    total_fire = 0
+    for p in input_paths:
+        with rasterio.open(p) as src:
+            data = src.read(1).astype(np.float32)
+            nodata = src.nodata
+        valid = np.isfinite(data)
+        if nodata is not None:
+            valid &= (data != nodata)
+        count = int(np.sum(valid & (data > threshold)))
+        results.append({"path": p, "fire_pixels": count, "valid_pixels": int(np.sum(valid))})
+        total_fire += count
+
+    return {
+        "per_image": results,
+        "total_fire_pixels": total_fire,
+        "image_count": len(input_paths),
+    }
+
+
+def create_fire_increase_map_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """
+    Generate a temporal fire increase map: pixels where fire appeared (post=fire, pre=no fire).
+    Inputs: binary fire masks (1=fire, 0=no fire) for two time steps.
+    Output: binary map (255=fire increase, 0=no change or decrease).
+    """
+    rasterio, np = _lazy_imports()
+
+    pre_path = arguments["pre_path"]
+    post_path = arguments["post_path"]
+    output_path = arguments["output_path"]
+    threshold = float(arguments.get("threshold", 127))
+
+    with rasterio.open(pre_path) as src:
+        pre = src.read(1).astype(np.float32)
+        profile = src.profile
+    with rasterio.open(post_path) as src:
+        post = src.read(1).astype(np.float32)
+
+    pre_fire = pre > threshold
+    post_fire = post > threshold
+    increase = (~pre_fire & post_fire).astype(np.uint8) * 255
+
+    _save_raster(output_path, increase, profile, dtype=rasterio.uint8, nodata=0)
+    new_fire_count = int(np.sum(increase > 0))
+
+    return {
+        "status": "success",
+        "output_path": output_path,
+        "new_fire_pixels": new_fire_count,
+    }
+
+
+def identify_fire_prone_areas_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """
+    Identify fire-prone areas as pixels in the top percentile of FRP values across a time series.
+    Input: list of FRP rasters. Output: binary mask where 255=high fire risk area.
+    """
+    rasterio, np = _lazy_imports()
+
+    input_paths = arguments.get("input_paths", [])
+    output_path = arguments["output_path"]
+    percentile = float(arguments.get("percentile", 90))
+
+    if not input_paths:
+        raise ValueError("input_paths must contain at least one file path")
+
+    all_values = []
+    profile = None
+    shapes = []
+    for p in input_paths:
+        with rasterio.open(p) as src:
+            d = src.read(1).astype(np.float32)
+            nd = src.nodata
+            if profile is None:
+                profile = src.profile
+            shapes.append(d.shape)
+        valid = d.flatten()
+        if nd is not None:
+            valid = valid[valid != nd]
+        all_values.append(valid[np.isfinite(valid)])
+
+    # Compute threshold from combined distribution
+    combined = np.concatenate(all_values)
+    if combined.size == 0:
+        return {"status": "error", "message": "No valid pixels found"}
+
+    threshold_value = float(np.percentile(combined, percentile))
+
+    # Create mean FRP raster and threshold it
+    # Use first raster as reference shape
+    ref_shape = shapes[0]
+    stack = []
+    for p in input_paths:
+        with rasterio.open(p) as src:
+            d = src.read(1).astype(np.float32)
+        if d.shape != ref_shape:
+            continue
+        stack.append(d)
+
+    mean_frp = np.nanmean(np.stack(stack, axis=0), axis=0) if stack else np.zeros(ref_shape)
+    prone_mask = (mean_frp > threshold_value).astype(np.uint8) * 255
+
+    _save_raster(output_path, prone_mask, profile, dtype=rasterio.uint8, nodata=0)
+    prone_count = int(np.sum(prone_mask > 0))
+
+    return {
+        "status": "success",
+        "output_path": output_path,
+        "frp_threshold": threshold_value,
+        "prone_pixels": prone_count,
+        "percentile_used": percentile,
+    }
+
+
+# ------------------------------------------------------------------------------
 # Registration
 # ------------------------------------------------------------------------------
 
@@ -888,4 +1058,93 @@ def setup(registrar):
             requires_connection=False
         ),
         get_percentile_value_handler,
+    )
+
+    # 17. Calculate FRP
+    registrar.tool(
+        ToolSpec(
+            slug="geo_raster.calculate_frp",
+            name="Calculate Fire Radiative Power Mask",
+            description="Generate a binary fire mask from a Fire Radiative Power (FRP) raster. Pixels exceeding the threshold are marked as fire (255). Returns fire pixel count and coverage percentage.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "input_path": {"type": "string", "description": "Path to input FRP raster (GeoTIFF)."},
+                    "output_path": {"type": "string", "description": "Output path for binary fire mask GeoTIFF."},
+                    "threshold": {"type": "number", "default": 0, "description": "FRP threshold above which a pixel is classified as fire (default: 0)."}
+                },
+                "required": ["input_path", "output_path"]
+            },
+            requires_connection=False
+        ),
+        calculate_frp_handler,
+    )
+
+    # 18. Count fire pixels
+    registrar.tool(
+        ToolSpec(
+            slug="geo_raster.count_fire_pixels",
+            name="Count Fire Pixels",
+            description="Count the number of fire pixels (FRP > threshold) in one or multiple rasters. Returns per-image counts and aggregate total.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "input_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of FRP raster file paths to analyze."
+                    },
+                    "input_path": {"type": "string", "description": "Single FRP raster path (use instead of input_paths for one file)."},
+                    "threshold": {"type": "number", "default": 0, "description": "FRP threshold above which a pixel is counted as fire (default: 0)."}
+                },
+                "required": []
+            },
+            requires_connection=False
+        ),
+        count_fire_pixels_handler,
+    )
+
+    # 19. Create fire increase map
+    registrar.tool(
+        ToolSpec(
+            slug="geo_raster.create_fire_increase_map",
+            name="Create Fire Increase Map",
+            description="Detect pixels where fire appeared between two time steps (pre and post binary fire masks). Output is a binary GeoTIFF (255=new fire, 0=no new fire).",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pre_path": {"type": "string", "description": "Path to pre-event binary fire mask (1=fire or 255=fire)."},
+                    "post_path": {"type": "string", "description": "Path to post-event binary fire mask (1=fire or 255=fire)."},
+                    "output_path": {"type": "string", "description": "Output path for fire increase map GeoTIFF."},
+                    "threshold": {"type": "number", "default": 127, "description": "Pixel value threshold to classify as 'fire' in input masks (default: 127)."}
+                },
+                "required": ["pre_path", "post_path", "output_path"]
+            },
+            requires_connection=False
+        ),
+        create_fire_increase_map_handler,
+    )
+
+    # 20. Identify fire-prone areas
+    registrar.tool(
+        ToolSpec(
+            slug="geo_raster.identify_fire_prone_areas",
+            name="Identify Fire-Prone Areas",
+            description="Identify high fire-risk areas as pixels in the top N percentile of FRP values across a time series. Returns a binary mask (255=fire-prone area).",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "input_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Time series of FRP raster file paths."
+                    },
+                    "output_path": {"type": "string", "description": "Output path for fire-prone area mask GeoTIFF."},
+                    "percentile": {"type": "number", "default": 90, "description": "Percentile threshold for fire-prone classification (default: 90 = top 10% of values)."}
+                },
+                "required": ["input_paths", "output_path"]
+            },
+            requires_connection=False
+        ),
+        identify_fire_prone_areas_handler,
     )

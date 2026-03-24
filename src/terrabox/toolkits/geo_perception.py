@@ -306,7 +306,249 @@ def instructsam_handler(arguments: Dict[str, Any], context: Any, account: Any) -
     }
 
 
-    
+
+
+# --- Bbox / Annotation / Mock Handlers ---
+
+def draw_bboxes_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Draw labeled bounding boxes on an image using Pillow."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        raise ImportError("Missing Pillow. Install: pip install Pillow")
+
+    image_path = _resolve_image_path(arguments)
+    bboxes = arguments.get("bboxes", [])
+    output_path = arguments["output_path"]
+    line_width = int(arguments.get("line_width", 2))
+
+    img = Image.open(image_path).convert("RGB")
+    draw = ImageDraw.Draw(img)
+
+    for bbox in bboxes:
+        x1, y1, x2, y2 = float(bbox["x1"]), float(bbox["y1"]), float(bbox["x2"]), float(bbox["y2"])
+        color = bbox.get("color", "red")
+        label = bbox.get("label", "")
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=line_width)
+        if label:
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+            except Exception:
+                font = ImageFont.load_default()
+            draw.text((x1 + 2, y1 + 2), label, fill=color, font=font)
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    img.save(output_path)
+    return {"status": "success", "output_path": output_path, "boxes_drawn": len(bboxes)}
+
+
+def add_text_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Add text annotations to an image at specified positions."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        raise ImportError("Missing Pillow. Install: pip install Pillow")
+
+    image_path = _resolve_image_path(arguments)
+    annotations = arguments.get("annotations", [])
+    output_path = arguments["output_path"]
+
+    img = Image.open(image_path).convert("RGB")
+    draw = ImageDraw.Draw(img)
+
+    for ann in annotations:
+        text = str(ann["text"])
+        x, y = float(ann["x"]), float(ann["y"])
+        color = ann.get("color", "white")
+        font_size = int(ann.get("font_size", 16))
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
+        except Exception:
+            font = ImageFont.load_default()
+        draw.text((x, y), text, fill=color, font=font)
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    img.save(output_path)
+    return {"status": "success", "output_path": output_path, "annotations_added": len(annotations)}
+
+
+def ocr_extract_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Extract text from an image using EasyOCR."""
+    try:
+        import easyocr
+    except ImportError:
+        raise ImportError("Missing EasyOCR. Install: pip install easyocr")
+
+    image_path = _resolve_image_path(arguments)
+    languages = arguments.get("languages", ["en"])
+    if isinstance(languages, str):
+        languages = [languages]
+
+    reader = easyocr.Reader(languages, gpu=True)
+    results = reader.readtext(image_path)
+
+    texts = []
+    for (bbox_coords, text, confidence) in results:
+        texts.append({
+            "text": text,
+            "confidence": round(float(confidence), 3),
+            "bbox": [[float(p[0]), float(p[1])] for p in bbox_coords],
+        })
+
+    return {
+        "status": "success",
+        "texts": texts,
+        "count": len(texts),
+        "full_text": " ".join(t["text"] for t in texts),
+    }
+
+
+def bbox_expand_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Expand bounding boxes by a spatial buffer radius."""
+    bboxes = arguments.get("bboxes", [])
+    radius_px = arguments.get("radius_px")
+    radius_m = arguments.get("radius_m")
+    gsd_m = arguments.get("gsd_m")
+
+    if radius_m is not None and gsd_m is not None:
+        r = float(radius_m) / float(gsd_m)
+    elif radius_px is not None:
+        r = float(radius_px)
+    else:
+        raise ValueError("Provide 'radius_px' or both 'radius_m' and 'gsd_m'")
+
+    expanded = []
+    for bb in bboxes:
+        expanded.append({
+            "x1": float(bb["x1"]) - r,
+            "y1": float(bb["y1"]) - r,
+            "x2": float(bb["x2"]) + r,
+            "y2": float(bb["y2"]) + r,
+            **{k: v for k, v in bb.items() if k not in ("x1", "y1", "x2", "y2")}
+        })
+
+    return {"expanded_bboxes": expanded, "radius_px": r, "count": len(expanded)}
+
+
+def bbox_to_centroid_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Convert bounding boxes to centroid coordinates."""
+    bboxes = arguments.get("bboxes", [])
+    centroids = []
+    for bb in bboxes:
+        cx = (float(bb["x1"]) + float(bb["x2"])) / 2.0
+        cy = (float(bb["y1"]) + float(bb["y2"])) / 2.0
+        centroids.append({"x": cx, "y": cy})
+    return {"centroids": centroids, "count": len(centroids)}
+
+
+def centroid_distance_extremes_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Compute minimum and maximum pairwise Euclidean distances between centroids."""
+    import math
+    centroids = arguments.get("centroids", [])
+    if len(centroids) < 2:
+        return {"error": "Need at least 2 centroids to compute pairwise distances"}
+
+    min_dist = float("inf")
+    max_dist = 0.0
+    min_pair = None
+    max_pair = None
+
+    for i in range(len(centroids)):
+        for j in range(i + 1, len(centroids)):
+            dx = centroids[i]["x"] - centroids[j]["x"]
+            dy = centroids[i]["y"] - centroids[j]["y"]
+            d = math.sqrt(dx * dx + dy * dy)
+            if d < min_dist:
+                min_dist = d
+                min_pair = (i, j)
+            if d > max_dist:
+                max_dist = d
+                max_pair = (i, j)
+
+    return {
+        "min_distance": round(min_dist, 3),
+        "max_distance": round(max_dist, 3),
+        "min_pair_indices": list(min_pair),
+        "max_pair_indices": list(max_pair),
+        "centroid_count": len(centroids),
+    }
+
+
+def bbox_area_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Calculate the total area of bounding boxes in pixels² or m²."""
+    bboxes = arguments.get("bboxes", [])
+    gsd_m = arguments.get("gsd_m")
+
+    individual_areas = []
+    for bb in bboxes:
+        w = abs(float(bb["x2"]) - float(bb["x1"]))
+        h = abs(float(bb["y2"]) - float(bb["y1"]))
+        area_px2 = w * h
+        individual_areas.append(area_px2)
+
+    total_px2 = sum(individual_areas)
+
+    result = {"total_area_px2": total_px2, "per_bbox_area_px2": individual_areas, "count": len(bboxes)}
+    if gsd_m is not None:
+        pixel_area_m2 = float(gsd_m) ** 2
+        result["total_area_m2"] = total_px2 * pixel_area_m2
+        result["per_bbox_area_m2"] = [a * pixel_area_m2 for a in individual_areas]
+    return result
+
+
+# --- Mock Handlers (placeholder until models are deployed) ---
+
+def mscn_classify_mock_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """[Mock] MSCN scene classification - returns stub result."""
+    image_path = _resolve_image_path(arguments)
+    return {
+        "status": "mock",
+        "note": "MSCN model not yet deployed. This is a placeholder response.",
+        "image": image_path,
+        "predicted_class": "Unknown",
+        "confidence": 0.0,
+        "categories": [
+            "Airport", "Beach", "Bridge", "Commercial", "Desert",
+            "Farmland", "Forest", "Industrial", "Meadow", "Mountain",
+            "Park", "Parking", "Port", "Railway", "Residential",
+            "River", "Runway", "Stadium", "Storage_tank", "Urban"
+        ]
+    }
+
+
+def sm3det_detect_mock_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """[Mock] SM3Det multi-category detection - returns stub result."""
+    image_path = _resolve_image_path(arguments)
+    return {
+        "status": "mock",
+        "note": "SM3Det model not yet deployed. This is a placeholder response.",
+        "image": image_path,
+        "detections": [],
+        "num_detections": 0,
+        "categories": [
+            "airplane", "ship", "storage_tank", "baseball_diamond",
+            "tennis_court", "basketball_court", "ground_track_field",
+            "harbor", "bridge", "large_vehicle", "small_vehicle",
+            "helicopter", "roundabout", "soccer_ball_field", "swimming_pool"
+        ]
+    }
+
+
+def change_os_detect_mock_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """[Mock] ChangeOS change detection / building extraction - returns stub result."""
+    pre_path = arguments.get("pre_image") or arguments.get("image")
+    mode = arguments.get("mode", "change_detection")
+    return {
+        "status": "mock",
+        "note": "ChangeOS model not yet deployed. This is a placeholder response.",
+        "mode": mode,
+        "pre_image": pre_path,
+        "post_image": arguments.get("post_image"),
+        "change_mask": None,
+        "changed_pixels": 0,
+    }
+
+
 # --- Tool Registration ---
 
 def setup(registrar):
@@ -497,4 +739,277 @@ def setup(registrar):
             requires_connection=False
         ),
         instructsam_handler
+    )
+
+    # 8. Draw Bounding Boxes
+    registrar.tool(
+        ToolSpec(
+            slug="geo_perception.draw_bboxes",
+            name="Draw Bounding Boxes",
+            description="Draw labeled bounding boxes on an image and save the result. Useful for visualizing detection results.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "image": {"type": "string", "description": "Path to the input image."},
+                    "bboxes": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "x1": {"type": "number"}, "y1": {"type": "number"},
+                                "x2": {"type": "number"}, "y2": {"type": "number"},
+                                "label": {"type": "string"},
+                                "color": {"type": "string", "default": "red"}
+                            },
+                            "required": ["x1", "y1", "x2", "y2"]
+                        },
+                        "description": "List of bounding boxes with coordinates and optional label/color."
+                    },
+                    "output_path": {"type": "string", "description": "Path to save the annotated image."},
+                    "line_width": {"type": "integer", "default": 2, "description": "Width of the bounding box lines."}
+                },
+                "required": ["image", "bboxes", "output_path"]
+            },
+            requires_connection=False
+        ),
+        draw_bboxes_handler
+    )
+
+    # 9. Add Text Annotation
+    registrar.tool(
+        ToolSpec(
+            slug="geo_perception.add_text",
+            name="Add Text to Image",
+            description="Add text annotations to an image at specified positions. Useful for labeling analysis results.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "image": {"type": "string", "description": "Path to the input image."},
+                    "annotations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "text": {"type": "string"},
+                                "x": {"type": "number", "description": "X position (pixels from left)."},
+                                "y": {"type": "number", "description": "Y position (pixels from top)."},
+                                "color": {"type": "string", "default": "white"},
+                                "font_size": {"type": "integer", "default": 16}
+                            },
+                            "required": ["text", "x", "y"]
+                        },
+                        "description": "List of text annotations with position and style."
+                    },
+                    "output_path": {"type": "string", "description": "Path to save the annotated image."}
+                },
+                "required": ["image", "annotations", "output_path"]
+            },
+            requires_connection=False
+        ),
+        add_text_handler
+    )
+
+    # 10. OCR
+    registrar.tool(
+        ToolSpec(
+            slug="geo_perception.ocr_extract",
+            name="OCR Text Extraction",
+            description="Extract text from an image using EasyOCR. Supports Chinese and English text. Useful for reading labels, legends, or text in satellite imagery.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "image": {"type": "string", "description": "Path to the input image."},
+                    "languages": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "default": ["en"],
+                        "description": "List of language codes to recognize (e.g., ['en', 'ch_sim'] for English + Simplified Chinese)."
+                    }
+                },
+                "required": ["image"]
+            },
+            requires_connection=False
+        ),
+        ocr_extract_handler
+    )
+
+    # 11. BBox Expand (spatial buffer)
+    registrar.tool(
+        ToolSpec(
+            slug="geo_perception.bbox_expand",
+            name="Expand Bounding Boxes",
+            description="Expand bounding boxes by a spatial buffer radius. Optionally provide GSD (meters/pixel) to specify radius in meters.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "bboxes": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "x1": {"type": "number"}, "y1": {"type": "number"},
+                                "x2": {"type": "number"}, "y2": {"type": "number"}
+                            },
+                            "required": ["x1", "y1", "x2", "y2"]
+                        },
+                        "description": "List of bounding boxes to expand."
+                    },
+                    "radius_px": {"type": "number", "description": "Buffer radius in pixels."},
+                    "radius_m": {"type": "number", "description": "Buffer radius in meters (requires gsd_m)."},
+                    "gsd_m": {"type": "number", "description": "Ground sampling distance in meters/pixel (required when using radius_m)."}
+                },
+                "required": ["bboxes"]
+            },
+            requires_connection=False
+        ),
+        bbox_expand_handler
+    )
+
+    # 12. BBox to Centroid
+    registrar.tool(
+        ToolSpec(
+            slug="geo_perception.bbox_to_centroid",
+            name="Bounding Boxes to Centroids",
+            description="Convert a list of bounding boxes to their centroid coordinates.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "bboxes": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "x1": {"type": "number"}, "y1": {"type": "number"},
+                                "x2": {"type": "number"}, "y2": {"type": "number"}
+                            },
+                            "required": ["x1", "y1", "x2", "y2"]
+                        },
+                        "description": "List of bounding boxes."
+                    }
+                },
+                "required": ["bboxes"]
+            },
+            requires_connection=False
+        ),
+        bbox_to_centroid_handler
+    )
+
+    # 13. Centroid Distance Extremes
+    registrar.tool(
+        ToolSpec(
+            slug="geo_perception.centroid_distance_extremes",
+            name="Centroid Distance Extremes",
+            description="Compute minimum and maximum pairwise distances between a set of centroid points.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "centroids": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "x": {"type": "number"}, "y": {"type": "number"}
+                            },
+                            "required": ["x", "y"]
+                        },
+                        "description": "List of centroid points with x and y coordinates."
+                    }
+                },
+                "required": ["centroids"]
+            },
+            requires_connection=False
+        ),
+        centroid_distance_extremes_handler
+    )
+
+    # 14. BBox Area
+    registrar.tool(
+        ToolSpec(
+            slug="geo_perception.bbox_area",
+            name="Calculate BBox Area",
+            description="Calculate the total area of bounding boxes in pixels² or m² (when GSD is provided).",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "bboxes": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "x1": {"type": "number"}, "y1": {"type": "number"},
+                                "x2": {"type": "number"}, "y2": {"type": "number"}
+                            },
+                            "required": ["x1", "y1", "x2", "y2"]
+                        },
+                        "description": "List of bounding boxes."
+                    },
+                    "gsd_m": {"type": "number", "description": "Ground sampling distance in meters/pixel. If provided, area is returned in m²."}
+                },
+                "required": ["bboxes"]
+            },
+            requires_connection=False
+        ),
+        bbox_area_handler
+    )
+
+    # 15. MSCN Classify (Mock)
+    registrar.tool(
+        ToolSpec(
+            slug="geo_perception.mscn_classify",
+            name="MSCN Scene Classification",
+            description="[Mock] Classify a remote sensing image into one of 30 scene categories (Airport, Forest, Urban, Farmland, etc.) using MSCN scene classifier. NOTE: Returns mock results; model not yet deployed.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "image": {"type": "string", "description": "Path to the input image."}
+                },
+                "required": ["image"]
+            },
+            requires_connection=False
+        ),
+        mscn_classify_mock_handler
+    )
+
+    # 16. SM3Det (Mock)
+    registrar.tool(
+        ToolSpec(
+            slug="geo_perception.sm3det_detect",
+            name="SM3Det Multi-Category Detection",
+            description="[Mock] Detect objects in 15 categories (aircraft, ships, vehicles, buildings, fields, etc.) using SM3Det. NOTE: Returns mock results; model not yet deployed.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "image": {"type": "string", "description": "Path to the input image."},
+                    "score_threshold": {"type": "number", "default": 0.3, "description": "Confidence threshold."}
+                },
+                "required": ["image"]
+            },
+            requires_connection=False
+        ),
+        sm3det_detect_mock_handler
+    )
+
+    # 17. ChangeOS (Mock)
+    registrar.tool(
+        ToolSpec(
+            slug="geo_perception.change_os_detect",
+            name="ChangeOS Change Detection",
+            description="[Mock] Detect changes between two multi-temporal satellite images or extract building footprints using ChangeOS. NOTE: Returns mock results; model not yet deployed.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pre_image": {"type": "string", "description": "Path to the pre-event image (or single image for building extraction)."},
+                    "post_image": {"type": "string", "description": "Path to the post-event image (optional for building extraction mode)."},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["change_detection", "building_extraction"],
+                        "default": "change_detection",
+                        "description": "'change_detection': detect changes between two images. 'building_extraction': extract building footprints from a single image."
+                    }
+                },
+                "required": ["pre_image"]
+            },
+            requires_connection=False
+        ),
+        change_os_detect_mock_handler
     )
