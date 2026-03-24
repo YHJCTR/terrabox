@@ -6,6 +6,7 @@ import logging
 from datetime import datetime
 from typing import AsyncIterator
 
+from langchain_core.messages import SystemMessage
 from sqlalchemy.orm import Session
 
 from .config import load_config
@@ -63,6 +64,11 @@ def run_agent(
     graph = create_react_agent(llm, tools)
 
     record, history = prepare_history(session_id, user_message, image_paths, user, db)
+    
+    # Inject system prompt at the beginning of history
+    from .session import _REACT_SYSTEM_PROMPT
+    if not any(isinstance(m, SystemMessage) for m in history):
+        history = [SystemMessage(content=_REACT_SYSTEM_PROMPT)] + history
 
     io = get_io_logger()
     log_session_start(io, session_id, user_message, image_paths)

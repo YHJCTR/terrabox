@@ -20,11 +20,14 @@ recovery when the initial category selection turns out to be incomplete.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from datetime import datetime
 from typing import Annotated, Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
@@ -109,10 +112,10 @@ def _make_selection_node(llm):
     return selection_node
 
 
-def _make_execution_node(llm, user, config):
+def _make_execution_node(llm, user, agent_config):
     io = logging.getLogger("agent.io")
 
-    def execution_node(state: CategoryAgentState) -> dict:
+    def execution_node(state: CategoryAgentState, config: RunnableConfig) -> dict:
         from langgraph.prebuilt import create_react_agent
 
         selected = state.get("selected_categories", [])
@@ -127,7 +130,8 @@ def _make_execution_node(llm, user, config):
         if synth_tools:
             io.info(f"[EXECUTION] +{len(synth_tools)} synthesized tool(s): {[t.name for t in synth_tools]}")
 
-        agent = create_react_agent(llm, exec_tools)
+        from .session import _REACT_SYSTEM_PROMPT
+        agent = create_react_agent(llm, exec_tools, state_modifier=_REACT_SYSTEM_PROMPT)
 
         # Use only messages up to (and including) the latest HumanMessage as input.
         all_msgs = state["messages"]
@@ -139,7 +143,7 @@ def _make_execution_node(llm, user, config):
 
         result = agent.invoke(
             {"messages": exec_input},
-            config={"recursion_limit": config.max_iterations},
+            config={**config, "recursion_limit": agent_config.max_iterations},
         )
 
         from .session import log_messages
@@ -168,6 +172,13 @@ def _make_expansion_node(llm):
         ai_msgs = [m for m in state["messages"] if isinstance(m, AIMessage) and m.content]
         last_result = ai_msgs[-1].content if ai_msgs else "(no result yet)"
 
+        # Collect tool errors from ToolMessages so the expansion LLM can see what actually failed
+        tool_errors = [
+            m.content for m in state["messages"]
+            if isinstance(m, ToolMessage) and "Tool execution error:" in m.content
+        ]
+        tool_error_text = "\n".join(tool_errors) if tool_errors else "(none)"
+
         # Available but not yet loaded categories
         all_cats = {tk.name for tk in registry.list_toolkits()}
         unused_cats = sorted(all_cats - set(state["selected_categories"]))
@@ -178,6 +189,7 @@ def _make_expansion_node(llm):
             HumanMessage(content=(
                 f"User request:\n{user_request}\n\n"
                 f"Execution result so far:\n{last_result}\n\n"
+                f"Tool errors encountered:\n{tool_error_text}\n\n"
                 f"Available but not yet loaded categories:\n{unused_text}\n\n"
                 "What should we do next?"
             )),
@@ -257,10 +269,10 @@ def _make_expansion_node(llm):
 # Graph builder
 # ---------------------------------------------------------------------------
 
-def build_category_graph(llm, user, config):
+def build_category_graph(llm, user, agent_config):
     builder = StateGraph(CategoryAgentState)
     builder.add_node("selection_node", _make_selection_node(llm))
-    builder.add_node("execution_node", _make_execution_node(llm, user, config))
+    builder.add_node("execution_node", _make_execution_node(llm, user, agent_config))
     builder.add_node("expansion_node", _make_expansion_node(llm))
 
     builder.set_entry_point("selection_node")
@@ -322,7 +334,74 @@ async def stream_category_agent(
     db,
     config,
 ):
-    """SSE wrapper: runs the graph in a thread pool, streams final response token by token."""
-    from .session import stream_sync_agent
-    async for sse in stream_sync_agent(run_category_agent, session_id, user_message, image_paths, user, db, config):
-        yield sse
+    """SSE wrapper: real token streaming via graph.astream_events().
+
+    Only tokens from execution_node are streamed; selection/expansion nodes
+    produce structured JSON that is not meaningful to show token-by-token.
+    """
+    from .llm import get_llm
+    from .session import prepare_history, get_io_logger, log_session_start, serialize_messages, ThinkParser
+
+    yield ": keepalive\n\n"
+    io = get_io_logger()
+
+    try:
+        loop = asyncio.get_running_loop()
+        llm = await loop.run_in_executor(None, get_llm, config)
+        record, history = prepare_history(session_id, user_message, image_paths, user, db)
+    except Exception as exc:
+        io.error(f"[SETUP ERROR] {type(exc).__name__}: {exc}")
+        yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'session_id': session_id})}\n\n"
+        return
+
+    log_session_start(io, session_id, user_message, image_paths, mode="category_scoped/stream")
+
+    graph = build_category_graph(llm, user, config)
+    initial_state: CategoryAgentState = {
+        "messages": history,
+        "selected_categories": [],
+        "synthesized_tools": [],
+        "expansion_count": 0,
+        "max_expansions": config.max_category_expansions,
+        "expanded": False,
+    }
+
+    parser = ThinkParser()
+    final_state: dict | None = None
+
+    try:
+        async for event in graph.astream_events(initial_state, version="v2"):
+            etype = event["event"]
+
+            if etype == "on_chat_model_stream":
+                # Only stream tokens produced inside execution_node
+                if event.get("metadata", {}).get("langgraph_node") == "execution_node":
+                    chunk = event["data"]["chunk"]
+                    token = chunk.content if isinstance(chunk.content, str) else ""
+                    if token:
+                        for ptype, text in parser.feed(token):
+                            if text:
+                                yield f"data: {json.dumps({'type': ptype, 'token': text}, ensure_ascii=False)}\n\n"
+
+            elif etype == "on_chain_end":
+                output = event.get("data", {}).get("output") or {}
+                if isinstance(output, dict) and "messages" in output:
+                    final_state = output
+
+    except Exception as exc:
+        io.error(f"[ERROR]    {type(exc).__name__}: {exc}")
+        yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+        return
+
+    for ptype, text in parser.flush():
+        if text:
+            yield f"data: {json.dumps({'type': ptype, 'token': text}, ensure_ascii=False)}\n\n"
+
+    if final_state and "messages" in final_state:
+        record.messages_json = serialize_messages(final_state["messages"])
+        record.updated_at = datetime.utcnow()
+        db.commit()
+        io.info(f"[FINAL]    {final_state['messages'][-1].content!r}")
+
+    yield f"data: {json.dumps({'type': 'done', 'session_id': session_id})}\n\n"

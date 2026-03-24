@@ -33,6 +33,7 @@ class AgentLLMDockerManager(BaseServiceManager):
     GPU_DEVICES = "0"
     TENSOR_PARALLEL_SIZE = "1"
     DOCKER_IMAGE = "terrabox/agent-llm:latest"
+    MAX_MODEL_LEN = "24576"
 
     def __new__(cls):
         if cls._instance is None:
@@ -80,6 +81,7 @@ class AgentLLMDockerManager(BaseServiceManager):
             cls.TENSOR_PARALLEL_SIZE = str(config.local_llm_tensor_parallel)
             cls.PORT = config.local_llm_port
             cls.DOCKER_IMAGE = config.local_llm_docker_image
+            cls.MAX_MODEL_LEN = str(config.local_llm_max_model_len)
 
         if cls.is_running():
             return
@@ -110,7 +112,7 @@ class AgentLLMDockerManager(BaseServiceManager):
                 "--host", "0.0.0.0",
                 "--port", "8000",
                 "--tensor-parallel-size", cls.TENSOR_PARALLEL_SIZE,
-                "--max-model-len", "8192",
+                "--max-model-len", cls.MAX_MODEL_LEN,
                 "--gpu-memory-utilization", "0.85",
                 "--enforce-eager",
                 # Required for LangChain/LangGraph tool calling (tool_choice="auto")

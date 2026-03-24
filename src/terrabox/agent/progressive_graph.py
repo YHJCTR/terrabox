@@ -1,7 +1,7 @@
 """
 Progressive-disclosure agent: 3-level tool selection + error-retry with upper bound.
-Streaming: stream_progressive_agent() runs the graph synchronously then emits the
-final response as SSE with <think> tag separation (same SSE format as stream_agent).
+Streaming: stream_progressive_agent() uses graph.astream_events() and only forwards
+tokens from execution_node, so the user sees real-time output during tool execution.
 
 Discovery flow (forced sequential, not agentic):
   Level 1 — LLM sees all toolkit names + descriptions  → picks a category
@@ -14,12 +14,14 @@ graph terminates and returns the accumulated error information.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-
+from datetime import datetime
 from typing import Annotated, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
@@ -175,14 +177,14 @@ def _make_discovery_node(llm):
     return discovery_node
 
 
-def _make_execution_node(llm, user):
+def _make_execution_node(llm, user, max_iterations: int):
     """
     Run the selected tool via a mini ReAct agent.
     Returns only the new messages produced during this execution turn.
     """
     io = logging.getLogger("agent.io")
 
-    def execution_node(state: ProgressiveAgentState) -> dict:
+    def execution_node(state: ProgressiveAgentState, config: RunnableConfig) -> dict:
         from langgraph.prebuilt import create_react_agent
 
         selected_slug = state.get("selected_slug")
@@ -231,7 +233,7 @@ def _make_execution_node(llm, user):
         try:
             result = mini_agent.invoke(
                 {"messages": exec_messages},
-                config={"recursion_limit": 8},
+                config={**config, "recursion_limit": max_iterations},
             )
         except Exception as exc:
             err = f"{type(exc).__name__}: {exc}"
@@ -282,12 +284,12 @@ def _route_after_execution(state: ProgressiveAgentState) -> str:
 # Graph builder
 # ---------------------------------------------------------------------------
 
-def build_progressive_graph(llm, user, max_retries: int):
+def build_progressive_graph(llm, user, max_retries: int, max_iterations: int):
     """Compile the progressive-disclosure StateGraph."""
     builder = StateGraph(ProgressiveAgentState)
 
     builder.add_node("discovery_node", _make_discovery_node(llm))
-    builder.add_node("execution_node", _make_execution_node(llm, user))
+    builder.add_node("execution_node", _make_execution_node(llm, user, max_iterations))
 
     builder.set_entry_point("discovery_node")
     builder.add_edge("discovery_node", "execution_node")
@@ -326,7 +328,7 @@ def run_progressive_agent(
     io = get_io_logger()
     log_session_start(io, session_id, user_message, image_paths, mode="progressive_disclosure")
 
-    graph = build_progressive_graph(llm, user, config.max_retries_on_error)
+    graph = build_progressive_graph(llm, user, config.max_retries_on_error, config.max_iterations)
 
     initial_state: ProgressiveAgentState = {
         "messages": history,
@@ -357,7 +359,72 @@ async def stream_progressive_agent(
     db,
     config,
 ):
-    """Async generator — SSE wrapper around run_progressive_agent()."""
-    from .session import stream_sync_agent
-    async for sse in stream_sync_agent(run_progressive_agent, session_id, user_message, image_paths, user, db, config):
-        yield sse
+    """Async generator — real token streaming via graph.astream_events().
+
+    Only tokens from execution_node are streamed; discovery node LLM calls
+    produce category/slug selections that are not meaningful to stream.
+    """
+    from .llm import get_llm
+    from .session import prepare_history, get_io_logger, log_session_start, serialize_messages, ThinkParser
+
+    yield ": keepalive\n\n"
+    io = get_io_logger()
+
+    try:
+        loop = asyncio.get_running_loop()
+        llm = await loop.run_in_executor(None, get_llm, config)
+        record, history = prepare_history(session_id, user_message, image_paths, user, db)
+    except Exception as exc:
+        io.error(f"[SETUP ERROR] {type(exc).__name__}: {exc}")
+        yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'session_id': session_id})}\n\n"
+        return
+
+    log_session_start(io, session_id, user_message, image_paths, mode="progressive/stream")
+
+    graph = build_progressive_graph(llm, user, config.max_retries_on_error, config.max_iterations)
+    initial_state: ProgressiveAgentState = {
+        "messages": history,
+        "retry_count": 0,
+        "max_retries": config.max_retries_on_error,
+        "last_error": None,
+        "selected_slug": None,
+    }
+
+    parser = ThinkParser()
+    final_state: dict | None = None
+
+    try:
+        async for event in graph.astream_events(initial_state, version="v2"):
+            etype = event["event"]
+
+            if etype == "on_chat_model_stream":
+                if event.get("metadata", {}).get("langgraph_node") == "execution_node":
+                    chunk = event["data"]["chunk"]
+                    token = chunk.content if isinstance(chunk.content, str) else ""
+                    if token:
+                        for ptype, text in parser.feed(token):
+                            if text:
+                                yield f"data: {json.dumps({'type': ptype, 'token': text}, ensure_ascii=False)}\n\n"
+
+            elif etype == "on_chain_end":
+                output = event.get("data", {}).get("output") or {}
+                if isinstance(output, dict) and "messages" in output:
+                    final_state = output
+
+    except Exception as exc:
+        io.error(f"[ERROR]    {type(exc).__name__}: {exc}")
+        yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+        return
+
+    for ptype, text in parser.flush():
+        if text:
+            yield f"data: {json.dumps({'type': ptype, 'token': text}, ensure_ascii=False)}\n\n"
+
+    if final_state and "messages" in final_state:
+        record.messages_json = serialize_messages(final_state["messages"])
+        record.updated_at = datetime.utcnow()
+        db.commit()
+        io.info(f"[FINAL]    {final_state['messages'][-1].content!r}")
+
+    yield f"data: {json.dumps({'type': 'done', 'session_id': session_id})}\n\n"

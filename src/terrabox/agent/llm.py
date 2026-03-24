@@ -26,22 +26,14 @@ def get_llm(config: AgentConfig) -> ChatOpenAI:
             logger.info("Using local LLM (subprocess)")
 
         api_base = f"http://{config.local_llm_host}:{config.local_llm_port}/v1"
-        # Non-Docker vLLM serves the model under its local path name;
-        # Docker vLLM mounts the model at /model. We use the model path
-        # so both modes resolve correctly.
-        #
-        # trust_env=False: bypass http_proxy/https_proxy env vars so that
-        # requests to 127.0.0.1 go directly to vLLM instead of an external proxy.
-        #
-        # retries=3: when the agent calls a long-running tool (e.g., VLM loading
-        # takes 10+ minutes), the vLLM server closes the idle HTTP keep-alive
-        # connection (default timeout_keep_alive=5s). retries=3 makes httpx
-        # transparently re-connect and retry on RemoteProtocolError / ConnectionError
-        # so the next LLM call after a long tool execution succeeds.
+        # Docker mode mounts the model at /model inside the container, so vLLM
+        # serves it as "/model". Subprocess mode serves the model under its host
+        # path. Use the correct name accordingly.
+        model_name = "/model" if config.use_docker else config.local_llm_model_path
         return ChatOpenAI(
             base_url=api_base,
             api_key="EMPTY",   # vLLM does not require a real key
-            model=config.local_llm_model_path,
+            model=model_name,
             temperature=0.7,
             streaming=True,
             http_client=httpx.Client(

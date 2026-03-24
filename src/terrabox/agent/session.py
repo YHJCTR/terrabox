@@ -53,10 +53,39 @@ def deserialize_messages(json_str: str) -> list:
     return messages_from_dict(data) if data else []
 
 
+_MAX_HISTORY_MESSAGES = 20   # keep at most this many past messages (before appending new one)
+
+# System prompt for ReAct agent
+_REACT_SYSTEM_PROMPT = """You are a geospatial analysis assistant with access to various tools for Earth observation data.
+
+## When to STOP calling tools:
+1. You have successfully answered the user's question
+2. You have provided a complete analysis
+3. A tool error indicates the task cannot be completed with available tools
+4. The user's request is simple and does not require multiple tools
+
+## Important rules:
+- For image analysis tasks, ONE successful vlm_analyze call is usually sufficient
+- Do NOT chain multiple perception tools unless explicitly asked
+- If a tool fails, explain why and provide the best answer you can with available information
+- Always provide a clear, final answer to the user's question
+- Do NOT keep calling tools hoping for different results
+
+## Tool selection guide:
+- vlm_analyze: General image description and analysis (START HERE for image tasks)
+- sam2_segment: Instance segmentation (only when you need object masks)
+- remoteclip_analysis: Zero-shot classification (only when you need class labels)
+- strip_rcnn_detect: Rotated object detection (only for specific object detection)
+- remotesam_segment: Text-prompted segmentation (only when you have specific text prompts)
+
+Remember: Quality over quantity. A single well-chosen tool is better than many unnecessary calls."""
+
+
 def prepare_history(session_id: str, user_message: str, image_paths: list, user, db: Session):
     """Load/create session record, build history with annotated message.
 
     Returns (record, history) where history already includes the new HumanMessage.
+    Old messages beyond _MAX_HISTORY_MESSAGES are dropped to avoid context overflow.
     """
     from ..db.models import AgentSession
     content = user_message
@@ -71,6 +100,8 @@ def prepare_history(session_id: str, user_message: str, image_paths: list, user,
         db.add(record)
         db.flush()
     history = deserialize_messages(record.messages_json)
+    if len(history) > _MAX_HISTORY_MESSAGES:
+        history = history[-_MAX_HISTORY_MESSAGES:]
     history.append(HumanMessage(content=content))
     return record, history
 
@@ -129,43 +160,81 @@ def clear_session(session_id: str, db: Session, user_id_fk) -> None:
 class ThinkParser:
     """State machine that splits streamed tokens into 'thinking' and 'response'.
 
-    Handles <think>...</think> tags that may span multiple tokens safely by
-    buffering the minimum number of bytes needed to detect a tag boundary.
+    Handles <think>...</think> tags that may span multiple tokens safely.
+
+    Some thinking models (e.g. Qwen3) emit reasoning text BEFORE the first
+    <think> tag.  A "pre" state buffers up to _PRE_THRESHOLD chars to detect
+    this pattern and retroactively label that text as "thinking".  If no
+    <think> tag appears within the threshold the buffer is emitted as
+    "response" (non-thinking model path).
     """
 
     OPEN = "<think>"
     CLOSE = "</think>"
+    _PRE_THRESHOLD = 500  # chars to buffer before giving up on finding <think>
 
     def __init__(self) -> None:
-        self.mode: str = "response"  # "response" | "thinking"
+        self.mode: str = "pre"   # "pre" | "thinking" | "response"
         self.buf: str = ""
 
     def feed(self, token: str) -> list[tuple[str, str]]:
         """Feed one token. Returns [(type, text), ...] pairs ready to emit."""
         self.buf += token
         results: list[tuple[str, str]] = []
-        tag = self.OPEN if self.mode == "response" else self.CLOSE
+
         while True:
-            idx = self.buf.find(tag)
-            if idx == -1:
-                # Tag not yet complete — only flush the "safe" prefix
-                safe = max(0, len(self.buf) - len(tag) + 1)
-                if safe:
-                    results.append((self.mode, self.buf[:safe]))
-                    self.buf = self.buf[safe:]
-                break
-            if idx > 0:
-                results.append((self.mode, self.buf[:idx]))
-            self.buf = self.buf[idx + len(tag):]
-            self.mode = "thinking" if self.mode == "response" else "response"
-            tag = self.CLOSE if self.mode == "thinking" else self.OPEN
+            if self.mode == "pre":
+                open_idx = self.buf.find(self.OPEN)
+                if open_idx != -1:
+                    # <think> found: everything before it is also thinking
+                    if open_idx > 0:
+                        results.append(("thinking", self.buf[:open_idx]))
+                    self.buf = self.buf[open_idx + len(self.OPEN):]
+                    self.mode = "thinking"
+                    # fall through to handle </think> in the same chunk
+                elif len(self.buf) > self._PRE_THRESHOLD:
+                    # No <think> in first _PRE_THRESHOLD chars → regular model
+                    results.append(("response", self.buf))
+                    self.buf = ""
+                    self.mode = "response"
+                else:
+                    break  # keep buffering
+
+            elif self.mode == "thinking":
+                idx = self.buf.find(self.CLOSE)
+                if idx == -1:
+                    safe = max(0, len(self.buf) - len(self.CLOSE) + 1)
+                    if safe:
+                        results.append(("thinking", self.buf[:safe]))
+                        self.buf = self.buf[safe:]
+                    break
+                if idx > 0:
+                    results.append(("thinking", self.buf[:idx]))
+                self.buf = self.buf[idx + len(self.CLOSE):]
+                self.mode = "response"
+
+            else:  # "response"
+                idx = self.buf.find(self.OPEN)
+                if idx == -1:
+                    safe = max(0, len(self.buf) - len(self.OPEN) + 1)
+                    if safe:
+                        results.append(("response", self.buf[:safe]))
+                        self.buf = self.buf[safe:]
+                    break
+                if idx > 0:
+                    results.append(("response", self.buf[:idx]))
+                self.buf = self.buf[idx + len(self.OPEN):]
+                self.mode = "thinking"
+
         return results
 
     def flush(self) -> list[tuple[str, str]]:
         """Emit any remaining buffered text at end of stream."""
         if not self.buf:
             return []
-        result = [(self.mode, self.buf)]
+        # "pre" with no <think> seen → treat as response
+        mode = "thinking" if self.mode == "thinking" else "response"
+        result = [(mode, self.buf)]
         self.buf = ""
         return result
 
