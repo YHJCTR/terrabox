@@ -77,6 +77,10 @@ def load_config() -> AgentConfig:
     if config.max_category_expansions < 0:
         raise ValueError(f"max_category_expansions must be >= 0, got {config.max_category_expansions}")
 
+    # Allow per-process port override for parallel GPU execution
+    if port_env := os.environ.get("AGENT_LLM_PORT"):
+        config.local_llm_port = int(port_env)
+
     return config
 
 

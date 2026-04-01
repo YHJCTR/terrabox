@@ -82,6 +82,8 @@ class AgentLLMDockerManager(BaseServiceManager):
             cls.PORT = config.local_llm_port
             cls.DOCKER_IMAGE = config.local_llm_docker_image
             cls.MAX_MODEL_LEN = str(config.local_llm_max_model_len)
+            # Dynamic container name based on port (supports parallel GPU instances)
+            cls.CONTAINER_NAME = f"terrabox-agent-llm-{cls.PORT}"
 
         if cls.is_running():
             return
@@ -155,8 +157,15 @@ class AgentLLMDockerManager(BaseServiceManager):
     @classmethod
     def stop_service(cls) -> None:
         logger.info(f"Stopping container {cls.CONTAINER_NAME}...")
-        subprocess.run(["docker", "stop", cls.CONTAINER_NAME], capture_output=True)
-        subprocess.run(["docker", "rm", cls.CONTAINER_NAME], capture_output=True)
+        # -t 2: send SIGKILL after 2s instead of default 10s
+        subprocess.run(
+            ["docker", "stop", "-t", "2", cls.CONTAINER_NAME],
+            capture_output=True, timeout=6,
+        )
+        subprocess.run(
+            ["docker", "rm", "-f", cls.CONTAINER_NAME],
+            capture_output=True, timeout=5,
+        )
 
 
 agent_llm_manager = AgentLLMDockerManager()
