@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import pathlib
 import uuid
 from datetime import datetime
 
@@ -13,18 +14,19 @@ from sqlalchemy.orm import Session
 
 
 # ---------------------------------------------------------------------------
-# Dedicated I/O logger — writes to a fixed file for easy inspection
+# Dedicated I/O logger — writes to logs/agent.log in the project root
 # ---------------------------------------------------------------------------
-_AGENT_LOG_PATH = os.environ.get("AGENT_LOG_PATH", "./agent.log")
+_PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[3]
+_AGENT_LOG_PATH = os.environ.get(
+    "AGENT_LOG_PATH", str(_PROJECT_ROOT / "logs" / "agent.log")
+)
 _io_logger: logging.Logger | None = None
 
 
 def get_io_logger() -> logging.Logger:
     global _io_logger
     if _io_logger is None:
-        # Apply TL_LOG_LEVEL to root logger (safe: only changes level, no handlers added)
-        level_str = os.environ.get("TL_LOG_LEVEL", "INFO").upper()
-        logging.root.setLevel(getattr(logging, level_str, logging.INFO))
+        pathlib.Path(_AGENT_LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
 
         _io_logger = logging.getLogger("agent.io")
         _io_logger.setLevel(logging.DEBUG)

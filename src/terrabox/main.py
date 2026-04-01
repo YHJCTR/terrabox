@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 
+from .core.logging_config import setup_logging
 from .core.utils.config import settings
 from .db.session import engine
 from .db.models import Base
@@ -57,6 +58,9 @@ def create_app() -> FastAPI:
     registers all built‑in tools and mounts the API routers.  A
     simple healthcheck endpoint is added at the root.
     """
+    # Initialize logging
+    setup_logging()
+
     # Initialize database
     init_db()
     
