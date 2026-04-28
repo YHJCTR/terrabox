@@ -6,6 +6,9 @@ run_sft_sample.py — 用真实图像执行某条灾害 SFT 样本的工具链
   # 列出所有可用样本 ID
   python scripts/run_sft_sample.py --list
 
+  # 自动模式：从映射文件读取影像路径，自动分配给占位符
+  python scripts/run_sft_sample.py --id flood_detection_01 --auto
+
   # 交互模式：脚本自动检测所需输入图像，逐一提示你填写真实路径
   python scripts/run_sft_sample.py --id flood_detection_01
 
@@ -16,8 +19,11 @@ run_sft_sample.py — 用真实图像执行某条灾害 SFT 样本的工具链
   # 指定工作目录（中间/输出文件落地于此）
   python scripts/run_sft_sample.py --id flood_detection_01 --workdir /tmp/test_run
 
+  # 使用扩增数据集
+  python scripts/run_sft_sample.py --id flood_detection_01_aug1 --auto --augmented
+
 运行环境:
-  /data1/yuhongjie2/env/earth/bin/python scripts/run_sft_sample.py ...
+  /data1/yuhongjie2/env/unsloth/bin/python scripts/run_sft_sample.py ...
 """
 
 from __future__ import annotations
@@ -35,9 +41,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 DATASET_PATH = REPO_ROOT / "data" / "disaster_sft_dataset.json"
+AUGMENTED_PATH = REPO_ROOT / "data" / "disaster_sft_augmented.json"
+MAPPING_PATH = REPO_ROOT / "data" / "sft_image_mapping.json"
+AUGMENTED_MAPPING_PATH = REPO_ROOT / "data" / "sft_augmented_image_mapping.json"
 
-# 识别文件路径的正则：不以 $step 开头，以 .tif/.tiff/.png 结尾
-_PATH_RE = re.compile(r"^(?!\$step)[\w/._-]+\.(tif|tiff|png)$", re.IGNORECASE)
+# 识别文件路径的正则：不以 $step 开头，以 .tif/.tiff/.png/.geojson 结尾
+_PATH_RE = re.compile(r"^(?!\$step)[\w/._-]+\.(tif|tiff|png|geojson)$", re.IGNORECASE)
 
 # $stepN.key 引用正则
 _REF_RE = re.compile(r"^\$step(\d+)\.(.+)$")
@@ -126,6 +135,247 @@ def find_leaf_inputs(tool_calls: list[dict]) -> list[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 自动影像映射 (--auto)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 占位符名 → (源图选择, 波段索引)
+# 源图: "pre" / "post" / "post_or_pre"
+# 波段: 1=R, 2=G, 3=B(proxy NIR), 0=保持多波段原样
+_PLACEHOLDER_BAND_MAP = {
+    # RGB 原图（多波段）
+    "rgb.tif":       ("post_or_pre", 0),
+    "rgb_post.tif":  ("post", 0),
+    "rgb_fire.tif":  ("post", 0),
+    # 光谱波段
+    "green.tif":     ("post_or_pre", 2),
+    "green_pre.tif": ("pre", 2),
+    "green_post.tif":("post", 2),
+    "green_d1.tif":  ("post_or_pre", 2),
+    "red.tif":       ("post_or_pre", 1),
+    "nir.tif":       ("post_or_pre", 3),
+    "nir_pre.tif":   ("pre", 3),
+    "nir_post.tif":  ("post", 3),
+    "nir_d1.tif":    ("post_or_pre", 3),
+    "swir_pre.tif":  ("pre", 1),
+    "swir_post.tif": ("post", 1),
+    # 变化检测 pre/post
+    "pre.tif":       ("pre", 0),
+    "post.tif":      ("post", 0),
+    "port_pre.tif":  ("pre", 0),
+    "port_post.tif": ("post", 0),
+    # 热/FRP（用单波段代理）
+    "thermal.tif":   ("post_or_pre", 1),
+    "lst_day.tif":   ("post_or_pre", 1),
+    "lst_night.tif": ("post_or_pre", 3),
+    "frp.tif":       ("post_or_pre", 1),
+    "frp_pre.tif":   ("pre", 1),
+    "frp_post.tif":  ("post", 1),
+    "albedo.tif":    ("post_or_pre", 2),
+    "tb_h.tif":      ("post_or_pre", 1),
+    "tb_v.tif":      ("post_or_pre", 3),
+    # 地形/辅助
+    "dem.tif":             ("post_or_pre", 1),
+    "disaster.tif":        ("post", 1),
+    "fire_mask.tif":       ("post", 1),
+    "cloud_qa.tif":        ("post", 3),
+    "flood_mask_norm.tif": ("post", 1),
+    "ones_raster.tif":     ("post_or_pre", 0),  # 特殊：全1栅格
+    "population_density.tif": ("post_or_pre", 1),
+}
+
+# 月份 FRP 文件：frp_jan.tif ~ frp_dec.tif
+for _m in ["jan", "feb", "mar", "apr", "may", "jun",
+           "jul", "aug", "sep", "oct", "nov", "dec"]:
+    _PLACEHOLDER_BAND_MAP[f"frp_{_m}.tif"] = ("post_or_pre", 1)
+
+
+def _extract_band_to_tif(src_path: str, band_idx: int, dst_path: str) -> str:
+    """从多波段影像中提取单波段，保存为 GeoTIFF。"""
+    import rasterio
+    import numpy as np
+    import warnings
+    warnings.filterwarnings("ignore", category=rasterio.errors.NotGeoreferencedWarning)
+
+    with rasterio.open(src_path) as src:
+        n_bands = src.count
+        idx = min(band_idx, n_bands)  # 防止越界
+        data = src.read(idx).astype(np.float32)
+        profile = src.profile.copy()
+        profile.update(count=1, driver="GTiff", dtype="float32")
+        os.makedirs(os.path.dirname(os.path.abspath(dst_path)), exist_ok=True)
+        with rasterio.open(dst_path, "w", **profile) as dst:
+            dst.write(data, 1)
+    return dst_path
+
+
+def _copy_as_tif(src_path: str, dst_path: str) -> str:
+    """将 PNG/多波段影像原样转为 GeoTIFF（保留所有波段）。"""
+    import rasterio
+    import warnings
+    warnings.filterwarnings("ignore", category=rasterio.errors.NotGeoreferencedWarning)
+
+    with rasterio.open(src_path) as src:
+        data = src.read()
+        profile = src.profile.copy()
+        profile.update(driver="GTiff")
+        os.makedirs(os.path.dirname(os.path.abspath(dst_path)), exist_ok=True)
+        with rasterio.open(dst_path, "w", **profile) as dst:
+            dst.write(data)
+    return dst_path
+
+
+def _make_ones_raster(src_path: str, dst_path: str) -> str:
+    """生成与源影像同尺寸的全 1 栅格。"""
+    import rasterio
+    import numpy as np
+    import warnings
+    warnings.filterwarnings("ignore", category=rasterio.errors.NotGeoreferencedWarning)
+
+    with rasterio.open(src_path) as src:
+        profile = src.profile.copy()
+        profile.update(count=1, driver="GTiff", dtype="float32")
+        ones = np.ones((src.height, src.width), dtype=np.float32)
+        os.makedirs(os.path.dirname(os.path.abspath(dst_path)), exist_ok=True)
+        with rasterio.open(dst_path, "w", **profile) as dst:
+            dst.write(ones, 1)
+    return dst_path
+
+
+def _make_dummy_geojson(src_path: str | None, dst_path: str, placeholder: str) -> str:
+    """生成覆盖影像范围的简单 GeoJSON 多边形。"""
+    import rasterio
+    import warnings
+    warnings.filterwarnings("ignore", category=rasterio.errors.NotGeoreferencedWarning)
+
+    # 默认用像素坐标范围
+    minx, miny, maxx, maxy = 0, 0, 1024, 1024
+    if src_path and os.path.exists(src_path):
+        try:
+            with rasterio.open(src_path) as src:
+                b = src.bounds
+                minx, miny, maxx, maxy = b.left, b.bottom, b.right, b.top
+        except Exception:
+            pass
+
+    # 生成 4 个子区域（模拟行政区/建筑物）
+    dx = (maxx - minx) / 2
+    dy = (maxy - miny) / 2
+    features = []
+    names = ["zone_A", "zone_B", "zone_C", "zone_D"]
+    for i, (ox, oy) in enumerate([(0, 0), (1, 0), (0, 1), (1, 1)]):
+        x0 = minx + ox * dx + dx * 0.05
+        y0 = miny + oy * dy + dy * 0.05
+        x1 = x0 + dx * 0.9
+        y1 = y0 + dy * 0.9
+        features.append({
+            "type": "Feature",
+            "properties": {"name": names[i], "id": i + 1},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]]
+            }
+        })
+
+    geojson = {"type": "FeatureCollection", "features": features}
+    os.makedirs(os.path.dirname(os.path.abspath(dst_path)), exist_ok=True)
+    with open(dst_path, "w") as f:
+        json.dump(geojson, f)
+    return dst_path
+
+
+def auto_map_inputs(
+    sample_id: str,
+    leaf_inputs: list[str],
+    mapping_path: Path,
+    workdir: str,
+) -> tuple[dict[str, str], list[str]]:
+    """
+    从映射文件自动生成 占位符→真实文件 的映射。
+
+    返回 (path_map, warnings)。
+    对于需要单波段的占位符，会从 RGB 影像中提取对应波段到 workdir。
+    """
+    if not mapping_path.exists():
+        return {}, [f"映射文件不存在: {mapping_path}"]
+
+    data = json.loads(mapping_path.read_text())
+    entry = None
+    for m in data["mappings"]:
+        if m["sft_id"] == sample_id:
+            entry = m
+            break
+
+    if entry is None:
+        return {}, [f"映射文件中找不到 sft_id={sample_id}"]
+    if entry.get("status") == "no_match":
+        return {}, [f"该样本无可用影像匹配 (status=no_match)"]
+
+    image_pre = entry.get("image_pre")
+    image_post = entry.get("image_post")
+    warnings_list = []
+
+    if entry.get("status") == "proxy":
+        warnings_list.append(f"代理匹配 (proxy): {entry.get('note', '')}")
+
+    path_map: dict[str, str] = {}
+    prep_dir = os.path.join(workdir, "_auto_inputs")
+    os.makedirs(prep_dir, exist_ok=True)
+
+    for ph in leaf_inputs:
+        # GeoJSON 特殊处理
+        if ph.endswith(".geojson"):
+            ref_img = image_post or image_pre
+            dst = os.path.join(prep_dir, ph)
+            _make_dummy_geojson(ref_img, dst, ph)
+            path_map[ph] = dst
+            warnings_list.append(f"  {ph}: 生成模拟 GeoJSON")
+            continue
+
+        # 查找波段映射规则
+        rule = _PLACEHOLDER_BAND_MAP.get(ph)
+        if rule is None:
+            # 未知占位符：尝试用 post 影像 band1
+            warnings_list.append(f"  {ph}: 未知占位符，使用 post 影像 band1 代理")
+            rule = ("post_or_pre", 1)
+
+        src_choice, band_idx = rule
+
+        # 选择源影像
+        if src_choice == "pre":
+            src_img = image_pre or image_post
+        elif src_choice == "post":
+            src_img = image_post or image_pre
+        else:  # post_or_pre
+            src_img = image_post or image_pre
+
+        if src_img is None:
+            warnings_list.append(f"  {ph}: 无可用源影像，跳过")
+            continue
+
+        if not os.path.exists(src_img):
+            warnings_list.append(f"  {ph}: 源影像不存在 {src_img}")
+            continue
+
+        dst = os.path.join(prep_dir, ph.replace(".tif", ".tif"))  # 保持名字
+
+        # ones_raster 特殊处理
+        if ph == "ones_raster.tif":
+            _make_ones_raster(src_img, dst)
+            path_map[ph] = dst
+            continue
+
+        # 多波段原样 or 单波段提取
+        if band_idx == 0:
+            _copy_as_tif(src_img, dst)
+        else:
+            _extract_band_to_tif(src_img, band_idx, dst)
+
+        path_map[ph] = dst
+
+    return path_map, warnings_list
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 工具链执行
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -159,11 +409,19 @@ def run_sample(sample: dict, path_map: dict[str, str], workdir: str) -> list[dic
     path_map: 占位符名 → 真实路径（叶输入 + 中间/输出文件落地到 workdir）
     """
     # 初始化 registry（加载所有内置 toolkits）
-    from terrabox.extensions import load_builtin_toolkits, Registrar
+    from terrabox.extensions import load_builtin_toolkits
     from terrabox.core.registry import get_handler
 
-    r = Registrar()
-    load_builtin_toolkits(r)
+    load_builtin_toolkits()
+
+    # 如果 keep-services 模式，禁用 atexit 自动清理
+    if os.environ.get("_TERRABOX_KEEP_SERVICES") == "true":
+        import atexit
+        from terrabox.managers.base_manager import ServiceRegistry
+        try:
+            atexit.unregister(ServiceRegistry.cleanup_all)
+        except Exception:
+            pass
 
     # 将输出文件路径映射到 workdir
     tool_calls = sample["tool_calls"]
@@ -270,6 +528,15 @@ def main():
     )
     parser.add_argument("--list", action="store_true", help="列出所有可用样本 ID")
     parser.add_argument("--id", help="要运行的样本 ID")
+    parser.add_argument("--auto", action="store_true",
+                        help="自动从映射文件读取影像并分配给占位符")
+    parser.add_argument("--augmented", action="store_true",
+                        help="使用扩增数据集和映射文件")
+    parser.add_argument("--mapping", help="自定义映射文件路径（覆盖默认）")
+    parser.add_argument("--docker", action="store_true",
+                        help="使用 Docker 版感知服务（VLM/SAM2/CLIP 等）")
+    parser.add_argument("--keep-services", action="store_true",
+                        help="测试结束后保留 Docker 感知服务（避免下次重新加载模型）")
     parser.add_argument(
         "--inputs", nargs="*", metavar="placeholder=real_path",
         help="文件路径映射，格式: placeholder.tif=/real/path.tif"
@@ -277,7 +544,22 @@ def main():
     parser.add_argument("--workdir", help="工作目录（存放中间/输出文件），默认使用临时目录")
     args = parser.parse_args()
 
-    dataset = load_dataset()
+    # Docker 模式：在 toolkit 导入前设置环境变量
+    if args.docker:
+        os.environ["TERRABOX_USE_DOCKER"] = "true"
+        print("[docker] 启用 Docker 版感知服务")
+
+    # --keep-services: 禁用 atexit 自动清理，保留 Docker 服务
+    if args.keep_services:
+        os.environ["_TERRABOX_KEEP_SERVICES"] = "true"
+
+    # 选择数据集
+    ds_path = AUGMENTED_PATH if args.augmented else DATASET_PATH
+    if not ds_path.exists():
+        print(f"错误：数据集不存在 {ds_path}")
+        return 1
+
+    dataset = json.loads(ds_path.read_text())
 
     if args.list:
         print(f"共 {len(dataset['samples'])} 条样本:\n")
@@ -307,8 +589,51 @@ def main():
     leaf_inputs = find_leaf_inputs(sample["tool_calls"])
     print(f"\n该样本需要 {len(leaf_inputs)} 个输入文件: {leaf_inputs}")
 
-    # 解析用户提供的 --inputs 映射
+    # 设置工作目录（提前，auto 模式需要用到）
+    # Docker 模式下，工作目录必须在容器挂载路径内（默认 /data1），
+    # 否则 SAM2/RemoteCLIP 等容器无法访问输入文件。
+    if args.workdir:
+        os.makedirs(args.workdir, exist_ok=True)
+        workdir = args.workdir
+        _cleanup = False
+    elif args.docker:
+        _tmpdir = tempfile.mkdtemp(
+            prefix="sft_run_",
+            dir=str(REPO_ROOT / "terrabox_uploads")  # 在 /data1 下，容器可见
+        )
+        workdir = _tmpdir
+        _cleanup = True
+    else:
+        _tmpdir = tempfile.mkdtemp(prefix="sft_run_")
+        workdir = _tmpdir
+        _cleanup = True
+
+    # 构建路径映射
     path_map: dict[str, str] = {}
+
+    if args.auto:
+        # 自动模式：从映射文件读取影像
+        if args.mapping:
+            mp = Path(args.mapping)
+        elif args.augmented:
+            mp = AUGMENTED_MAPPING_PATH
+        else:
+            mp = MAPPING_PATH
+
+        print(f"\n[auto] 使用映射文件: {mp}")
+        path_map, auto_warnings = auto_map_inputs(
+            sample["id"], leaf_inputs, mp, workdir
+        )
+        if auto_warnings:
+            print("[auto] 提示:")
+            for w in auto_warnings:
+                print(f"  {w}")
+
+        if not path_map:
+            print("[auto] 未能生成任何映射，退出")
+            return 1
+
+    # --inputs 可叠加或覆盖 auto 映射
     if args.inputs:
         for mapping in args.inputs:
             if "=" not in mapping:
@@ -317,17 +642,18 @@ def main():
             placeholder, real_path = mapping.split("=", 1)
             path_map[placeholder.strip()] = real_path.strip()
 
-    # 交互补全缺少的映射
-    missing = [p for p in leaf_inputs if p not in path_map]
-    if missing:
-        print("\n请为以下占位符提供真实文件路径（直接回车跳过该输入）:")
-        for ph in missing:
-            try:
-                real = input(f"  {ph} = ").strip()
-            except (EOFError, KeyboardInterrupt):
-                real = ""
-            if real:
-                path_map[ph] = real
+    # 非 auto 模式：交互补全缺少的映射
+    if not args.auto:
+        missing = [p for p in leaf_inputs if p not in path_map]
+        if missing:
+            print("\n请为以下占位符提供真实文件路径（直接回车跳过该输入）:")
+            for ph in missing:
+                try:
+                    real = input(f"  {ph} = ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    real = ""
+                if real:
+                    path_map[ph] = real
 
     # 确认哪些输入已映射
     print("\n文件路径映射:")
@@ -335,16 +661,6 @@ def main():
         real = path_map.get(ph, "【未提供，将使用占位符】")
         status = "✓" if ph in path_map and os.path.exists(path_map[ph]) else ("?" if ph in path_map else "✗")
         print(f"  [{status}] {ph:30s} → {real}")
-
-    # 设置工作目录
-    if args.workdir:
-        os.makedirs(args.workdir, exist_ok=True)
-        workdir = args.workdir
-        _cleanup = False
-    else:
-        _tmpdir = tempfile.mkdtemp(prefix="sft_run_")
-        workdir = _tmpdir
-        _cleanup = True
 
     print(f"\n工作目录: {workdir}")
     print("\n开始执行工具链 ...")
