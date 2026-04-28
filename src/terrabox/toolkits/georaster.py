@@ -668,6 +668,51 @@ def create_fire_increase_map_handler(arguments: Dict[str, Any], context: Any, ac
     }
 
 
+def get_raster_info_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Read raster metadata: CRS, GSD, pixel size, shape, band count, dtype, and tags."""
+    import rasterio
+    import math
+
+    raster_path = arguments["raster_path"]
+    try:
+        with rasterio.open(raster_path) as src:
+            tags = src.tags()
+            # GSD priority: 1) explicit GSD tag (xBD pseudo-TIF), 2) pixel size in native units
+            gsd_m = None
+            if "GSD" in tags:
+                try:
+                    gsd_m = float(tags["GSD"])
+                except (ValueError, TypeError):
+                    pass
+
+            if gsd_m is None:
+                px = abs(src.transform.a)
+                py = abs(src.transform.e)
+                pixel_size_deg = (px + py) / 2.0
+                if src.crs and src.crs.is_geographic:
+                    # Degrees → metres (approximate, valid for mid-latitudes)
+                    gsd_m = round(pixel_size_deg * 111320, 4)
+                else:
+                    # Projected CRS: pixel size already in metres
+                    gsd_m = round(pixel_size_deg, 4)
+
+            return {
+                "status": "success",
+                "width": src.width,
+                "height": src.height,
+                "band_count": src.count,
+                "dtype": str(src.dtypes[0]),
+                "crs": str(src.crs) if src.crs else None,
+                "pixel_size_x": abs(src.transform.a),
+                "pixel_size_y": abs(src.transform.e),
+                "gsd_m": round(gsd_m, 4) if gsd_m is not None else None,
+                "tags": tags,
+                "is_pseudo_geotiff": tags.get("IS_PSEUDO_GEOTIFF", "FALSE") == "TRUE",
+            }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 def identify_fire_prone_areas_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """
     Identify fire-prone areas as pixels in the top percentile of FRP values across a time series.
@@ -1147,4 +1192,22 @@ def setup(registrar):
             requires_connection=False
         ),
         identify_fire_prone_areas_handler,
+    )
+
+    # 17. Get Raster Info
+    registrar.tool(
+        ToolSpec(
+            slug="geo_raster.get_raster_info",
+            name="Get Raster Info",
+            description="Read raster metadata: CRS, GSD (metres/pixel), pixel size, image dimensions, band count, data type, and embedded tags (e.g. IS_PSEUDO_GEOTIFF, GSD). Use this as the first step whenever the GSD of the input image is unknown.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "raster_path": {"type": "string", "description": "Path to the input raster file (GeoTIFF or any GDAL-readable format)."}
+                },
+                "required": ["raster_path"]
+            },
+            requires_connection=False
+        ),
+        get_raster_info_handler,
     )

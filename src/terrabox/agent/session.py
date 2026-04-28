@@ -9,8 +9,10 @@ import pathlib
 import uuid
 from datetime import datetime
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, message_to_dict, messages_from_dict
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, message_to_dict, messages_from_dict
 from sqlalchemy.orm import Session
+
+from .harness import current_context
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +57,44 @@ def deserialize_messages(json_str: str) -> list:
     return messages_from_dict(data) if data else []
 
 
-_MAX_HISTORY_MESSAGES = 20   # keep at most this many past messages (before appending new one)
+def _history_limits() -> tuple[int, int, int]:
+    """Return (max_messages, summary_threshold, keep_recent) from config or defaults."""
+    try:
+        from .config import load_config
+        cfg = load_config()
+        return (
+            getattr(cfg, "max_history_messages", 20),
+            getattr(cfg, "summary_threshold", 15),
+            getattr(cfg, "summary_keep_recent", 5),
+        )
+    except Exception:
+        return 20, 15, 5
+
+
+def _summarize_history(history: list, llm=None) -> str:
+    _, summary_threshold, keep_recent = _history_limits()
+    if len(history) <= summary_threshold:
+        return ""
+    to_summarize = history[:-keep_recent]
+    parts = []
+    for msg in to_summarize:
+        if isinstance(msg, HumanMessage):
+            parts.append(f"User: {msg.content[:200]}")
+        elif isinstance(msg, AIMessage):
+            parts.append(f"Assistant: {msg.content[:200]}")
+    if not parts:
+        return ""
+    text = "\n".join(parts)
+    if llm is None:
+        return f"[Conversation summary]: {text[:1000]}"
+    try:
+        result = llm.invoke([
+            {"role": "system", "content": "Summarize the following conversation concisely in Chinese, keeping key facts and decisions."},
+            {"role": "user", "content": text},
+        ])
+        return result.content
+    except Exception:
+        return f"[Conversation summary]: {text[:1000]}"
 
 # System prompt for ReAct agent
 _REACT_SYSTEM_PROMPT = """You are a geospatial analysis assistant with access to various tools for Earth observation data.
@@ -84,11 +123,6 @@ Remember: Quality over quantity. A single well-chosen tool is better than many u
 
 
 def prepare_history(session_id: str, user_message: str, image_paths: list, user, db: Session):
-    """Load/create session record, build history with annotated message.
-
-    Returns (record, history) where history already includes the new HumanMessage.
-    Old messages beyond _MAX_HISTORY_MESSAGES are dropped to avoid context overflow.
-    """
     from ..db.models import AgentSession
     content = user_message
     if image_paths:
@@ -98,13 +132,28 @@ def prepare_history(session_id: str, user_message: str, image_paths: list, user,
         )
     record = db.query(AgentSession).filter_by(id=session_id, user_id_fk=user.id).first()
     if record is None:
-        record = AgentSession(id=session_id, user_id_fk=user.id, messages_json="[]")
+        record = AgentSession(id=session_id, user_id_fk=user.id, messages_json="[]", summary_json="[]")
         db.add(record)
         db.flush()
     history = deserialize_messages(record.messages_json)
-    if len(history) > _MAX_HISTORY_MESSAGES:
-        history = history[-_MAX_HISTORY_MESSAGES:]
+
+    max_messages, _, keep_recent = _history_limits()
+    summary = _summarize_history(history)
+    if summary:
+        existing_summaries = deserialize_messages(record.summary_json)
+        summary_msg = SystemMessage(content=f"[Previous conversation summary]\n{summary}")
+        existing_summaries.append(summary_msg)
+        record.summary_json = serialize_messages(existing_summaries)
+        history = history[-keep_recent:]
+
+    if len(history) > max_messages:
+        history = history[-max_messages:]
     history.append(HumanMessage(content=content))
+
+    summaries = deserialize_messages(record.summary_json)
+    if summaries:
+        history = summaries[-3:] + history
+
     return record, history
 
 
@@ -134,6 +183,13 @@ def finalize_session(record, result: dict, db, io: logging.Logger) -> str:
     db.commit()
     final = result["messages"][-1].content
     io.info(f"[FINAL]    {final!r}")
+    ctx = current_context()
+    if ctx and getattr(ctx.config, "enable_memory_writeback", False):
+        try:
+            from .memory import UserMemoryManager
+            UserMemoryManager().extract_and_store(ctx.user.id, ctx.session_id or "", result["messages"], db)
+        except Exception as exc:
+            io.warning(f"[MEMORY WRITEBACK ERROR] {type(exc).__name__}: {exc}")
     return final
 
 

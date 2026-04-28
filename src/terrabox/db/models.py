@@ -259,9 +259,179 @@ class AgentSession(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id_fk = Column(get_uuid_type(), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     messages_json = Column(Text, nullable=False, default="[]")
+    summary_json = Column(Text, nullable=False, default="[]")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     __table_args__ = (
         Index("ix_agent_session_user", "user_id_fk"),
+    )
+
+
+class AgentRun(Base):
+    """A single agent request lifecycle."""
+    __tablename__ = "agent_runs"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id = Column(String(36), ForeignKey("agent_sessions.id", ondelete="SET NULL"))
+    user_id_fk = Column(get_uuid_type(), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    mode = Column(String(32), nullable=False, default="standard")
+    status = Column(String(32), nullable=False, default="running")
+    original_message = Column(Text, nullable=False)
+    rewritten_message = Column(Text, default="")
+    final_response = Column(Text, default="")
+    error_message = Column(Text)
+    image_paths_json = Column(Text, nullable=False, default="[]")
+    metadata_json = Column(Text, nullable=False, default="{}")
+    tool_call_count = Column(Integer, default=0)
+    step_count = Column(Integer, default=0)
+    started_at = Column(DateTime, default=datetime.utcnow)
+    finished_at = Column(DateTime)
+    latency_ms = Column(Integer)
+
+    __table_args__ = (
+        Index("ix_agent_run_user", "user_id_fk"),
+        Index("ix_agent_run_session", "session_id"),
+        Index("ix_agent_run_status", "status"),
+    )
+
+
+class AgentRunStep(Base):
+    """A structured step inside an agent run."""
+    __tablename__ = "agent_run_steps"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id = Column(String(36), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False)
+    step_index = Column(Integer, nullable=False, default=0)
+    step_type = Column(String(32), nullable=False)
+    status = Column(String(32), nullable=False, default="completed")
+    title = Column(String(256), default="")
+    content = Column(Text, default="")
+    tool_slug = Column(String(128), index=True)
+    trace_id = Column(String(64), index=True)
+    error_type = Column(String(64))
+    error_message = Column(Text)
+    duration_ms = Column(Integer)
+    input_json = Column(Text, nullable=False, default="{}")
+    output_json = Column(Text, nullable=False, default="{}")
+    metadata_json = Column(Text, nullable=False, default="{}")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_agent_run_step_run", "run_id", "step_index"),
+    )
+
+
+class AgentArtifact(Base):
+    """Output artifact produced during an agent run."""
+    __tablename__ = "agent_artifacts"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id = Column(String(36), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False)
+    step_id = Column(String(36), ForeignKey("agent_run_steps.id", ondelete="SET NULL"))
+    kind = Column(String(64), nullable=False, default="file")
+    path = Column(Text, nullable=False)
+    preview_path = Column(Text)
+    exists = Column(Boolean, default=True)
+    size_bytes = Column(BigInteger)
+    metadata_json = Column(Text, nullable=False, default="{}")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_agent_artifact_run", "run_id"),
+    )
+
+
+class AgentApproval(Base):
+    """Approval records for risky tool execution."""
+    __tablename__ = "agent_approvals"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id = Column(String(36), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False)
+    step_id = Column(String(36), ForeignKey("agent_run_steps.id", ondelete="SET NULL"))
+    tool_slug = Column(String(128), index=True, nullable=False)
+    reason = Column(Text, nullable=False, default="")
+    status = Column(String(32), nullable=False, default="pending")
+    decision_note = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    decided_at = Column(DateTime)
+
+    __table_args__ = (
+        Index("ix_agent_approval_run", "run_id"),
+        Index("ix_agent_approval_status", "status"),
+    )
+
+
+# =============================================================================
+# RAG Knowledge Base Models
+# =============================================================================
+
+class KnowledgeBase(Base):
+    __tablename__ = "knowledge_bases"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(128), nullable=False)
+    description = Column(Text, default="")
+    owner_id = Column(get_uuid_type(), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    documents = relationship("Document", back_populates="knowledge_base", cascade="all,delete-orphan")
+
+    __table_args__ = (
+        Index("ix_kb_owner", "owner_id"),
+    )
+
+
+class Document(Base):
+    __tablename__ = "documents"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    kb_id = Column(String(36), ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False)
+    filename = Column(String(256), nullable=False)
+    file_path = Column(Text, nullable=False)
+    status = Column(String(32), nullable=False, default="pending")
+    chunk_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    knowledge_base = relationship("KnowledgeBase", back_populates="documents")
+    chunks = relationship("DocumentChunk", back_populates="document", cascade="all,delete-orphan")
+
+    __table_args__ = (
+        Index("ix_doc_kb", "kb_id"),
+    )
+
+
+class DocumentChunk(Base):
+    __tablename__ = "document_chunks"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    doc_id = Column(String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
+    content = Column(Text, nullable=False)
+    chunk_index = Column(Integer, nullable=False)
+    embedding_id = Column(String(256), default="")
+    metadata_json = Column(get_json_type(), default="{}")
+
+    document = relationship("Document", back_populates="chunks")
+
+    __table_args__ = (
+        Index("ix_chunk_doc", "doc_id"),
+    )
+
+
+class UserMemory(Base):
+    __tablename__ = "user_memories"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(get_uuid_type(), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    key = Column(String(256), nullable=False)
+    value = Column(Text, nullable=False)
+    source_session_id = Column(String(36))
+    embedding_id = Column(String(256), default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_user_memory_user", "user_id"),
     )

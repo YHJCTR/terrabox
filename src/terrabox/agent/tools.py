@@ -8,6 +8,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import create_model
 
 from ..core.registry import registry
+from .tool_executor import AgentToolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -43,15 +44,10 @@ def _json_schema_to_pydantic(slug: str, schema: dict[str, Any]):
     return create_model(model_name, **fields)
 
 
-def _make_tool_func(handler, user):
-    """Return a callable that forwards **kwargs as a dict to the handler."""
+def _make_tool_func(slug: str, user):
+    """Return a callable that routes tool execution through AgentToolExecutor."""
     def _call(**kwargs):
-        try:
-            result = handler(kwargs, context=None, account=user)
-            return str(result)
-        except Exception as e:
-            logger.warning(f"Tool execution error: {e}")
-            return f"Tool execution error: {e}"
+        return AgentToolExecutor.execute(slug, kwargs, user)
     return _call
 
 
@@ -68,13 +64,12 @@ def build_langchain_tools(user, slugs: Optional[list[str]] = None) -> list[Struc
     for spec in registry.list_tools():
         if slugs is not None and spec.slug not in slugs:
             continue
-        handler = registry.get_handler(spec.slug)
-        if handler is None:
+        if registry.get_handler(spec.slug) is None:
             continue
 
         args_schema = _json_schema_to_pydantic(spec.slug, spec.parameters)
         lc_tool = StructuredTool.from_function(
-            func=_make_tool_func(handler, user),
+            func=_make_tool_func(spec.slug, user),
             # LangChain tool names must not contain dots
             name=spec.slug.replace(".", "__"),
             description=spec.description,

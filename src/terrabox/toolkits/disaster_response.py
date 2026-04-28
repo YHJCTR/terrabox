@@ -450,6 +450,20 @@ def accessibility_map_handler(arguments: Dict[str, Any], context: Any, account: 
     output_path      = arguments["output_path"]
     speed_kmh        = float(arguments.get("travel_speed_kmh", 30))
 
+    # Defensive parsing: handle string, list-of-strings, or varied field names
+    import json as _json
+    if isinstance(poi_locations, str):
+        poi_locations = _json.loads(poi_locations)
+    normalized = []
+    for poi in poi_locations:
+        if isinstance(poi, str):
+            poi = _json.loads(poi)
+        lon = poi.get("lon") or poi.get("longitude") or poi.get("x")
+        lat = poi.get("lat") or poi.get("latitude") or poi.get("y")
+        if lon is not None and lat is not None:
+            normalized.append({"lon": float(lon), "lat": float(lat), "name": poi.get("name", "")})
+    poi_locations = normalized
+
     mask_arr, profile, transform = _read_band(road_mask_path)
 
     # 1 = passable, 0 = blocked

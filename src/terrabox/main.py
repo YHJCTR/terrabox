@@ -19,6 +19,7 @@ from .routers import analytics as analytics_router
 from .routers import async_tools as async_tools_router
 from .core.background_tasks import start_background_tasks, stop_background_tasks
 from .agent.router import router as agent_router
+from .rag.router import router as rag_router
 from .managers.base_manager import ServiceRegistry
 
 try:
@@ -104,6 +105,9 @@ def create_app() -> FastAPI:
 
     # Agent router
     app.include_router(agent_router)
+
+    # RAG Knowledge Base router
+    app.include_router(rag_router)
 
     if SseServerTransport is not None and mcp_instance is not None:
         sse = SseServerTransport("/mcp/messages")

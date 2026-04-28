@@ -563,3 +563,118 @@ class ToolStatsParams(BaseModel):
     min_executions: Optional[int] = Field(default=None, ge=0)
     sort_by: Optional[str] = Field(default="total_executions", pattern="^(total_executions|unique_users|success_rate|total_cost|last_used_at)$")
     sort_order: Optional[str] = Field(default="desc", pattern="^(asc|desc)$")
+
+
+class AgentRunResponse(BaseModel):
+    """Agent run summary schema."""
+    id: str
+    session_id: Optional[str] = None
+    user_id: str
+    mode: str
+    status: str
+    original_message: str
+    rewritten_message: str = ""
+    final_response: str = ""
+    error_message: Optional[str] = None
+    image_paths: List[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    tool_call_count: int = 0
+    step_count: int = 0
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    latency_ms: Optional[int] = None
+
+
+class AgentRunStepResponse(BaseModel):
+    """Agent run step schema."""
+    id: str
+    run_id: str
+    step_index: int
+    step_type: str
+    status: str
+    title: str = ""
+    content: str = ""
+    tool_slug: Optional[str] = None
+    trace_id: Optional[str] = None
+    duration_ms: Optional[int] = None
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    input: Dict[str, Any] = Field(default_factory=dict)
+    output: Dict[str, Any] | List[Any] | str | None = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class AgentArtifactResponse(BaseModel):
+    """Agent artifact schema."""
+    id: str
+    run_id: str
+    step_id: Optional[str] = None
+    kind: str
+    path: str
+    preview_path: Optional[str] = None
+    exists: bool = True
+    size_bytes: Optional[int] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: Optional[datetime] = None
+
+
+class AgentApprovalResponse(BaseModel):
+    """Agent approval schema."""
+    id: str
+    run_id: str
+    step_id: Optional[str] = None
+    tool_slug: str
+    reason: str
+    status: str
+    decision_note: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    decided_at: Optional[datetime] = None
+
+
+class AgentRunDetailResponse(BaseModel):
+    """Full agent run detail schema."""
+    run: AgentRunResponse
+    steps: List[AgentRunStepResponse]
+    artifacts: List[AgentArtifactResponse]
+    approvals: List[AgentApprovalResponse]
+
+
+class AgentReplayEventResponse(BaseModel):
+    """Replay event schema."""
+    type: str
+    step_id: Optional[str] = None
+    step_index: Optional[int] = None
+    status: Optional[str] = None
+    title: Optional[str] = None
+    content: Optional[str] = None
+    tool_slug: Optional[str] = None
+    trace_id: Optional[str] = None
+    duration_ms: Optional[int] = None
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    input: Optional[Any] = None
+    output: Optional[Any] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    artifact_id: Optional[str] = None
+    path: Optional[str] = None
+    preview_path: Optional[str] = None
+    kind: Optional[str] = None
+    exists: Optional[bool] = None
+    size_bytes: Optional[int] = None
+
+
+class AgentRuntimeMetricsResponse(BaseModel):
+    """Runtime metrics for agent harness."""
+    run_capacity: int
+    active_runs: int
+    rejected_runs: int
+    tool_starts: int = 0
+    tool_successes: int = 0
+    tool_failures: int = 0
+    breaker_rejections: int = 0
+    bulkhead_rejections: int = 0
+    bulkheads: Dict[str, Dict[str, int]] = Field(default_factory=dict)
+    breakers: Dict[str, Dict[str, Any]] = Field(default_factory=dict)

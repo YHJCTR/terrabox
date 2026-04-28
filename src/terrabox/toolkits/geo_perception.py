@@ -168,9 +168,21 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
         if response.status_code == 200:
             res_json = response.json()
             content = res_json['choices'][0]['message']['content']
+            # Try to extract structured bboxes from model text output
+            import re as _re, json as _json
+            bboxes = []
+            m = _re.search(r'"bboxes"\s*:\s*(\[.*?\])', content, _re.DOTALL)
+            if not m:
+                m = _re.search(r'(\[\s*\{[^[\]]*"x1"[^[\]]*\}\s*\])', content, _re.DOTALL)
+            if m:
+                try:
+                    bboxes = _json.loads(m.group(1))
+                except Exception:
+                    bboxes = []
             return {
                 "status": "success",
                 "analysis": content,
+                "bboxes": bboxes,
                 "processed_images": len(image_paths)
             }
         else:
@@ -194,7 +206,19 @@ def sam2_segment_handler(arguments: Dict[str, Any], context: Any, account: Any) 
     md_text = f"SAM2 Segmentation Complete. Found {count} regions.\n\n"
     if vis_b64:
         md_text += f"![Segmentation Result]({vis_b64})"
-    return {"status": "success", "output": md_text}
+
+    bboxes = []
+    for feature in result.get("geojson", {}).get("features", []):
+        coords_list = feature.get("geometry", {}).get("coordinates", [])
+        xs, ys = [], []
+        for ring in coords_list:
+            for pt in ring:
+                xs.append(pt[0])
+                ys.append(pt[1])
+        if xs and ys:
+            bboxes.append({"x1": min(xs), "y1": min(ys), "x2": max(xs), "y2": max(ys)})
+
+    return {"status": "success", "output": md_text, "bboxes": bboxes}
         
         
 # --- Wrappers ---
@@ -257,9 +281,12 @@ def strip_rcnn_handler(arguments: Dict[str, Any], context: Any, account: Any) ->
     if result.get("status") == "error":
         return result
     if result.get("success"):
+        detections = result.get("detections") or []
+        detections_bboxes = [d["bbox"] for d in detections if isinstance(d, dict) and "bbox" in d]
         return {
             "status": "success",
-            "detections": result.get("detections"),
+            "detections": detections,
+            "detections_bboxes": detections_bboxes,
             "image_size": result.get("image_size"),
             "num_detections": result.get("num_detections"),
             "message": f"Strip R-CNN detection completed. Found {result.get('num_detections')} objects.",
@@ -278,7 +305,12 @@ def remotesam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> 
     )
     if result.get("status") == "error":
         return result
-    return {"status": "success", "result": result, "message": f"RemoteSAM {task_type} completed."}
+    return {
+        "status": "success",
+        "result": result,
+        "bboxes": result.get("bboxes", []),
+        "message": f"RemoteSAM {task_type} completed.",
+    }
 def instructsam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """Handler for InstructSAM — instruction-based segmentation and counting."""
     clean_path = _resolve_image_path(arguments)
@@ -319,6 +351,8 @@ def draw_bboxes_handler(arguments: Dict[str, Any], context: Any, account: Any) -
 
     image_path = _resolve_image_path(arguments)
     bboxes = arguments.get("bboxes", [])
+    if not isinstance(bboxes, list):
+        return {"status": "error", "message": f"bboxes must be a list, got {type(bboxes).__name__}: {bboxes!r}"}
     output_path = arguments["output_path"]
     line_width = int(arguments.get("line_width", 2))
 

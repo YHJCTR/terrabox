@@ -28,6 +28,8 @@ from typing_extensions import TypedDict
 
 from ..core.registry import registry
 from .tools import build_langchain_tools
+from .events import to_sse
+from .harness import current_context, drain_events, fail_run, finish_run, record_step, start_run
 
 logger = logging.getLogger(__name__)
 
@@ -321,9 +323,17 @@ def run_progressive_agent(
     from .llm import get_llm
     from .session import get_io_logger, prepare_history, log_session_start, finalize_session
 
+    if current_context() is None:
+        start_run(session_id, user_message, image_paths, user, db, config)
     llm = get_llm(config)
 
     record, history = prepare_history(session_id, user_message, image_paths, user, db)
+    record_step(
+        "decision",
+        title="Progressive route selected",
+        content="progressive_disclosure",
+        metadata={"mode": "progressive", "max_retries": config.max_retries_on_error},
+    )
 
     io = get_io_logger()
     log_session_start(io, session_id, user_message, image_paths, mode="progressive_disclosure")
@@ -342,9 +352,12 @@ def run_progressive_agent(
         result = graph.invoke(initial_state)
     except Exception as exc:
         io.error(f"[ERROR]    {type(exc).__name__}: {exc}")
+        fail_run(str(exc))
         raise
 
-    return finalize_session(record, result, db, io)
+    final = finalize_session(record, result, db, io)
+    finish_run("completed", final_response=final)
+    return final
 
 
 # ---------------------------------------------------------------------------
@@ -371,13 +384,24 @@ async def stream_progressive_agent(
     io = get_io_logger()
 
     try:
+        if current_context() is None:
+            start_run(session_id, user_message, image_paths, user, db, config)
+        for event in drain_events():
+            yield to_sse(event)
         loop = asyncio.get_running_loop()
         llm = await loop.run_in_executor(None, get_llm, config)
         record, history = prepare_history(session_id, user_message, image_paths, user, db)
     except Exception as exc:
         io.error(f"[SETUP ERROR] {type(exc).__name__}: {exc}")
-        yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
-        yield f"data: {json.dumps({'type': 'done', 'session_id': session_id})}\n\n"
+        fail_run(str(exc))
+        pending = drain_events()
+        if not pending:
+            pending = [
+                {"type": "error", "message": str(exc)},
+                {"type": "done", "session_id": session_id, "status": "failed"},
+            ]
+        for event in pending:
+            yield to_sse(event)
         return
 
     log_session_start(io, session_id, user_message, image_paths, mode="progressive/stream")
@@ -406,6 +430,8 @@ async def stream_progressive_agent(
                         for ptype, text in parser.feed(token):
                             if text:
                                 yield f"data: {json.dumps({'type': ptype, 'token': text}, ensure_ascii=False)}\n\n"
+                    for pending in drain_events():
+                        yield to_sse(pending)
 
             elif etype == "on_chain_end":
                 output = event.get("data", {}).get("output") or {}
@@ -414,7 +440,15 @@ async def stream_progressive_agent(
 
     except Exception as exc:
         io.error(f"[ERROR]    {type(exc).__name__}: {exc}")
-        yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+        fail_run(str(exc))
+        pending = drain_events()
+        if not pending:
+            pending = [
+                {"type": "error", "message": str(exc)},
+                {"type": "done", "session_id": session_id, "status": "failed"},
+            ]
+        for event in pending:
+            yield to_sse(event)
         return
 
     for ptype, text in parser.flush():
@@ -425,6 +459,10 @@ async def stream_progressive_agent(
         record.messages_json = serialize_messages(final_state["messages"])
         record.updated_at = datetime.utcnow()
         db.commit()
-        io.info(f"[FINAL]    {final_state['messages'][-1].content!r}")
-
-    yield f"data: {json.dumps({'type': 'done', 'session_id': session_id})}\n\n"
+        final = final_state["messages"][-1].content if final_state["messages"] else ""
+        io.info(f"[FINAL]    {final!r}")
+        finish_run("completed", final_response=final)
+    else:
+        finish_run("completed", final_response="")
+    for event in drain_events():
+        yield to_sse(event)

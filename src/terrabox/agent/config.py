@@ -45,6 +45,39 @@ class AgentConfig:
     max_retries_on_error: int = 3       # retries for progressive mode
     max_category_expansions: int = 2    # max expansion rounds for category_scoped mode
 
+    # Harness runtime guards
+    max_concurrent_agent_runs: int = 64
+    default_tool_timeout_seconds: int = 120
+    default_tool_bulkhead: int = 8
+    perception_tool_bulkhead: int = 2
+    compute_tool_bulkhead: int = 4
+    network_tool_bulkhead: int = 6
+    risky_tool_bulkhead: int = 1
+    breaker_failure_threshold: int = 5
+    breaker_recovery_timeout_s: float = 30.0
+
+    # Safety / approval
+    require_approval_for_risky_tools: bool = False
+    record_risky_tool_approvals: bool = True
+
+    # Agent execution timeout (seconds); 0 = no timeout
+    agent_timeout_seconds: int = 0
+
+    # Session history limits (moved from session.py module-level constants)
+    max_history_messages: int = 20
+    summary_threshold: int = 15
+    summary_keep_recent: int = 5
+
+    # Per-bucket circuit breaker overrides.
+    # Key = bucket name ("risky", "perception", "compute", "network", "default").
+    # Value = dict with optional keys: threshold (int), recovery_s (float).
+    # Example: {"risky": {"threshold": 3, "recovery_s": 20.0}}
+    circuit_breaker_overrides: dict = None  # type: ignore[assignment]
+
+    # Memory / rate limit are opt-in to avoid changing existing behavior
+    enable_memory_writeback: bool = False
+    enable_agent_rate_limit: bool = False
+
 
 _VALID_AGENT_MODES = {"standard", "progressive", "category_scoped"}
 
@@ -64,6 +97,8 @@ def load_config() -> AgentConfig:
             )
 
     config = AgentConfig(**{k: v for k, v in data.items() if hasattr(AgentConfig, k)})
+    if config.circuit_breaker_overrides is None:
+        config.circuit_breaker_overrides = {}
 
     if config.agent_mode not in _VALID_AGENT_MODES:
         raise ValueError(

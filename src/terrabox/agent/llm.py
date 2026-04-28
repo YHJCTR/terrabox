@@ -1,7 +1,9 @@
 """LLM factory: returns a LangChain ChatOpenAI instance for local or remote mode."""
 from __future__ import annotations
 
+import json
 import logging
+from typing import Any
 
 import httpx
 from langchain_openai import ChatOpenAI
@@ -54,3 +56,20 @@ def get_llm(config: AgentConfig) -> ChatOpenAI:
             temperature=0.7,
             streaming=True,    # enable SSE token streaming from remote API
         )
+
+
+def call_llm_json(system: str, user: str) -> Any:
+    """Load config, call LLM, parse response as JSON.
+
+    Shared by intent classification and memory extraction to avoid repeating
+    load_config() + get_llm() + json.loads() boilerplate.
+    Raises on LLM or JSON parse failure — callers should catch and fallback.
+    """
+    from .config import load_config
+    config = load_config()
+    llm = get_llm(config)
+    result = llm.invoke([
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ])
+    return json.loads(result.content)
