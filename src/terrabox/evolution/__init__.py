@@ -1,14 +1,18 @@
-"""Terrabox Evolution Module: four self-evolution approaches for geospatial agents.
+"""Terrabox Evolution Module: self-evolution approaches for geospatial agents.
 
 All methods augment agent behavior via system prompt injection — no existing
 code is modified. Each method can be used independently or combined.
 
-Papers implemented:
+Papers implemented & original ideas:
   - SkillRL    (arXiv 2602.08234): Hierarchical skill library + recursive evolution
   - EvoSkill   (arXiv 2603.02766): Multi-agent failure-driven skill discovery
   - AgentEvolver (arXiv 2511.10395): Self-questioning + navigating + attributing
   - MemRL      (arXiv 2601.03192): Non-parametric RL on episodic memory
   - CausalEvo  (original):         Counterfactual CCA + CTFM + causal graph synthesis
+  - RewardEvo  (original):         LLM-as-judge for annotation-free self-evolution
+  - GraphSkillEvo (original):      Relational skill graph + graph-based routing
+  - CausalTextEvo (original):      Causal-aware textual gradient optimization
+  - CausalPolicyEvo (original):    External policy-state evolution for tool calling
 
 Quick start:
     from terrabox.evolution import get_prompt_augmenter
@@ -41,13 +45,15 @@ def get_prompt_augmenter(
     """Return a ready-to-use PromptAugmenter for the specified evolution method.
 
     Args:
-        method: One of "skillrl", "evoskill", "agentevolver", "memrl".
+        method: One of "skillrl", "evoskill", "agentevolver", "memrl", "causalevo", "rewardevo", "graphskillevo", "seqgraphevo", "causaltextevo", "causalpolicyevo", "expel".
         store_dir: Directory containing evolution store. Defaults to
                    "evolution_store/{method}". For memrl, pass memory_db=...
         top_k: Number of skills/memories to inject per query.
         **kwargs: Method-specific kwargs:
                   memrl: memory_db="path/to/episodic_memory.db"
                   skillrl: store_dir="path/to/skillrl/store"
+                  rewardevo: memory_db="path/to/memrl/episodic_memory.db"
+                  graphskillevo: skillrl_store_dir="path", skill_graph_path="path"
 
     Returns:
         PromptAugmenter instance with augment(user_query) method.
@@ -118,10 +124,79 @@ def get_prompt_augmenter(
         ablation = kwargs.get("ablation", None)
         return CausalEvoPromptInjector(store, top_k=top_k, use_ablation=ablation)
 
+    elif method == "rewardevo":
+        memory_db = kwargs.get(
+            "memory_db",
+            os.path.join(store_dir or "evolution_store/rewardevo", "episodic_memory.db"),
+        )
+        from .rewardevo.prompt_injector import RewardEvoPromptInjector
+
+        return RewardEvoPromptInjector(memory_db, top_k=top_k)
+
+    elif method == "graphskillevo":
+        # New interface: tool co-occurrence graph
+        tool_graph_path = kwargs.get(
+            "tool_graph_path",
+            kwargs.get("skill_graph_path", "evolution_store/graphskillevo/tool_graph.json"),
+        )
+        traj_file = kwargs.get("traj_file", None)
+        from .graphskillevo.prompt_injector import GraphSkillEvoPromptInjector
+
+        return GraphSkillEvoPromptInjector(
+            tool_graph_path=tool_graph_path,
+            traj_file=traj_file,
+            top_k=top_k,
+        )
+
+    elif method == "seqgraphevo":
+        seq_graph_path = kwargs.get(
+            "seq_graph_path",
+            os.path.join(store_dir or "evolution_store/seqgraphevo", "seq_graph.json"),
+        )
+        traj_file = kwargs.get("traj_file", None)
+        from .seqgraphevo.prompt_injector import SeqGraphEvoPromptInjector
+
+        return SeqGraphEvoPromptInjector(
+            seq_graph_path=seq_graph_path,
+            traj_file=traj_file,
+            top_k=top_k,
+        )
+
+    elif method == "causaltextevo":
+        if store_dir is None:
+            store_dir = kwargs.get("store_dir", "evolution_store/causaltextevo")
+        from .causaltextevo.knowledge_state import KnowledgeState
+        from .causaltextevo.prompt_injector import CausalTextEvoPromptInjector
+
+        state_path = os.path.join(store_dir, "knowledge_state.json")
+        state = KnowledgeState.load(state_path)
+        ablation = kwargs.get("ablation", None)
+        return CausalTextEvoPromptInjector(state, top_k=top_k, ablation=ablation)
+
+    elif method == "causalpolicyevo":
+        if store_dir is None:
+            store_dir = kwargs.get("store_dir", "evolution_store/causalpolicyevo")
+        from .causalpolicyevo.policy_state import PolicyState
+        from .causalpolicyevo.prompt_injector import CausalPolicyEvoPromptInjector
+
+        state_path = os.path.join(store_dir, "policy_state.json")
+        state = PolicyState.load(state_path)
+        return CausalPolicyEvoPromptInjector(state, top_k=top_k)
+
+    elif method == "expel":
+        if store_dir is None:
+            store_dir = kwargs.get("store_dir", "evolution_store/expel")
+        from .expel.principle_bank import PrincipleBank
+        from .expel.prompt_injector import ExpeLPromptInjector
+
+        bank = PrincipleBank(store_dir)
+        return ExpeLPromptInjector(bank, top_k=top_k)
+
     else:
         raise ValueError(
             f"Unknown evolution method: {method!r}. "
-            f"Choose from: 'skillrl', 'evoskill', 'agentevolver', 'memrl', 'causalevo'"
+            f"Choose from: 'skillrl', 'evoskill', 'agentevolver', 'memrl', 'causalevo', "
+            f"'rewardevo', 'graphskillevo', 'seqgraphevo', 'causaltextevo', 'causalpolicyevo', 'expel'"
         )
 
 

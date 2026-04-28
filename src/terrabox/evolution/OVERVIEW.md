@@ -34,6 +34,7 @@
    - 7.2 RewardEvo：自进化奖励模型
    - 7.3 GraphSkillEvo：图结构技能库 + GNN 路由
    - 7.4 GRPOEvo：工具调用结构化 GRPO
+   - 7.5 CausalPolicyEvo：外部策略状态自进化
 
 ***
 
@@ -48,6 +49,12 @@
 - **遗忘与干扰**：新经验不应破坏已有有效策略。
 - **探索效率**：如何避免重复探索已知区域，高效覆盖新任务空间？
 - **测试集隔离**：学习数据和评估数据必须严格分离，否则评估无意义。
+
+**领域综述现状**（2025–2026）：自进化 Agent 领域已出现多篇权威综述，标志该方向从碎片化论文走向系统化研究：
+
+- **[2507.21046]** *A Survey of Self-Evolving Agents: What, When, How, and Where to Evolve*（2025 年 7 月）：提出 **What/When/How/Where 四维分类框架**，其中"What to Evolve"涵盖模型、上下文、工具、架构；"When to Evolve"区分 intra-test-time 和 inter-test-time；"How to Evolve"覆盖奖励、演示、种群等机制。
+
+- **[2508.07407]** *A Comprehensive Survey of Self-Evolving AI Agents: A New Paradigm Bridging Foundation Models and Lifelong Agentic Systems*（2025 年 8 月）：提出 **System Inputs / Agent System / Environment / Optimisers 四组件框架**，强调自进化 Agent 的"持续学习从新数据、交互、经验中获取"，桥接静态预训练模型与终身学习系统。
 
 ***
 
@@ -256,6 +263,12 @@ $$\alpha = \max\left(0.05,\ \frac{0.3}{1 + 0.1 \cdot \text{visits}}\right)$$
 | **SAGE (reflective)**  | 2409.00872 | 反思 + Ebbinghaus 遗忘曲线建模记忆衰减                    |
 | **AgentHER**           | 2603.21357 | Hindsight Experience Replay：失败轨迹重标注为其他目标的成功轨迹 |
 | **AutoRefine**         | 2601.22758 | 双形式经验模式（专用子智能体 + 静态技能）+ 持续剪枝                  |
+| **MUSE**               | 2510.08002 | 层次记忆（strategic/procedural/tool-use 三层）自进化；TAC 基准 SOTA |
+| **A-MEM**              | 2502.12110 | Zettelkasten 灵感的互联知识网络，动态索引链接；NeurIPS 2025 |
+| **Self-Improving LLM Agents at Test-Time** | 2510.07841 | 测试时自改进无需权重更新，+5.48% 准确率，68× 少训练样本 |
+| **Towards Agentic Self-Learning LLMs** | 2510.14253 | ICLR 2026，推进 Agent 自主学习范式的新原型 |
+| **Metacognitive Self-Improvement** | 2506.05109 | 元认知学习（知识/规划/评估三要素），真正自改进需要反思评估能力 |
+| **Hierarchical Procedural Memory** | 2512.18950 | Bayesian 选择 + 对比精炼构建层次过程记忆 |
 
 **最值得关注的两篇**：
 
@@ -273,6 +286,8 @@ $$\alpha = \max\left(0.05,\ \frac{0.3}{1 + 0.1 \cdot \text{visits}}\right)$$
 | **MAE**                | 2510.23595 | Proposer-Solver-Judge 三角协同进化                             |
 | **SAGE (multi-agent)** | 2603.15255 | 4-Agent 闭环（Challenger/Planner/Solver/Critic）+ Critic 防崩溃 |
 | **SWE-RL**             | 2512.18552 | Bug 注入/修复自对弈 RL，无需人工标注 issue                             |
+| **RAGEN**              | 2504.20073 | 多轮 RL（StarPO 框架），系统研究 Echo Trap 训练不稳定问题及解法           |
+| **Self-Improving AI Agents through Self-Play** | 2512.02731 | 形式化 Generator-Verifier-Updater 递归算子，证明方差不等式稳定性条件 |
 
 这一类方法的共同特征：用一个 Agent 生成难度适配的任务，用另一个 Agent 解决，形成**协同进化**闭环，从而绕过高质量训练数据稀缺的问题。
 
@@ -460,6 +475,36 @@ $$\alpha = \max\left(0.05,\ \frac{0.3}{1 + 0.1 \cdot \text{visits}}\right)$$
 
 ***
 
+### 3.12 工具合成与技能构建流派（2023–2026）
+
+> 与"技能库"不同，这一流派关注的是 Agent **主动创造新工具/技能API**，而非复用已有工具。
+
+| 论文 | arXiv | 年份 | 核心特点 |
+|------|-------|------|---------|
+| **Voyager** | 2305.16291 | 2023 | 最早的可执行代码技能库（Minecraft），自动课程 + 技能积累 |
+| **SkillWeaver** | 2504.07079 | 2025 | Web Agent 自动发现技能合成 API + 迭代精炼，轻量级可插拔；WebArena +31.8%，强 Agent 技能迁移给弱 Agent +54.3% |
+| **EvoSkills** | 2604.01687 | 2026 | Skill Generator + Surrogate Verifier 协同进化；生成多文件 skill bundle（而非单函数 tool），无需 GT 验证；SkillsBench 32%→75% |
+| **Trace2Skill** | 2603.25158 | 2026 | 从轨迹局部片段蒸馏可迁移技能，轨迹-局部知识提取 |
+| **ToolWeaver** | 2601.21947 | 2026 | 工具语义协同编织，支持大规模工具使用的组合管理 |
+
+**关键创新**：从"学会使用已有工具"升级到"自主创造新工具API"，使 Agent 能面对**未预见的功能需求**时自我扩展能力。
+
+***
+
+### 3.13 课程 RL + 在线进化流派（2024–2026）
+
+> 与协同进化不同，这一流派强调**在线课程调度 + RL 权重更新**的闭环自进化。课程从人工设计转向**从失败任务自动生成**。
+
+| 论文 | arXiv | 年份 | 核心特点 |
+|------|-------|------|---------|
+| **WebRL** | 2411.02337 | 2024 | 自进化在线课程 RL；Outcome-Supervised Reward Model (ORM)；从失败任务生成新任务；Llama-3.1-8B 4.8%→42.4%（WebArena-Lite），超越 GPT-4o 13.9% |
+| **SELAUR** | 2602.21158 | 2026 | 不确定性感知奖励（token 级熵/置信度/margin）；失败感知奖励整形；ALFWorld/WebShop 一致性提升 |
+| **Agent-RLVR** | 2506.11425 | 2025 | 软件工程 Agent 的 RLVR 范式；轨迹-反馈循环中的迭代离线 DPO |
+
+**核心特点**：完全在线学习，无需人工准备大规模训练集；通过课程调度自动处理任务难度梯度；奖励模型或不确定性估计作为进化信号。
+
+***
+
 ## 4. 方法横向对比
 
 | 维度         | SkillRL          | EvoSkill         | AgentEvolver | MemRL         |
@@ -507,6 +552,11 @@ $$\alpha = \max\left(0.05,\ \frac{0.3}{1 + 0.1 \cdot \text{visits}}\right)$$
 9. **安全约束成为必要组件**：自进化的不可控性引发安全担忧，约束优化、技能过滤、行为监控成为标配。
 10. **多模态自进化兴起**：从纯文本工具调用扩展到图像、音频、视频等多模态理解与工具协同进化。
 11. **评估基准专门化**：AgentBench、WebArena、ToolBench 等基准推动领域标准化，EvoBench 等专门评估自进化效果。
+12. **工具合成成为新方向**：从"学会使用已有工具"进化到"自主创造新工具API"，SkillWeaver/EvoSkills/ToolWeaver 代表这一范式升级，使 Agent 具备**自我功能扩展能力**。
+13. **在线课程 RL 崛起**：WebRL 证明自进化课程 + ORM 可以让开源模型（Llama-3.1-8B）超越 GPT-4o；课程从人工设计转向**从失败任务自动生成**，实现完全无监督的在线学习。
+14. **不确定性作为进化信号**：SELAUR 将 token 级不确定性（熵/置信度/margin）引入奖励设计，填补了"奖励如何设计"方向的空白，使 Agent 能聚焦在最困惑的决策点。
+15. **元认知层出现**：真正的自改进需要 Agent 能评估自己的学习过程（Metacognitive Learning，2506.05109），这是超越"记忆 + 技能"的更高层次，标志着从**工具库进化**向**能力进化**的转变。
+16. **综述论文标志领域成熟**：2507.21046 和 2508.07407 两篇权威综述（分别提出 What/When/How/Where 四维框架和 System/Agent/Environment/Optimisers 四组件框架）出现，表明 Agent 自进化已从碎片化论文走向**系统化研究范式**，促进了跨流派的方法论整合。
 
 ***
 

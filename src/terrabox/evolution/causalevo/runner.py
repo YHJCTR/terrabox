@@ -140,7 +140,7 @@ def _run_agent_on_task(task: dict, system_prompt: str) -> dict:
 
 def cmd_build(args) -> None:
     """Build CTFM from training trajectories (offline)."""
-    from ..shared.data_loader import OpenEarthLoader
+    from ..shared.data_loader import make_loader
     from .counterfactual_credit import compute_statistical_cca
     from .tool_function_model import CTFMBuilder, CTFMStore
 
@@ -152,7 +152,7 @@ def cmd_build(args) -> None:
         logger.info("CTFM store cleared (--reset)")
 
     logger.info(f"Loading training trajectories from {args.train_data} (limit={args.limit})")
-    loader = OpenEarthLoader(args.train_data, args.eval_data)
+    loader = make_loader(args.train_data, args.eval_data)
     try:
         import tqdm as _tqdm_mod
         tqdm_pos = int(os.environ.get("TQDM_POSITION", "0"))
@@ -170,9 +170,18 @@ def cmd_build(args) -> None:
         logger.error("No trajectories loaded — check --train-data path.")
         return
 
-    # Step 1: Statistical CCA
-    logger.info("Computing statistical Counterfactual Credit Attribution (CCA)...")
-    global_cca = compute_statistical_cca(trajectories)
+    # Step 1: Compute CCA (statistical or LLM-based)
+    if getattr(args, "use_llm_cca", False):
+        logger.info("Computing LLM-based Counterfactual Credit Attribution (CCA)...")
+        from .counterfactual_credit import compute_llm_cca
+        from ..shared.llm_client import EvolutionLLMClient
+
+        llm_client = EvolutionLLMClient()
+        global_cca = compute_llm_cca(trajectories, llm_client)
+        logger.info("LLM-CCA computation complete")
+    else:
+        logger.info("Computing statistical Counterfactual Credit Attribution (CCA)...")
+        global_cca = compute_statistical_cca(trajectories)
 
     top_cca = sorted(global_cca.items(), key=lambda x: x[1], reverse=True)
     logger.info("Top-10 causally important tools (CCA score):")
@@ -198,16 +207,47 @@ def cmd_build(args) -> None:
             logger.info("\n" + m.to_prompt_text())
 
 
+def _predict_tools_offline_causalevo(store, question: str, top_k: int = 5) -> list[str]:
+    """Predict tools using CTFM CCA scores + character-level keyword similarity (no agent needed)."""
+    try:
+        models = store.load()
+        if not models:
+            return []
+        q_chars = set(question.lower())
+        scored = []
+        for slug, model in models.items():
+            if model.precondition_keywords:
+                kw_text = "".join(model.precondition_keywords).lower()
+                kw_chars = set(kw_text)
+                char_overlap = len(q_chars & kw_chars) / max(len(q_chars), 1)
+            else:
+                char_overlap = 0.0
+            # Combine CCA importance + keyword relevance
+            score = model.avg_cca_score * 0.5 + char_overlap * 0.5
+            scored.append((score, model.avg_cca_score, slug, model))
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        tools: list[str] = []
+        for _, _, slug, model in scored[:top_k]:
+            if slug not in tools:
+                tools.append(slug)
+            for ds in model.downstream_tools[:1]:
+                if ds not in tools:
+                    tools.append(ds)
+        return tools[:top_k]
+    except Exception:
+        return []
+
+
 def cmd_eval(args, online: bool = False) -> dict:
     """Evaluate agent with CTFM injection; optionally update CTFM online."""
-    from ..shared.data_loader import OpenEarthLoader
+    from ..shared.data_loader import make_loader
     from ..shared.evaluator import ToolMatchEvaluator
     from ..shared.trajectory import Trajectory
 
     ablation: Optional[str] = getattr(args, "ablation", None)
     injector, store = _build_injector(args.store_dir, args.top_k, ablation=ablation)
 
-    loader = OpenEarthLoader(args.train_data, args.eval_data)
+    loader = make_loader(args.train_data, args.eval_data)
     eval_cases = loader.load_eval_cases()
     if args.limit:
         eval_cases = eval_cases[: args.limit]
@@ -221,19 +261,24 @@ def cmd_eval(args, online: bool = False) -> dict:
 
     for i, case in enumerate(eval_cases):
         task_type = _infer_task_type(case.get("question", ""))
-        system_prompt = injector.augment(
-            case["question"], images=case.get("images", []), task_type=task_type
-        )
-        run = _run_agent_on_task(case, system_prompt)
+        if online:
+            system_prompt = injector.augment(
+                case["question"], images=case.get("images", []), task_type=task_type
+            )
+            run = _run_agent_on_task(case, system_prompt)
+            tools_called = run["tools_called"]
+        else:
+            # Offline: predict tools via CTFM keyword matching (no agent)
+            tools_called = _predict_tools_offline_causalevo(store, case["question"], args.top_k)
 
         traj = Trajectory(
             task_id=case.get("id", str(i)),
             question=case["question"],
             images=case.get("images", []),
             turns=[],
-            tools_called=run["tools_called"],
-            expected_tools=run["expected_tools"],
-            final_answer=run["final_answer"],
+            tools_called=tools_called,
+            expected_tools=case.get("expected_tools", []),
+            final_answer="",
             success=False,
             task_type=task_type,
         )
@@ -243,7 +288,7 @@ def cmd_eval(args, online: bool = False) -> dict:
         if online:
             injector.record_outcome(
                 query=case["question"],
-                tools_called=run["tools_called"],
+                tools_called=tools_called,
                 reward=episode.reward,
                 task_type=task_type,
             )
@@ -307,6 +352,10 @@ def main() -> None:
                         help="Ablation variant (eval/online only)")
     parser.add_argument("--verbose", action="store_true",
                         help="Print sample CTFM entries after build")
+    parser.add_argument("--use-llm-cca", action="store_true",
+                        help="Enable LLM-based CCA in addition to statistical CCA (requires Docker LLM)")
+    parser.add_argument("--llm-url", default="http://localhost:9100",
+                        help="Docker LLM service URL (default http://localhost:9100)")
     args = parser.parse_args()
 
     if args.mode == "build":

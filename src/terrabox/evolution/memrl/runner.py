@@ -119,7 +119,7 @@ def cmd_populate(args):
     Safe to re-run: each trajectory is keyed by task_id and skipped if already stored.
     Use --reset to clear and start fresh.
     """
-    from ..shared.data_loader import OpenEarthLoader
+    from ..shared.data_loader import make_loader
     from ..shared.evaluator import ToolMatchEvaluator
     from .episodic_memory import EpisodicMemory
     from .intent_parser import IntentParser
@@ -133,7 +133,7 @@ def cmd_populate(args):
         memory.clear()
         logger.info("Memory cleared (--reset)")
 
-    loader = OpenEarthLoader(args.train_data, args.eval_data)
+    loader = make_loader(args.train_data, args.eval_data)
     intent_parser = IntentParser()
     evaluator = ToolMatchEvaluator()
 
@@ -162,13 +162,30 @@ def cmd_populate(args):
     logger.info(f"Done. added={added} skipped={skipped} total_in_db={memory.count()}")
 
 
+def _predict_tools_offline_memrl(memory, question: str, images: list) -> list[str]:
+    """Predict tools using episodic memory retrieval (no agent needed)."""
+    try:
+        from .intent_parser import IntentParser
+        intent_parser = IntentParser()
+        intent = intent_parser.parse(question, images)
+        candidates = memory.retrieve_candidates(intent, top_k=5)
+        tools: list[str] = []
+        for mem in candidates[:3]:
+            for t in mem.get("experience", {}).get("tool_sequence", []):
+                if t not in tools:
+                    tools.append(t)
+        return tools
+    except Exception:
+        return []
+
+
 def cmd_eval(args, online: bool = False):
     """Evaluate agent with memory injection; optionally update Q-values online."""
-    from ..shared.data_loader import OpenEarthLoader
+    from ..shared.data_loader import make_loader
     from ..shared.evaluator import ToolMatchEvaluator
     from ..shared.trajectory import Trajectory, Turn
 
-    loader = OpenEarthLoader(args.train_data, args.eval_data)
+    loader = make_loader(args.train_data, args.eval_data)
     eval_cases = loader.load_eval_cases()
     if args.limit:
         eval_cases = eval_cases[:args.limit]
@@ -177,39 +194,42 @@ def cmd_eval(args, online: bool = False):
     evaluator = ToolMatchEvaluator()
 
     logger.info(f"Evaluating on {len(eval_cases)} cases (memory size: {memory.count()})")
-    logger.info(f"Mode: {'online (Q-value updates)' if online else 'offline (no updates)'}")
+    logger.info(f"Mode: {'online (Q-value updates)' if online else 'offline retrieval (no agent)'}")
 
     results = []
     t0 = time.time()
 
     for i, case in enumerate(eval_cases):
-        system_prompt = injector.augment(
-            case["question"], images=case.get("images", [])
-        )
-        run = _run_agent_on_task(case, system_prompt)
+        if online:
+            # Online mode: run actual agent
+            system_prompt = injector.augment(
+                case["question"], images=case.get("images", [])
+            )
+            run = _run_agent_on_task(case, system_prompt)
+            tools_called = run["tools_called"]
+        else:
+            # Offline mode: predict tools via memory retrieval (no agent)
+            tools_called = _predict_tools_offline_memrl(
+                memory, case["question"], case.get("images", [])
+            )
 
         traj = Trajectory(
             task_id=case.get("id", str(i)),
             question=case["question"],
             images=case.get("images", []),
             turns=[],
-            tools_called=run["tools_called"],
-            expected_tools=run["expected_tools"],
-            final_answer=run["final_answer"],
+            tools_called=tools_called,
+            expected_tools=case.get("expected_tools", []),
+            final_answer="",
             success=False,
-            source=case.get("source", "openearth"),
+            source=case.get("source", "disaster"),
         )
         episode = evaluator.evaluate(traj)
         results.append(episode)
 
         if online:
-            # Update Q-values based on observed reward
             injector.record_outcome(episode.reward)
-            # Add this episode to memory
-            memory.add_memory(
-                traj,
-                initial_utility=episode.reward,
-            )
+            memory.add_memory(traj, initial_utility=episode.reward)
 
         if (i + 1) % 20 == 0:
             elapsed = time.time() - t0

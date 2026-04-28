@@ -83,20 +83,16 @@ class ExperienceDistiller:
                 traj.final_answer,
             )
             if strategy and len(strategy) > 10:
-                tags = traj.tools_called[:3] + [traj.task_type]
+                # Append tool sequence so BM25 / offline regex can find slugs.
+                # Task type is NOT stored as a retrieval key: eval queries arrive
+                # without task labels, and stored labels mismatch inferred ones
+                # anyway (e.g. "ind_nbr" vs "change_detection").
+                tool_line = "Tools: " + " → ".join(traj.tools_called)
+                content = strategy + "\n" + tool_line
+                tags = traj.tools_called[:3]
                 self._bank.add_general_skill(
-                    content=strategy,
+                    content=content,
                     tags=tags,
-                    performance_delta=episode.tool_f1,
-                    source_tasks=[traj.task_id],
-                )
-                created += 1
-
-            # Tier 2: task-specific skill (only if task_type is known)
-            if traj.task_type and traj.task_type != "unknown":
-                self._bank.add_task_skill(
-                    task_type=traj.task_type,
-                    content=strategy or f"For {traj.task_type}: use {' → '.join(traj.tools_called)}",
                     performance_delta=episode.tool_f1,
                     source_tasks=[traj.task_id],
                 )

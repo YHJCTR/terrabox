@@ -58,7 +58,7 @@ def _build_pipeline(store_dir: str, top_k: int):
 
 def cmd_distill(args):
     """Offline distillation: extract skills from training trajectories."""
-    from ..shared.data_loader import OpenEarthLoader
+    from ..shared.data_loader import make_loader
     from ..shared.evaluator import ToolMatchEvaluator
 
     logger.info(f"Distilling skills from {args.train_data} (limit={args.limit})")
@@ -70,7 +70,7 @@ def cmd_distill(args):
 
     evaluator = ToolMatchEvaluator()
 
-    loader = OpenEarthLoader(args.train_data, args.eval_data)
+    loader = make_loader(args.train_data, args.eval_data)
     try:
         import tqdm as _tqdm_mod
         tqdm_pos = int(os.environ.get("TQDM_POSITION", "0"))
@@ -151,18 +151,37 @@ def _infer_task_type(question: str) -> str:
     return "general_qa"
 
 
+def _predict_tools_offline_skillrl(retriever, question: str, task_type: str) -> list[str]:
+    """Predict tools by extracting slugs from retrieved skill texts (no agent needed)."""
+    import re
+    try:
+        skill_texts = retriever.retrieve(question, task_type=task_type, top_k=3)
+        all_text = " ".join(
+            text for tier in skill_texts.values() for text in tier
+        )
+        # Extract tool slugs (format: word.word, e.g. geo_raster.calculate_index)
+        slugs = re.findall(r'\b[\w]+\.[\w]+\b', all_text)
+        seen: list[str] = []
+        for s in slugs:
+            if s not in seen and "." in s:
+                seen.append(s)
+        return seen[:8]
+    except Exception:
+        return []
+
+
 def cmd_eval(args, online: bool = False):
     """Evaluate agent with skill injection; optionally run online evolution."""
-    from ..shared.data_loader import OpenEarthLoader
+    from ..shared.data_loader import make_loader
     from ..shared.evaluator import ToolMatchEvaluator
     from ..shared.trajectory import Trajectory
 
-    loader = OpenEarthLoader(args.train_data, args.eval_data)
+    loader = make_loader(args.train_data, args.eval_data)
     eval_cases = loader.load_eval_cases()
     if args.limit:
         eval_cases = eval_cases[:args.limit]
 
-    _, distiller, _, evolver, injector = _build_pipeline(args.store_dir, args.top_k)
+    _, distiller, retriever, evolver, injector = _build_pipeline(args.store_dir, args.top_k)
     evaluator = ToolMatchEvaluator()
 
     logger.info(f"Evaluating on {len(eval_cases)} cases, online={online}")
@@ -171,17 +190,22 @@ def cmd_eval(args, online: bool = False):
 
     for i, case in enumerate(eval_cases):
         task_type = _infer_task_type(case.get("question", ""))
-        system_prompt = injector.augment(case["question"], task_type=task_type)
-        run = _run_agent_on_task(case, system_prompt)
+        if online:
+            system_prompt = injector.augment(case["question"], task_type=task_type)
+            run = _run_agent_on_task(case, system_prompt)
+            tools_called = run["tools_called"]
+        else:
+            # Offline: predict tools via skill bank retrieval (no agent)
+            tools_called = _predict_tools_offline_skillrl(retriever, case["question"], task_type)
 
         traj = Trajectory(
             task_id=case.get("id", str(i)),
             question=case["question"],
             images=case.get("images", []),
             turns=[],
-            tools_called=run["tools_called"],
-            expected_tools=run["expected_tools"],
-            final_answer=run["final_answer"],
+            tools_called=tools_called,
+            expected_tools=case.get("expected_tools", []),
+            final_answer="",
             success=False,
             task_type=task_type,
         )

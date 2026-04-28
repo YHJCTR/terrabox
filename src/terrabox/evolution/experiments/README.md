@@ -48,7 +48,7 @@ PYTHONPATH=src $PYTHON src/terrabox/evolution/experiments/run_real_evolution.py 
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--method` | `causalevo` | 运行哪个方法。可选：`baseline` / `causalevo` / `memrl` / `skillrl` / `agentevolver` / `evoskill` / `all` |
+| `--method` | `causalevo` | 运行哪个方法。可选：`baseline` / `causalevo` / `memrl` / `skillrl` / `agentevolver` / `evoskill` / `causalpolicyevo` / `all` |
 | `--phase` | `both` | `build`：仅离线建库（无需 vLLM）；`eval`：仅在线评估（需要 vLLM）；`both`：两阶段都跑 |
 | `--train-data` | `data/openearth/train.json` | 训练数据路径 |
 | `--eval-data` | `data/openearth/eval.jsonl` | 评估数据路径 |
@@ -69,6 +69,7 @@ PYTHONPATH=src $PYTHON src/terrabox/evolution/experiments/run_real_evolution.py 
 |------|--------------|-----------|
 | causalevo | ✅ 更新 CTFM 中每个工具的 success_rate 计数器 | JSON 文件 |
 | memrl | ✅ 更新最近检索记忆的 Q 值（Bellman 更新） | SQLite DB |
+| causalpolicyevo | — 首版为离线 policy-state + LLM optimize，无在线更新 | JSON 文件 |
 | skillrl | — 无在线更新（离线蒸馏后固定） | — |
 | agentevolver | — 无在线更新（经验池只在 build 阶段填充） | — |
 | evoskill | — 无在线更新（技能发现需 LLM 多轮对话） | — |
@@ -235,6 +236,18 @@ PYTHONPATH=src /home/yuhongjie/miniconda3/envs/unsloth/bin/python src/terrabox/e
 PYTHONPATH=src /home/yuhongjie/miniconda3/envs/unsloth/bin/python src/terrabox/evolution/experiments/run_real_evolution.py \
     --method agentevolver --phase eval --eval-limit 100
 ```
+
+### CausalPolicyEvo（因果策略状态进化）
+区别于单纯的技能/图检索，CausalPolicyEvo 维护一个外部 `policy_state.json`：
+- `tool_priors`：哪些工具更适合作为起始动作
+- `transition_scores`：哪些工具转移更可靠
+- `stop_rules`：何时应该停止继续调用工具
+- `recovery_rules`：首条路径较弱时应如何切换
+
+首版流程：
+1. `build`：复用 CCA + CTFM + 顺序统计构建 policy state
+2. `optimize`：用 LLM 汇总失败案例，更新 task-level policy / stop / recovery 文本
+3. `eval`：按 policy state 预测工具顺序并离线评测
 
 ### EvoSkill（多智能体 + Pareto 前沿）
 三智能体（执行/提议/构建），在失败分析后生成结构化技能，Pareto 管理技能库。

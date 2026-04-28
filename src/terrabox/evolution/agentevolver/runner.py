@@ -113,9 +113,9 @@ def _infer_task_type(question: str) -> str:
 
 
 def cmd_mine(args):
-    from ..shared.data_loader import OpenEarthLoader
+    from ..shared.data_loader import make_loader
 
-    loader = OpenEarthLoader(args.train_data, args.eval_data)
+    loader = make_loader(args.train_data, args.eval_data)
     try:
         import tqdm as _tqdm_mod
         tqdm_pos = int(os.environ.get("TQDM_POSITION", "0"))
@@ -149,11 +149,33 @@ def cmd_generate(args):
     logger.info(f"Saved to {out_path}")
 
 
+def _predict_tools_offline_agentevolver(pool, question: str, task_type: str) -> list[str]:
+    """Predict tools for a query using experience pool retrieval (no agent needed).
+
+    Falls back to high-reward episodes across all task types if task_type-specific
+    lookup returns nothing (common when pool uses disaster-specific task types).
+    """
+    try:
+        similar = pool.get_similar(question, task_type, top_k=3)
+        if not similar:
+            # Fallback: use highest-reward episodes regardless of task type
+            similar = pool.get_high_reward(task_type, top_k=5)
+        tools: list[str] = []
+        for ep in similar:
+            # pool stores tools under "tool_sequence" key
+            for t in ep.get("tool_sequence", ep.get("tools_called", [])):
+                if t not in tools:
+                    tools.append(t)
+        return tools[:8]
+    except Exception:
+        return []
+
+
 def cmd_eval(args):
-    from ..shared.data_loader import OpenEarthLoader
+    from ..shared.data_loader import make_loader
     from ..shared.evaluator import ToolMatchEvaluator
 
-    loader = OpenEarthLoader(args.train_data, args.eval_data)
+    loader = make_loader(args.train_data, args.eval_data)
     eval_cases = loader.load_eval_cases()
     if args.limit:
         eval_cases = eval_cases[:args.limit]
@@ -165,10 +187,28 @@ def cmd_eval(args):
     pool, task_gen, policy, attributor, trainer = _build_pipeline(args.store_dir)
     injector = _build_injector(pool, policy, attributor)
 
-    logger.info(f"Evaluating {len(eval_cases)} cases (pool size={pool.size()})")
-    results = trainer.eval_round(eval_cases, _run_agent_on_task, injector=injector)
-
     evaluator = ToolMatchEvaluator()
+    logger.info(f"Evaluating {len(eval_cases)} cases (pool size={pool.size()})")
+
+    # Offline eval: predict tools using experience pool retrieval (no agent)
+    from ..shared.trajectory import Trajectory
+    results = []
+    for i, case in enumerate(eval_cases):
+        task_type = case.get("task_type", "unknown")
+        tools_called = _predict_tools_offline_agentevolver(pool, case.get("question", ""), task_type)
+        traj = Trajectory(
+            task_id=case.get("id", str(i)),
+            question=case["question"],
+            images=case.get("images", []),
+            turns=[],
+            tools_called=tools_called,
+            expected_tools=case.get("expected_tools", []),
+            final_answer="",
+            success=False,
+            task_type=task_type,
+        )
+        results.append(evaluator.evaluate(traj))
+
     metrics = evaluator.aggregate(results)
     logger.info("\n=== AgentEvolver Evaluation Results ===")
     logger.info(f"  Precision:   {metrics['precision']:.4f}")

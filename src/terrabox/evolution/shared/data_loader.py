@@ -270,6 +270,104 @@ class OpenEarthLoader:
         return trajectories
 
 
+class DisasterLoader:
+    """Load Terrabox native disaster trajectory format.
+
+    The disaster data uses the Trajectory serialization format directly:
+      {"task_id": ..., "question": ..., "images": [...],
+       "turns": [{"role": ..., "content": ..., "tool_name": ...}],
+       "tools_called": [...], "expected_tools": [...], ...}
+
+    This is the native Terrabox format produced by generate_disaster_sft.py
+    and convert_sft_to_evolution.py — NOT the OpenEarth conversation format.
+    """
+
+    def __init__(self, train_path: str, eval_path: str):
+        self.train_path = train_path
+        self.eval_path = eval_path
+
+    def iter_train(self, limit: Optional[int] = None) -> Iterator[Trajectory]:
+        with open(self.train_path, encoding="utf-8") as f:
+            raw = json.load(f)
+        count = 0
+        for record in raw:
+            if limit is not None and count >= limit:
+                break
+            traj = self._parse_record(record)
+            if traj is not None:
+                yield traj
+                count += 1
+
+    def load_train_trajectories(self, limit: Optional[int] = None) -> list[Trajectory]:
+        return list(self.iter_train(limit=limit))
+
+    def load_eval_cases(self) -> list[dict]:
+        cases = []
+        with open(self.eval_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    cases.append(json.loads(line))
+        return cases
+
+    def _parse_record(self, record: dict) -> Optional[Trajectory]:
+        turns: list[Turn] = []
+        for t in record.get("turns", []):
+            turns.append(Turn(
+                role=t.get("role", ""),
+                content=t.get("content", ""),
+                tool_name=t.get("tool_name"),
+                tool_args=t.get("tool_args"),
+                tool_result=t.get("tool_result"),
+                is_error=t.get("is_error", False),
+            ))
+        # If tools_called not present, extract from turns
+        tools_called = record.get("tools_called")
+        if not tools_called:
+            tools_called = [
+                t.get("tool_name") for t in record.get("turns", [])
+                if t.get("tool_name") and t.get("role") == "tool"
+            ]
+            tools_called = list(dict.fromkeys(tools_called))  # dedup, preserve order
+
+        return Trajectory(
+            task_id=record.get("task_id") or record.get("id", ""),
+            question=record.get("question", ""),
+            images=record.get("images", []),
+            turns=turns,
+            tools_called=tools_called,
+            expected_tools=record.get("expected_tools", []),
+            final_answer=record.get("final_answer", ""),
+            success=record.get("success", True),
+            source=record.get("source", "disaster"),
+            task_type=record.get("task_type", "unknown"),
+        )
+
+
+def make_loader(train_path: str, eval_path: str):
+    """Auto-detect data format and return the appropriate loader.
+
+    Detects Terrabox native format (has 'turns' or 'tools_called' key) vs
+    OpenEarth format (has 'conversation' key).
+    """
+    try:
+        with open(train_path, encoding="utf-8") as f:
+            first_char = f.read(1)
+        if first_char == "[":
+            # JSON array — peek at first record to detect format
+            with open(train_path, encoding="utf-8") as f:
+                data = json.load(f)
+            if data and isinstance(data, list):
+                first = data[0]
+                if "turns" in first or "tools_called" in first:
+                    logger.info(f"Auto-detected DisasterLoader for {train_path}")
+                    return DisasterLoader(train_path, eval_path)
+    except Exception as e:
+        logger.debug(f"Format detection failed: {e}")
+    logger.info(f"Using OpenEarthLoader for {train_path}")
+    return OpenEarthLoader(train_path, eval_path)
+
+
 class EarthBenchLoader:
     """Load trajectories from data/earthbench/question.json and eval.jsonl."""
 

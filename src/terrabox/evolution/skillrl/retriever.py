@@ -33,12 +33,11 @@ class SkillRetriever:
         """
         if self._bm25_available:
             return {
+                # task_type filter removed: stored labels (e.g. "ind_nbr", "type30")
+                # never match inferred eval labels ("change_detection"), so filtering
+                # silently empties the specific tier. Use full BM25 instead.
                 "general":  self._bm25_retrieve(self._bank.general.load_all(), query, top_k),
-                "specific": self._bm25_retrieve(
-                    [s for s in self._bank.specific.load_all()
-                     if task_type == "unknown" or s.get("task_type") == task_type],
-                    query, top_k,
-                ),
+                "specific": self._bm25_retrieve(self._bank.specific.load_all(), query, top_k),
                 "mistakes": self._bm25_retrieve(self._bank.mistakes.load_all(), query, top_k),
             }
         else:

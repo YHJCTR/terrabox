@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """run_real_evolution.py — Real-data + real-vLLM self-evolution experiment runner.
 
-Runs build (offline, no vLLM) and/or eval (real vLLM) phases for any of the
-five evolution methods: causalevo, memrl, skillrl, agentevolver, evoskill.
+Runs build (offline, no vLLM) and/or eval (real vLLM) phases for supported
+evolution methods, including causalpolicyevo.
 Use --method all to run all methods and print a comparison table.
 
 Usage (from repo root):
@@ -56,7 +56,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("run_real_evolution")
 
-VALID_METHODS = ("baseline", "causalevo", "memrl", "skillrl", "agentevolver", "evoskill")
+VALID_METHODS = ("baseline", "causalevo", "memrl", "skillrl", "agentevolver", "evoskill", "causalpolicyevo")
 METHOD_LABELS = {
     "baseline":     "Baseline (no evo)   ",
     "causalevo":    "CausalEvo (ours) ★  ",
@@ -64,6 +64,7 @@ METHOD_LABELS = {
     "skillrl":      "SkillRL             ",
     "agentevolver": "AgentEvolver        ",
     "evoskill":     "EvoSkill            ",
+    "causalpolicyevo": "CausalPolicyEvo    ",
 }
 
 
@@ -147,6 +148,9 @@ def _make_build_args(args: argparse.Namespace, store_subdir: str) -> types.Simpl
         # causalevo-specific
         top_k_keywords=10,
         top_k_downstream=5,
+        min_edge_count=3,
+        min_anti_support=3,
+        max_anti_f1=0.3,
         verbose=False,
         ablation=None,
         # memrl-specific
@@ -244,6 +248,11 @@ def run_build(method: str, args: argparse.Namespace) -> None:
             from terrabox.evolution.evoskill.runner import cmd_discover
             logger.info(f"[evoskill] Running skill discovery on {bargs.n_episodes} train episodes...")
             cmd_discover(bargs)
+
+        elif method == "causalpolicyevo":
+            from terrabox.evolution.causalpolicyevo.runner import cmd_build
+            logger.info(f"[causalpolicyevo] Building policy state from {args.build_limit} train trajectories...")
+            cmd_build(bargs)
 
     except Exception as e:
         logger.error(f"Build failed for method={method}: {e}", exc_info=True)

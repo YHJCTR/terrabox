@@ -253,8 +253,13 @@ class CTFMBuilder:
     def _extract_keywords(queries: list[str], top_k: int) -> list[str]:
         counts: Counter = Counter()
         for q in queries:
-            for w in q.lower().split():
+            # Also split on Chinese/CJK punctuation so sentences without spaces
+            # don't get stored as a single "word" (e.g. full Chinese question text).
+            import re as _re
+            tokens = _re.split(r'[\s，。！？；：、""''【】（）\[\]]+', q.lower())
+            for w in tokens:
                 w = w.strip(".,!?;:\"'()[]")
-                if len(w) >= 3 and w not in _STOP_WORDS:
+                # 3–30 chars: accepts real words but rejects whole sentences
+                if 3 <= len(w) <= 30 and w not in _STOP_WORDS:
                     counts[w] += 1
         return [w for w, _ in counts.most_common(top_k)]
