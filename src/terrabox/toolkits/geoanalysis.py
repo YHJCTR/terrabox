@@ -517,7 +517,7 @@ def setup(registrar):
     """Register all geoanalysis tools."""
     registrar.toolkit(
         name="geoanalysis",
-        description="Time-series and spatial statistical analysis tools (Trend, Seasonality, Hotspots).",
+        description="Time-series and spatial analysis: trend detection, seasonal decomposition, spatial hotspot analysis, anomaly detection, change point analysis, spatial autocorrelation, and landscape metrics.",
         version="0.1.0"
     )
 

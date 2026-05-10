@@ -17,6 +17,12 @@ import time
 import requests
 
 from ..base_manager import BaseServiceManager
+from ..resource_allocator import (
+    acquire_docker_lease,
+    labels_for_lease,
+    record_service_event,
+    remove_container_if_exists,
+)
 
 logger = logging.getLogger("docker.agent_llm_manager")
 
@@ -27,6 +33,7 @@ class AgentLLMDockerManager(BaseServiceManager):
     HOST = "127.0.0.1"
     PORT = 9100
     CONTAINER_NAME = "terrabox-agent-llm"
+    CONTAINER_BASE = "terrabox-agent-llm"
 
     # Runtime values — overwritten by start_service(config)
     MODEL_PATH = os.environ.get("AGENT_LLM_MODEL_PATH", "")
@@ -34,6 +41,7 @@ class AgentLLMDockerManager(BaseServiceManager):
     TENSOR_PARALLEL_SIZE = "1"
     DOCKER_IMAGE = "terrabox/agent-llm:latest"
     MAX_MODEL_LEN = "24576"
+    _lease = None
 
     def __new__(cls):
         if cls._instance is None:
@@ -82,58 +90,71 @@ class AgentLLMDockerManager(BaseServiceManager):
             cls.PORT = config.local_llm_port
             cls.DOCKER_IMAGE = config.local_llm_docker_image
             cls.MAX_MODEL_LEN = str(config.local_llm_max_model_len)
-            # Dynamic container name based on port (supports parallel GPU instances)
-            cls.CONTAINER_NAME = f"terrabox-agent-llm-{cls.PORT}"
 
         if cls.is_running():
             return
 
         if cls._container_is_running():
-            logger.info(f"Container {cls.CONTAINER_NAME} is running but not yet healthy — waiting...")
-        else:
-            # Remove any stopped container with the same name
+            logger.info(f"Container {cls.CONTAINER_NAME} is running but service is not healthy; rebuilding it.")
+            cls.stop_service()
+
+        lease = acquire_docker_lease(
+            service="agent-llm",
+            image=cls.DOCKER_IMAGE,
+            container_base=cls.CONTAINER_BASE,
+            host=cls.HOST,
+            base_port=cls.PORT,
+            internal_port=8000,
+            gpu_count=int(cls.TENSOR_PARALLEL_SIZE),
+            min_free_mib=int(os.environ.get("AGENT_LLM_MIN_FREE_MIB", "16000")),
+            fallback_gpu_devices=cls.GPU_DEVICES,
+            gpu_env_var="AGENT_LLM_GPU_DEVICES",
+            exclude_manager_cls=cls,
+        )
+        cls._lease = lease
+        cls.CONTAINER_NAME = lease.container_name
+        cls.PORT = lease.port
+        remove_container_if_exists(cls.CONTAINER_NAME, service="agent-llm", reason="before_docker_run")
+
+        cmd = [
+            "docker", "run", "-d",
+            "--name", cls.CONTAINER_NAME,
+            *labels_for_lease(lease),
+            "--gpus", "all",
+            "-e", f"CUDA_VISIBLE_DEVICES={lease.gpu_devices}",
+            "-p", f"{lease.port}:{lease.internal_port}",
+            "-v", f"{cls.MODEL_PATH}:/model:ro",
+            "--shm-size=8g",
+            cls.DOCKER_IMAGE,
+            "--model", "/model",
+            "--trust-remote-code",
+            "--host", "0.0.0.0",
+            "--port", "8000",
+            "--tensor-parallel-size", cls.TENSOR_PARALLEL_SIZE,
+            "--max-model-len", cls.MAX_MODEL_LEN,
+            "--gpu-memory-utilization", "0.85",
+            "--enforce-eager",
+            # Required for LangChain/LangGraph tool calling (tool_choice="auto")
+            "--enable-auto-tool-choice",
+            "--tool-call-parser", "hermes",
+        ]
+
+        logger.info(f"Starting agent LLM container (GPU: {lease.gpu_devices}, port: {lease.port}, model: {cls.MODEL_PATH})...")
+        record_service_event({"event": "start_requested", "service": "agent-llm", "lease": lease.__dict__})
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
             subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
-
-            gpu = cls._ensure_gpus(
-                count=int(cls.TENSOR_PARALLEL_SIZE),
-                min_free_mib=8192,
-                env_var="AGENT_LLM_GPU_DEVICES",
+            record_service_event({"event": "start_failed", "service": "agent-llm", "stderr": result.stderr, "lease": lease.__dict__})
+            raise RuntimeError(
+                f"Failed to start agent LLM container.\nstderr: {result.stderr}"
             )
-
-            cmd = [
-                "docker", "run", "-d",
-                "--name", cls.CONTAINER_NAME,
-                "--gpus", "all",
-                "-e", f"CUDA_VISIBLE_DEVICES={gpu}",
-                "-p", f"{cls.PORT}:8000",
-                "-v", f"{cls.MODEL_PATH}:/model:ro",
-                "--shm-size=8g",
-                cls.DOCKER_IMAGE,
-                "--model", "/model",
-                "--trust-remote-code",
-                "--host", "0.0.0.0",
-                "--port", "8000",
-                "--tensor-parallel-size", cls.TENSOR_PARALLEL_SIZE,
-                "--max-model-len", cls.MAX_MODEL_LEN,
-                "--gpu-memory-utilization", "0.85",
-                "--enforce-eager",
-                # Required for LangChain/LangGraph tool calling (tool_choice="auto")
-                "--enable-auto-tool-choice",
-                "--tool-call-parser", "hermes",
-            ]
-
-            logger.info(f"Starting agent LLM container (GPU: {gpu}, model: {cls.MODEL_PATH})...")
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                raise RuntimeError(
-                    f"Failed to start agent LLM container.\nstderr: {result.stderr}"
-                )
 
         logger.info("Waiting for agent LLM to load model (this may take a few minutes)...")
         max_retries = 120  # poll every 5 s, up to 600 s
         for i in range(max_retries):
             if cls.is_running():
                 logger.info("Agent LLM service is READY!")
+                record_service_event({"event": "ready", "service": "agent-llm", "lease": cls._lease.__dict__ if cls._lease else None})
                 return
 
             if not cls._container_is_running():
@@ -166,6 +187,7 @@ class AgentLLMDockerManager(BaseServiceManager):
             ["docker", "rm", "-f", cls.CONTAINER_NAME],
             capture_output=True, timeout=5,
         )
+        record_service_event({"event": "stopped", "service": "agent-llm", "container": cls.CONTAINER_NAME})
 
 
 agent_llm_manager = AgentLLMDockerManager()

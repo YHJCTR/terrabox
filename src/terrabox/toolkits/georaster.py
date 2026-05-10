@@ -783,7 +783,7 @@ def setup(registrar):
     """Register all raster calculation tools."""
     registrar.toolkit(
         name="geo_raster",
-        description="Raster analysis: Spectral indices (NDVI/NDWI/etc), EVI, FVC, TVDI, and physical parameter masking.",
+        description="Raster analysis: spectral indices (NDVI/NDWI/EVI/FVC/TVDI), fire monitoring (FRP, fire pixel detection, spread mapping), raster statistics (diff, average, percentile, hotspot), cloud masking, threshold segmentation, and snow loss analysis.",
         version="0.2.0"
     )
 

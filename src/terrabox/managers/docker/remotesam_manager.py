@@ -23,6 +23,12 @@ import os
 import requests
 import logging
 from ..base_manager import BaseServiceManager
+from ..resource_allocator import (
+    acquire_docker_lease,
+    labels_for_lease,
+    record_service_event,
+    remove_container_if_exists,
+)
 
 logger = logging.getLogger("docker.remotesam_manager")
 
@@ -33,11 +39,13 @@ class RemoteSAMDockerManager(BaseServiceManager):
     API_URL = "http://127.0.0.1:" + os.environ.get("REMOTESAM_PORT", "9004")
 
     CONTAINER_NAME  = "terrabox-remotesam"
+    CONTAINER_BASE  = "terrabox-remotesam"
     DOCKER_IMAGE    = "terrabox/remotesam:latest"
     GPU_DEVICES     = os.environ.get("REMOTESAM_GPU_DEVICES", "0")
     CHECKPOINT_HOST = os.environ.get("REMOTESAM_CHECKPOINT_HOST", "")
     DATA_MOUNT_HOST = os.environ.get("DATA_MOUNT_HOST", "/data1")
     HF_CACHE_HOST   = os.environ.get("HF_CACHE_HOST", os.path.expanduser("~/.cache/huggingface"))
+    _lease = None
 
     def __new__(cls):
         if cls._instance is None:
@@ -66,21 +74,34 @@ class RemoteSAMDockerManager(BaseServiceManager):
     @classmethod
     def _start_docker(cls):
         if cls._container_is_running():
-            logger.info(f"Container {cls.CONTAINER_NAME} already running.")
-            return
+            logger.info(f"Container {cls.CONTAINER_NAME} is running but service is not healthy; rebuilding it.")
+            cls.stop_service()
 
-        subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
-
-        gpu = cls._ensure_gpu(
+        base_port = int(cls.API_URL.rsplit(":", 1)[-1])
+        lease = acquire_docker_lease(
+            service="remotesam",
+            image=cls.DOCKER_IMAGE,
+            container_base=cls.CONTAINER_BASE,
+            host="127.0.0.1",
+            base_port=base_port,
+            internal_port=9004,
+            gpu_count=1,
             min_free_mib=6144,
-            env_var="REMOTESAM_GPU_DEVICES",
+            fallback_gpu_devices=cls.GPU_DEVICES,
+            gpu_env_var="REMOTESAM_GPU_DEVICES",
+            exclude_manager_cls=cls,
         )
+        cls._lease = lease
+        cls.CONTAINER_NAME = lease.container_name
+        cls.API_URL = lease.api_url
+        remove_container_if_exists(cls.CONTAINER_NAME, service="remotesam", reason="before_docker_run")
 
         cmd = [
             "docker", "run", "-d",
             "--name", cls.CONTAINER_NAME,
-            "--gpus", f"device={gpu}",
-            "-p", f"{cls.API_URL.rsplit(':', 1)[-1]}:{cls.API_URL.rsplit(':', 1)[-1]}",
+            *labels_for_lease(lease),
+            "--gpus", f"device={lease.gpu_devices}",
+            "-p", f"{lease.port}:{lease.internal_port}",
             "-v", f"{cls.DATA_MOUNT_HOST}:{cls.DATA_MOUNT_HOST}",
             # Mount pretrained_weights as /checkpoints (source code is baked into the image)
             "-v", f"{cls.CHECKPOINT_HOST}:/checkpoints:ro",
@@ -93,9 +114,12 @@ class RemoteSAMDockerManager(BaseServiceManager):
             cls.DOCKER_IMAGE,
         ]
 
-        logger.info(f"Starting RemoteSAM container (GPU: {gpu})...")
+        logger.info(f"Starting RemoteSAM container (GPU: {lease.gpu_devices}, port: {lease.port})...")
+        record_service_event({"event": "start_requested", "service": "remotesam", "lease": lease.__dict__})
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
+            subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
+            record_service_event({"event": "start_failed", "service": "remotesam", "stderr": result.stderr, "lease": lease.__dict__})
             raise RuntimeError(
                 f"Failed to start RemoteSAM container.\nstderr: {result.stderr}"
             )
@@ -122,6 +146,7 @@ class RemoteSAMDockerManager(BaseServiceManager):
         for i in range(max_retries):
             if cls.is_running():
                 logger.info("RemoteSAM service is READY.")
+                record_service_event({"event": "ready", "service": "remotesam", "lease": cls._lease.__dict__ if cls._lease else None})
                 return
             if i % 15 == 0 and i > 0:
                 logger.info(f"Still loading... ({i * 2}s elapsed)")
@@ -134,7 +159,8 @@ class RemoteSAMDockerManager(BaseServiceManager):
     def stop_service(cls):
         logger.info(f"Stopping container {cls.CONTAINER_NAME}...")
         subprocess.run(["docker", "stop", cls.CONTAINER_NAME], capture_output=True)
-        subprocess.run(["docker", "rm", cls.CONTAINER_NAME], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
+        record_service_event({"event": "stopped", "service": "remotesam", "container": cls.CONTAINER_NAME})
 
 
 remotesam_manager = RemoteSAMDockerManager()

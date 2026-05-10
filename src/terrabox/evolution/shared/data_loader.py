@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 
 from .trajectory import Trajectory, Turn
 
@@ -289,8 +289,9 @@ class DisasterLoader:
     def iter_train(self, limit: Optional[int] = None) -> Iterator[Trajectory]:
         with open(self.train_path, encoding="utf-8") as f:
             raw = json.load(f)
+        records = _native_trajectory_records(raw)
         count = 0
-        for record in raw:
+        for record in records:
             if limit is not None and count >= limit:
                 break
             traj = self._parse_record(record)
@@ -341,7 +342,23 @@ class DisasterLoader:
             success=record.get("success", True),
             source=record.get("source", "disaster"),
             task_type=record.get("task_type", "unknown"),
+            status=record.get("status", ""),
+            tokens=record.get("tokens", {}),
+            artifacts=record.get("artifacts", []),
+            metadata=record.get("metadata", {}),
         )
+
+
+def _native_trajectory_records(raw: Any) -> list[dict[str, Any]]:
+    """Return records from supported native Trajectory package shapes."""
+    if isinstance(raw, list):
+        return [record for record in raw if isinstance(record, dict)]
+    if isinstance(raw, dict):
+        for key in ("trajectories", "samples", "records"):
+            value = raw.get(key)
+            if isinstance(value, list):
+                return [record for record in value if isinstance(record, dict)]
+    return []
 
 
 def make_loader(train_path: str, eval_path: str):
@@ -352,16 +369,13 @@ def make_loader(train_path: str, eval_path: str):
     """
     try:
         with open(train_path, encoding="utf-8") as f:
-            first_char = f.read(1)
-        if first_char == "[":
-            # JSON array — peek at first record to detect format
-            with open(train_path, encoding="utf-8") as f:
-                data = json.load(f)
-            if data and isinstance(data, list):
-                first = data[0]
-                if "turns" in first or "tools_called" in first:
-                    logger.info(f"Auto-detected DisasterLoader for {train_path}")
-                    return DisasterLoader(train_path, eval_path)
+            data = json.load(f)
+        records = _native_trajectory_records(data)
+        if records:
+            first = records[0]
+            if "turns" in first or "tools_called" in first:
+                logger.info(f"Auto-detected DisasterLoader for {train_path}")
+                return DisasterLoader(train_path, eval_path)
     except Exception as e:
         logger.debug(f"Format detection failed: {e}")
     logger.info(f"Using OpenEarthLoader for {train_path}")

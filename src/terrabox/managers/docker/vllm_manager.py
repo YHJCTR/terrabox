@@ -22,6 +22,12 @@ import os
 import requests
 import logging
 from ..base_manager import BaseServiceManager
+from ..resource_allocator import (
+    acquire_docker_lease,
+    labels_for_lease,
+    record_service_event,
+    remove_container_if_exists,
+)
 
 logger = logging.getLogger("docker.vllm_manager")
 
@@ -39,12 +45,15 @@ class VLLMDockerManager(BaseServiceManager):
     MODEL_NAME = os.environ.get("VLM_MODEL_NAME", "/model")
 
     CONTAINER_NAME = "terrabox-vllm"
+    CONTAINER_BASE = "terrabox-vllm"
     DOCKER_IMAGE = os.environ.get("VLM_DOCKER_IMAGE", "terrabox/vllm:latest")
     GPU_DEVICES = os.environ.get("VLM_GPU_DEVICES", "0")
     TENSOR_PARALLEL_SIZE = os.environ.get("VLM_TENSOR_PARALLEL_SIZE", "1")
     DATA_MOUNT_HOST = os.environ.get("DATA_MOUNT_HOST", "/data1")
-    MAX_MODEL_LEN = 4096
+    MIN_IMAGE_MODEL_LEN = int(os.environ.get("VLM_MIN_IMAGE_MODEL_LEN", "16384"))
+    MAX_MODEL_LEN = MIN_IMAGE_MODEL_LEN
     GPU_MEMORY_UTILIZATION = 0.8
+    _lease = None
 
     def __new__(cls):
         if cls._instance is None:
@@ -72,29 +81,66 @@ class VLLMDockerManager(BaseServiceManager):
         return result.returncode == 0 and result.stdout.strip() == "true"
 
     @classmethod
+    def _ensure_image_context_len(cls):
+        if int(cls.MAX_MODEL_LEN) < int(cls.MIN_IMAGE_MODEL_LEN):
+            logger.warning(
+                "vlm_max_model_len=%s is too small for image tasks; using %s.",
+                cls.MAX_MODEL_LEN,
+                cls.MIN_IMAGE_MODEL_LEN,
+            )
+            cls.MAX_MODEL_LEN = int(cls.MIN_IMAGE_MODEL_LEN)
+
+    @classmethod
+    def _running_container_model_len(cls):
+        result = subprocess.run(
+            ["docker", "inspect", "--format", "{{json .Config.Cmd}}", cls.CONTAINER_NAME],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            return None
+        try:
+            import json
+            cmd = json.loads(result.stdout)
+            idx = cmd.index("--max-model-len")
+            return int(cmd[idx + 1])
+        except Exception:
+            return None
+
+    @classmethod
     def _start_docker(cls):
         if cls._container_is_running():
-            logger.info(f"Container {cls.CONTAINER_NAME} already running.")
-            return
+            logger.info(f"Container {cls.CONTAINER_NAME} is running but service is not healthy; rebuilding it.")
+            cls.stop_service()
 
-        # Remove any stopped container with the same name to avoid "name already in use"
-        subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
-
-        gpu = cls._ensure_gpus(
-            count=int(cls.TENSOR_PARALLEL_SIZE),
+        lease = acquire_docker_lease(
+            service="vlm",
+            image=cls.DOCKER_IMAGE,
+            container_base=cls.CONTAINER_BASE,
+            host=cls.HOST,
+            base_port=cls.PORT,
+            internal_port=8000,
+            gpu_count=int(cls.TENSOR_PARALLEL_SIZE),
             min_free_mib=16384,
-            env_var="VLM_GPU_DEVICES",
+            fallback_gpu_devices=cls.GPU_DEVICES,
+            gpu_env_var="VLM_GPU_DEVICES",
+            exclude_manager_cls=cls,
         )
+        cls._lease = lease
+        cls.CONTAINER_NAME = lease.container_name
+        cls.PORT = lease.port
+        cls.API_BASE = f"http://{cls.HOST}:{cls.PORT}/v1"
+        remove_container_if_exists(cls.CONTAINER_NAME, service="vlm", reason="before_docker_run")
 
         cmd = [
             "docker", "run", "-d",
             "--name", cls.CONTAINER_NAME,
+            *labels_for_lease(lease),
             # --gpus all exposes all GPUs to the container; CUDA_VISIBLE_DEVICES then
             # restricts which ones CUDA actually uses (works even with --gpus all,
             # unlike NVIDIA_VISIBLE_DEVICES which --gpus all overrides).
             "--gpus", "all",
-            "-e", f"CUDA_VISIBLE_DEVICES={gpu}",
-            "-p", f"{cls.PORT}:8000",
+            "-e", f"CUDA_VISIBLE_DEVICES={lease.gpu_devices}",
+            "-p", f"{lease.port}:{lease.internal_port}",
             "-v", f"{cls.MODEL_PATH}:/model:ro",
             "-v", f"{cls.DATA_MOUNT_HOST}:{cls.DATA_MOUNT_HOST}",
             "--shm-size=16g",
@@ -110,9 +156,12 @@ class VLLMDockerManager(BaseServiceManager):
             "--allowed-local-media-path", cls.DATA_MOUNT_HOST,
         ]
 
-        logger.info(f"Starting vLLM container (GPU: {gpu}, model: {cls.MODEL_PATH})...")
+        logger.info(f"Starting vLLM container (GPU: {lease.gpu_devices}, port: {lease.port}, model: {cls.MODEL_PATH})...")
+        record_service_event({"event": "start_requested", "service": "vlm", "lease": lease.__dict__})
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
+            subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
+            record_service_event({"event": "start_failed", "service": "vlm", "stderr": result.stderr, "lease": lease.__dict__})
             raise RuntimeError(
                 f"Failed to start vLLM container.\nstderr: {result.stderr}"
             )
@@ -140,8 +189,19 @@ class VLLMDockerManager(BaseServiceManager):
         except Exception:
             pass
 
+        cls._ensure_image_context_len()
+
         if cls.is_running():
-            return
+            running_len = cls._running_container_model_len()
+            if running_len is None or running_len >= cls.MIN_IMAGE_MODEL_LEN:
+                return
+            logger.warning(
+                "Running %s uses --max-model-len %s, below image-safe minimum %s; recreating.",
+                cls.CONTAINER_NAME,
+                running_len,
+                cls.MIN_IMAGE_MODEL_LEN,
+            )
+            cls.stop_service()
 
         cls._start_docker()
 
@@ -150,6 +210,7 @@ class VLLMDockerManager(BaseServiceManager):
         for i in range(max_retries):
             if cls.is_running():
                 logger.info("vLLM service is READY!")
+                record_service_event({"event": "ready", "service": "vlm", "lease": cls._lease.__dict__ if cls._lease else None})
                 return
 
             # Mirror the non-Docker manager's process.poll() check:
@@ -173,7 +234,8 @@ class VLLMDockerManager(BaseServiceManager):
     def stop_service(cls):
         logger.info(f"Stopping container {cls.CONTAINER_NAME}...")
         subprocess.run(["docker", "stop", cls.CONTAINER_NAME], capture_output=True)
-        subprocess.run(["docker", "rm", cls.CONTAINER_NAME], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
+        record_service_event({"event": "stopped", "service": "vlm", "container": cls.CONTAINER_NAME})
 
 
 vllm_manager = VLLMDockerManager()

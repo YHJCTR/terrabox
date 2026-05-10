@@ -45,6 +45,22 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
 
+# ─── 全局清理（Ctrl-C / set -e 异常退出时兜底关闭容器）─────────────────────
+_cleanup_docker() {
+    local exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        echo ""
+        echo "[cleanup] 脚本异常退出 (exit=$exit_code)，关闭所有 vLLM 容器..."
+    else
+        echo "[cleanup] 实验完成，关闭所有 vLLM 容器..."
+    fi
+    for port in 9100 9101 9102 9103; do
+        docker stop "terrabox-agent-llm-${port}" >/dev/null 2>&1 && \
+            echo "[cleanup] 已停止 terrabox-agent-llm-${port}" || true
+    done
+}
+trap _cleanup_docker EXIT
+
 # ─── 参数解析 ────────────────────────────────────────────────────────────────
 
 EXPERIMENT=""

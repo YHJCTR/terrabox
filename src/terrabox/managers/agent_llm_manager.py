@@ -5,7 +5,8 @@ Spawns a vLLM OpenAI-compatible server as a subprocess using the local
 unsloth conda environment, mirroring the pattern of utils/vllm_manager.py.
 
 Default port: 9100  (avoids conflict with the VLM manager on 9000)
-Log files:    agent_llm_stdout.log / agent_llm_stderr.log
+Log files:    tmp/service_logs/agent_llm/agent_llm_stdout.log
+              tmp/service_logs/agent_llm/agent_llm_stderr.log
 """
 import logging
 import os
@@ -13,7 +14,7 @@ import subprocess
 import time
 
 import requests
-from .base_manager import BaseServiceManager
+from .base_manager import BaseServiceManager, open_service_log, service_log_path
 
 logger = logging.getLogger("agent_llm_manager")
 
@@ -21,6 +22,8 @@ logger = logging.getLogger("agent_llm_manager")
 class AgentLLMServiceManager(BaseServiceManager):
     _instance = None
     _process = None
+    _stdout_log = None
+    _stderr_log = None
 
     HOST = "127.0.0.1"
     PORT = 9100
@@ -100,11 +103,13 @@ class AgentLLMServiceManager(BaseServiceManager):
             "--tool-call-parser", "hermes",
         ]
 
+        cls._stdout_log = open_service_log("Agent LLM", "stdout")
+        cls._stderr_log = open_service_log("Agent LLM", "stderr")
         cls._process = subprocess.Popen(
             cmd,
             env=env,
-            stdout=open("agent_llm_stdout.log", "w"),
-            stderr=open("agent_llm_stderr.log", "w"),
+            stdout=cls._stdout_log,
+            stderr=cls._stderr_log,
         )
 
         logger.info("Waiting for Agent LLM to load model...")
@@ -119,8 +124,10 @@ class AgentLLMServiceManager(BaseServiceManager):
                 logger.info(f"Still loading... ({i * 5}s elapsed)")
 
             if cls._process.poll() is not None:
+                log_path = service_log_path("Agent LLM", "stderr")
+                hint = f" Check {log_path}." if log_path else ""
                 raise RuntimeError(
-                    "Agent LLM process exited unexpectedly! Check agent_llm_stderr.log."
+                    f"Agent LLM process exited unexpectedly!{hint}"
                 )
 
             time.sleep(5)
@@ -145,6 +152,14 @@ class AgentLLMServiceManager(BaseServiceManager):
                 logger.error(f"Error stopping Agent LLM: {e}")
             finally:
                 cls._process = None
+        for attr in ("_stdout_log", "_stderr_log"):
+            handle = getattr(cls, attr, None)
+            if handle and handle is not subprocess.DEVNULL:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+            setattr(cls, attr, None)
 
 
 agent_llm_manager = AgentLLMServiceManager()

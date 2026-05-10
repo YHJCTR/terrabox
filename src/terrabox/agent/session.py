@@ -46,6 +46,26 @@ def get_io_logger() -> logging.Logger:
 # Message serialization helpers
 # ---------------------------------------------------------------------------
 
+_CONVERSATION_MEMORY_HEADER = "[Terrabox conversation memory]"
+_USER_MEMORY_HEADER = "[Terrabox user memories]"
+
+_SUMMARY_SYSTEM_PROMPT = """You are the short-term memory compressor for Terrabox, a geospatial analysis assistant.
+
+Create a compact Chinese Markdown memory that lets a future assistant continue the conversation without seeing the older raw messages.
+
+Keep exact names, uploaded image paths, AOIs, coordinates, dates, datasets, tool slugs, numeric results, errors, and user preferences when present.
+Do not invent facts. Do not mention code edits or modified files. If a section has no useful information, write "- 无".
+
+Output only these sections:
+## 用户目标与偏好
+## 当前任务状态
+## 关键上下文
+## 工具与数据结果
+## 约束与决策
+## 后续待办
+"""
+
+
 def serialize_messages(messages: list) -> str:
     """Convert a list of LangChain messages to a JSON string for DB storage."""
     return json.dumps([message_to_dict(m) for m in messages])
@@ -55,6 +75,11 @@ def deserialize_messages(json_str: str) -> list:
     """Restore a list of LangChain messages from a JSON string."""
     data = json.loads(json_str)
     return messages_from_dict(data) if data else []
+
+
+def strip_transient_system_messages(messages: list) -> list:
+    """Do not persist dynamic prompt, RAG, memory, or summary SystemMessages."""
+    return [m for m in messages if not isinstance(m, SystemMessage)]
 
 
 def _history_limits() -> tuple[int, int, int]:
@@ -71,30 +96,98 @@ def _history_limits() -> tuple[int, int, int]:
         return 20, 15, 5
 
 
-def _summarize_history(history: list, llm=None) -> str:
+def _extract_existing_summary(summary_messages: list) -> str:
+    parts: list[str] = []
+    for msg in summary_messages:
+        content = getattr(msg, "content", "")
+        if content:
+            parts.append(content)
+    text = "\n\n".join(parts).strip()
+    if len(text) > 6000:
+        text = text[-6000:]
+    return text
+
+
+def _render_messages_for_summary(messages: list) -> str:
+    parts: list[str] = []
+    for msg in messages:
+        content = getattr(msg, "content", "")
+        if not content:
+            continue
+        if isinstance(msg, HumanMessage):
+            role = "User"
+        elif isinstance(msg, AIMessage):
+            role = "Assistant"
+        elif isinstance(msg, ToolMessage):
+            role = f"Tool {getattr(msg, 'name', '')}".strip()
+        else:
+            continue
+        if len(content) > 1500:
+            content = content[:1500] + "\n[truncated]"
+        parts.append(f"{role}:\n{content}")
+    text = "\n\n".join(parts)
+    if len(text) > 12000:
+        text = text[-12000:]
+    return text
+
+
+def _fallback_structured_summary(previous_summary: str, transcript: str) -> str:
+    if not previous_summary and not transcript:
+        return ""
+    if len(transcript) > 3000:
+        transcript = transcript[-3000:]
+    return (
+        "## 用户目标与偏好\n"
+        "- 见下方历史摘要与旧消息摘录。\n\n"
+        "## 当前任务状态\n"
+        "- 无\n\n"
+        "## 关键上下文\n"
+        f"{previous_summary or '- 无'}\n\n"
+        "## 工具与数据结果\n"
+        "- 无\n\n"
+        "## 约束与决策\n"
+        "- 无\n\n"
+        "## 后续待办\n"
+        "- 无\n\n"
+        "## 历史消息摘录\n"
+        f"{transcript or '- 无'}"
+    )
+
+
+def _summarize_history(history: list, llm=None, previous_summary: str = "") -> str:
     _, summary_threshold, keep_recent = _history_limits()
     if len(history) <= summary_threshold:
         return ""
     to_summarize = history[:-keep_recent]
-    parts = []
-    for msg in to_summarize:
-        if isinstance(msg, HumanMessage):
-            parts.append(f"User: {msg.content[:200]}")
-        elif isinstance(msg, AIMessage):
-            parts.append(f"Assistant: {msg.content[:200]}")
-    if not parts:
+    transcript = _render_messages_for_summary(to_summarize)
+    if not transcript and not previous_summary:
         return ""
-    text = "\n".join(parts)
     if llm is None:
-        return f"[Conversation summary]: {text[:1000]}"
+        return _fallback_structured_summary(previous_summary, transcript)
     try:
         result = llm.invoke([
-            {"role": "system", "content": "Summarize the following conversation concisely in Chinese, keeping key facts and decisions."},
-            {"role": "user", "content": text},
+            {"role": "system", "content": _SUMMARY_SYSTEM_PROMPT},
+            {"role": "user", "content": (
+                f"Existing rolling memory, if any:\n{previous_summary or '- 无'}\n\n"
+                f"Older raw messages to merge:\n{transcript or '- 无'}"
+            )},
         ])
         return result.content
     except Exception:
-        return f"[Conversation summary]: {text[:1000]}"
+        return _fallback_structured_summary(previous_summary, transcript)
+
+
+def get_user_memory_context(user_message: str, user, db: Session | None = None, top_k: int = 3) -> str:
+    """Retrieve persistent user memories relevant to this request."""
+    try:
+        from .memory import UserMemoryManager
+
+        mgr = UserMemoryManager()
+        return mgr.get_context_str(user.id, user_message, top_k=top_k, db=db)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Memory retrieval failed, skipping: %s", exc)
+        return ""
+
 
 # System prompt for ReAct agent
 _REACT_SYSTEM_PROMPT = """You are a geospatial analysis assistant with access to various tools for Earth observation data.
@@ -106,6 +199,10 @@ _REACT_SYSTEM_PROMPT = """You are a geospatial analysis assistant with access to
 4. The user's request is simple and does not require multiple tools
 
 ## Important rules:
+- Do not guess missing geospatial facts, names, distances, counts, areas, or assignments.
+- Before giving a final answer, check whether the available tools could obtain missing evidence. If a relevant tool can still provide needed evidence, call it instead of answering from assumptions.
+- A final answer should be grounded in the user's inputs or concrete tool observations. If a conclusion is only inferred from common sense or place names, gather more evidence first.
+- Tools may be reused with different parameters. For multi-entity tasks, gather each needed entity set before computing or comparing relationships.
 - For image analysis tasks, ONE successful vlm_analyze call is usually sufficient
 - Do NOT chain multiple perception tools unless explicitly asked
 - If a tool fails, explain why and provide the best answer you can with available information
@@ -122,7 +219,7 @@ _REACT_SYSTEM_PROMPT = """You are a geospatial analysis assistant with access to
 Remember: Quality over quantity. A single well-chosen tool is better than many unnecessary calls."""
 
 
-def prepare_history(session_id: str, user_message: str, image_paths: list, user, db: Session):
+def prepare_history(session_id: str, user_message: str, image_paths: list, user, db: Session, llm=None):
     from ..db.models import AgentSession
     content = user_message
     if image_paths:
@@ -135,24 +232,31 @@ def prepare_history(session_id: str, user_message: str, image_paths: list, user,
         record = AgentSession(id=session_id, user_id_fk=user.id, messages_json="[]", summary_json="[]")
         db.add(record)
         db.flush()
-    history = deserialize_messages(record.messages_json)
+    history = strip_transient_system_messages(deserialize_messages(record.messages_json))
 
     max_messages, _, keep_recent = _history_limits()
-    summary = _summarize_history(history)
+    existing_summaries = deserialize_messages(record.summary_json)
+    previous_summary = _extract_existing_summary(existing_summaries)
+    summary = _summarize_history(history, llm=llm, previous_summary=previous_summary)
     if summary:
-        existing_summaries = deserialize_messages(record.summary_json)
-        summary_msg = SystemMessage(content=f"[Previous conversation summary]\n{summary}")
-        existing_summaries.append(summary_msg)
-        record.summary_json = serialize_messages(existing_summaries)
+        summary_msg = SystemMessage(content=f"{_CONVERSATION_MEMORY_HEADER}\n{summary}")
+        record.summary_json = serialize_messages([summary_msg])
         history = history[-keep_recent:]
 
     if len(history) > max_messages:
         history = history[-max_messages:]
     history.append(HumanMessage(content=content))
 
+    memory_ctx = get_user_memory_context(user_message, user, db=db)
+    prefix_messages = []
+    if memory_ctx:
+        memory_ctx = memory_ctx.removeprefix("[User memories]\n")
+        prefix_messages.append(SystemMessage(content=f"{_USER_MEMORY_HEADER}\n{memory_ctx}"))
     summaries = deserialize_messages(record.summary_json)
     if summaries:
-        history = summaries[-3:] + history
+        prefix_messages.append(summaries[-1])
+    if prefix_messages:
+        history = prefix_messages + history
 
     return record, history
 
@@ -178,19 +282,24 @@ def log_session_start(io: logging.Logger, session_id: str, user_message: str, im
 
 def finalize_session(record, result: dict, db, io: logging.Logger) -> str:
     """Persist messages to DB and return the final response string."""
-    record.messages_json = serialize_messages(result["messages"])
+    record.messages_json = serialize_messages(strip_transient_system_messages(result["messages"]))
     record.updated_at = datetime.utcnow()
     db.commit()
     final = result["messages"][-1].content
     io.info(f"[FINAL]    {final!r}")
+    maybe_writeback_user_memory(result["messages"], db, io)
+    return final
+
+
+def maybe_writeback_user_memory(messages: list, db, io: logging.Logger) -> None:
+    """Extract persistent memories after a completed run when enabled."""
     ctx = current_context()
     if ctx and getattr(ctx.config, "enable_memory_writeback", False):
         try:
             from .memory import UserMemoryManager
-            UserMemoryManager().extract_and_store(ctx.user.id, ctx.session_id or "", result["messages"], db)
+            UserMemoryManager().extract_and_store(ctx.user.id, ctx.session_id or "", messages, db)
         except Exception as exc:
             io.warning(f"[MEMORY WRITEBACK ERROR] {type(exc).__name__}: {exc}")
-    return final
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 
 @dataclass
@@ -29,6 +29,10 @@ class Trajectory:
     success: bool                       # computed by evaluator
     source: str = "openearth"           # "openearth" | "earthbench"
     task_type: str = "unknown"          # e.g. "ind_nbr", "segmentation", etc.
+    status: str = ""                    # raw run status, e.g. completed/failed/timeout
+    tokens: dict[str, Any] = field(default_factory=dict)
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

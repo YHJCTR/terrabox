@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 from typing import Generator
@@ -19,8 +18,8 @@ if str(_ROOT / "src") not in sys.path:
 
 logger = logging.getLogger(__name__)
 
-# 代理设置（访问本地 vLLM 必须绕过系统代理）
-os.environ.setdefault("no_proxy", "localhost,127.0.0.1")
+from .docker_utils import ensure_local_no_proxy
+ensure_local_no_proxy()
 
 # ---------------------------------------------------------------------------
 # 影像路径映射（sft_image_mapping.json）
@@ -162,8 +161,8 @@ def _inject_real_paths(args: dict, entry: dict) -> dict:
 
 def _replay_mode(sample: dict) -> Generator[dict, None, None]:
     """按 SFT 样本中的 tool_calls 顺序直接执行，不经过 LLM。"""
-    from .tool_bridge import execute_tool, _fn_name_to_slug
-    from .docker_utils import check_tool_service
+    from .tool_bridge import execute_tool
+    from .docker_utils import perception_manager, TOOL_DOCKER_FULL_MAP
 
     sample_id = sample.get("id", "")
     mapping = _load_image_mapping()
@@ -171,7 +170,7 @@ def _replay_mode(sample: dict) -> Generator[dict, None, None]:
 
     tool_calls = sample.get("tool_calls", [])
     tool_calls_made: list[str] = []
-    # 用于解析 $stepN.field 的上下文
+    actual_tool_calls: list[dict] = []
     step_results: dict[int, dict] = {}
 
     for tc in tool_calls:
@@ -179,66 +178,61 @@ def _replay_mode(sample: dict) -> Generator[dict, None, None]:
         slug = tc["tool"]
         raw_args = tc.get("args", {})
 
-        # 注入真实影像路径（替换 rgb.tif / post.png 等占位符）
         raw_args = _inject_real_paths(raw_args, img_entry)
-
-        # 解析 $stepN.field 引用
         args = _resolve_refs(raw_args, step_results)
 
         yield {"type": "tool_start", "step": step, "slug": slug, "fn_name": slug, "args": args}
 
-        # 检查 Docker 依赖
-        available, msg = check_tool_service(slug)
-        if not available:
-            yield {"type": "tool_service_warn", "slug": slug, "message": msg}
-            # 降级：用 sample_output 作为结果
-            fallback = tc.get("sample_output", {})
-            step_results[step] = fallback
-            yield {
-                "type": "tool_result",
-                "step": step,
-                "slug": slug,
-                "output_type": "dict",
-                "display_value": fallback,
-                "raw": fallback,
-                "note": "⚠️ Service unavailable — using sample_output from dataset",
-            }
-            tool_calls_made.append(slug)
-            continue
+        # 感知类工具：通过 LRU 管理器按需启动
+        if slug in TOOL_DOCKER_FULL_MAP:
+            container_name = TOOL_DOCKER_FULL_MAP[slug][0]
+            yield {"type": "service_starting", "slug": slug, "container": container_name}
+            success, svc_msg, was_started = perception_manager.acquire(slug)
+            if not success:
+                yield {"type": "service_start_failed", "slug": slug, "container": container_name, "message": svc_msg}
+                fallback = tc.get("sample_output", {})
+                step_results[step] = fallback
+                yield {
+                    "type": "tool_result", "step": step, "slug": slug,
+                    "output_type": "dict", "display_value": fallback, "raw": fallback,
+                    "note": "⚠️ Service unavailable — using sample_output from dataset",
+                }
+                actual_tool_calls.append({"step": step, "tool": slug, "args": args, "sample_output": fallback})
+                tool_calls_made.append(slug)
+                continue
+            if was_started:
+                yield {"type": "service_started", "slug": slug, "container": container_name, "message": svc_msg}
 
         result = execute_tool(slug, args)
 
+        # 工具执行完后刷新 LRU 时间
+        if slug in TOOL_DOCKER_FULL_MAP:
+            perception_manager.touch(slug)
+
         if result["output_type"] == "error":
-            # 执行失败 → 用 sample_output 降级，保证链路继续
             fallback = tc.get("sample_output", {})
             step_results[step] = fallback
+            yield {"type": "tool_service_warn", "slug": slug,
+                   "message": f"执行失败（{result['display_value'][:120]}）→ 使用 sample_output 代替"}
             yield {
-                "type": "tool_service_warn",
-                "slug": slug,
-                "message": f"执行失败（{result['display_value'][:120]}）→ 使用 sample_output 代替",
-            }
-            yield {
-                "type": "tool_result",
-                "step": step,
-                "slug": slug,
-                "output_type": "dict",
-                "display_value": fallback,
-                "raw": fallback,
+                "type": "tool_result", "step": step, "slug": slug,
+                "output_type": "dict", "display_value": fallback, "raw": fallback,
                 "note": "⚠️ 执行错误 — 使用数据集 sample_output 模拟输出",
             }
+            actual_tool_calls.append({"step": step, "tool": slug, "args": args, "sample_output": fallback})
         else:
-            step_results[step] = result.get("raw") or {}
+            actual_output = result.get("raw") or {}
+            step_results[step] = actual_output
             yield {
-                "type": "tool_result",
-                "step": step,
-                "slug": slug,
+                "type": "tool_result", "step": step, "slug": slug,
                 "output_type": result["output_type"],
                 "display_value": result["display_value"],
                 "raw": result["raw"],
             }
+            actual_tool_calls.append({"step": step, "tool": slug, "args": args, "sample_output": actual_output})
         tool_calls_made.append(slug)
 
-    yield {"type": "done", "tool_calls_made": tool_calls_made}
+    yield {"type": "done", "tool_calls_made": tool_calls_made, "actual_tool_calls": actual_tool_calls}
 
 
 def _resolve_refs(args: dict, step_results: dict[int, dict]) -> dict:
@@ -347,7 +341,7 @@ def _llm_driven_mode(
         return
 
     from .tool_bridge import get_expected_tool_schemas, execute_tool
-    from .docker_utils import check_tool_service, get_llm_model_name
+    from .docker_utils import perception_manager, get_llm_model_name, TOOL_DOCKER_FULL_MAP
 
     tool_calls_in_sample = sample.get("tool_calls", [])
     schemas = get_expected_tool_schemas(tool_calls_in_sample)
@@ -358,16 +352,31 @@ def _llm_driven_mode(
 
     tool_text = _build_tool_prompt(schemas)
 
-    system_prompt = f"""你是专业的地理空间 AI 助手，擅长灾害遥感分析。
-根据用户的任务，按步骤调用工具完成分析。
+    # 构建工具调用顺序提示（严格顺序，参数由 LLM 自决）
+    tool_order_lines = [
+        f"{i}. {tc['tool']}"
+        for i, tc in enumerate(tool_calls_in_sample, 1)
+    ]
+    tool_order_text = "\n".join(tool_order_lines)
 
-==== 可用工具（* 表示必填参数）====
+    system_prompt = f"""你是专业的地理空间 AI 助手，擅长灾害遥感分析。
+根据用户的任务，严格按照指定顺序依次调用工具完成分析。
+
+==== 工具调用顺序（必须严格按此顺序，不可跳过或改变）====
+{tool_order_text}
+
+==== 可用工具详细说明（* 表示必填参数）====
 {tool_text}
 
 ==== 文件路径规则 ====
 - 用户消息中 [影像文件] 块提供了实际可用的影像路径，工具参数中的图像路径必须使用这些真实路径
 - 中间输出文件（如索引图、掩膜等）请写入 /tmp/ 目录，例如 /tmp/ndwi.tif、/tmp/mask.tif
 - 不要使用任何中文字符或占位符作为文件路径
+
+==== VLM 输出长度规则 ====
+- geo_perception.vlm_analyze 的 max_tokens 是输出长度上限，不是图像输入上下文长度
+- 对含图像的分析、bbox 提取、多图对比、灾害范围/面积分析，请默认使用 max_tokens 8192
+- 不要给 geo_perception.vlm_analyze 使用 256 或 512 这类过小值
 
 ==== 输出规则（极其重要）====
 每次只输出一个 JSON 对象，不要有任何其他文字或解释：
@@ -402,6 +411,7 @@ def _llm_driven_mode(
     yield {"type": "llm_start"}
 
     tool_calls_made: list[str] = []
+    actual_tool_calls: list[dict] = []   # 记录实际执行的工具调用（slug + 实际参数 + 实际输出）
     step = 0
     step_results: dict[int, dict] = {}
     parse_fail_count = 0
@@ -472,31 +482,36 @@ def _llm_driven_mode(
                 "args": args,
             }
 
-            # 检查 Docker 依赖
-            available, svc_msg = check_tool_service(slug)
-            if not available:
-                yield {"type": "tool_service_warn", "slug": slug, "message": svc_msg}
-                fallback = _find_sample_output(tool_calls_in_sample, slug)
-                step_results[step] = fallback
-                result_str = json.dumps(fallback, ensure_ascii=False, default=str)
-                messages.append({
-                    "role": "user",
-                    "content": f"[TOOL_RESULT] {result_str} [/TOOL_RESULT]",
-                })
-                yield {
-                    "type": "tool_result",
-                    "step": step,
-                    "slug": slug,
-                    "output_type": "dict",
-                    "display_value": fallback,
-                    "raw": fallback,
-                    "note": "⚠️ Service unavailable — using sample_output from dataset",
-                }
-                tool_calls_made.append(slug)
-                continue
+            # 感知类工具：通过 LRU 管理器按需启动
+            if slug in TOOL_DOCKER_FULL_MAP:
+                container_name = TOOL_DOCKER_FULL_MAP[slug][0]
+                yield {"type": "service_starting", "slug": slug, "container": container_name}
+                svc_ok, svc_msg, was_started = perception_manager.acquire(slug)
+                if not svc_ok:
+                    yield {"type": "service_start_failed", "slug": slug, "container": container_name, "message": svc_msg}
+                    fallback = _find_sample_output(tool_calls_in_sample, slug)
+                    step_results[step] = fallback
+                    result_str = json.dumps(fallback, ensure_ascii=False, default=str)
+                    messages.append({"role": "user", "content": f"[TOOL_RESULT] {result_str} [/TOOL_RESULT]"})
+                    yield {
+                        "type": "tool_result", "step": step, "slug": slug,
+                        "output_type": "dict", "display_value": fallback, "raw": fallback,
+                        "note": "⚠️ Service unavailable — using sample_output from dataset",
+                    }
+                    actual_tool_calls.append({"step": step, "tool": slug, "args": args, "sample_output": fallback})
+                    tool_calls_made.append(slug)
+                    continue
+                if was_started:
+                    yield {"type": "service_started", "slug": slug, "container": container_name, "message": svc_msg}
 
             result = execute_tool(slug, args)
-            step_results[step] = result.get("raw") or {}
+
+            # 刷新 LRU 时间
+            if slug in TOOL_DOCKER_FULL_MAP:
+                perception_manager.touch(slug)
+
+            actual_output = result.get("raw") or {}
+            step_results[step] = actual_output
 
             raw_for_llm = result.get("raw")
             if isinstance(raw_for_llm, dict):
@@ -531,6 +546,7 @@ def _llm_driven_mode(
                     "display_value": result["display_value"],
                     "raw": result["raw"],
                 }
+            actual_tool_calls.append({"step": step, "tool": slug, "args": args, "sample_output": actual_output})
             tool_calls_made.append(slug)
 
         else:
@@ -543,7 +559,8 @@ def _llm_driven_mode(
     else:
         yield {"type": "error", "message": f"Exceeded max_rounds ({max_rounds}) without completion"}
 
-    yield {"type": "done", "tool_calls_made": tool_calls_made}
+    # 容器由 perception_manager 统一管理（LRU + 5min 超时），此处不手动停止
+    yield {"type": "done", "tool_calls_made": tool_calls_made, "actual_tool_calls": actual_tool_calls}
 
 
 def _find_sample_output(tool_calls: list[dict], slug: str) -> dict:

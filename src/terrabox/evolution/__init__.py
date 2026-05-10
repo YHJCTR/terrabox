@@ -192,11 +192,23 @@ def get_prompt_augmenter(
         bank = PrincipleBank(store_dir)
         return ExpeLPromptInjector(bank, top_k=top_k)
 
+    elif method == "selfcritic":
+        if store_dir is None:
+            store_dir = kwargs.get("store_dir", "evolution_store/selfcritic")
+        from .selfcritic.bank import CriticSkillBank
+        from .selfcritic.retriever import CriticRetriever
+        from .selfcritic.prompt_injector import SelfCriticPromptInjector
+
+        bank = CriticSkillBank(store_dir)
+        retriever = CriticRetriever(bank)
+        return SelfCriticPromptInjector(bank, retriever, top_k=top_k)
+
     else:
         raise ValueError(
             f"Unknown evolution method: {method!r}. "
             f"Choose from: 'skillrl', 'evoskill', 'agentevolver', 'memrl', 'causalevo', "
-            f"'rewardevo', 'graphskillevo', 'seqgraphevo', 'causaltextevo', 'causalpolicyevo', 'expel'"
+            f"'rewardevo', 'graphskillevo', 'seqgraphevo', 'causaltextevo', 'causalpolicyevo', "
+            f"'expel', 'selfcritic'"
         )
 
 

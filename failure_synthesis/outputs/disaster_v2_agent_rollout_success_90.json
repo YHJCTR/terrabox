@@ -1,0 +1,253 @@
+{
+  "version": "1.1",
+  "description": "Disaster v2 agent rollout successful trajectories.",
+  "created_from": "灾害救援遥感分析 SFT 数据集 [v2+: 多样化工具链扩展版，新增 Part-A 替代链(10种任务)和 Part-B 新任务(12种)]",
+  "total_samples": 0,
+  "samples": [],
+  "disaster_categories": [
+    "drought",
+    "earthquake",
+    "flood",
+    "heatwave",
+    "landslide",
+    "snow",
+    "typhoon",
+    "wildfire"
+  ],
+  "task_types": [
+    "atmospheric_precip",
+    "building_damage_assess",
+    "coastal_erosion",
+    "debris_flow",
+    "disaster_astar_routing",
+    "drone_building_survey",
+    "drought_monitoring",
+    "earthquake_damage",
+    "fire_detection",
+    "fire_risk_zones",
+    "fire_spread",
+    "fire_spread_warning",
+    "flood_change",
+    "flood_detection",
+    "flood_flow_routing",
+    "flood_rescue_routing",
+    "flood_timeseries",
+    "grid_flood_assessment",
+    "heatwave_analysis",
+    "landslide",
+    "multi_hazard_grid",
+    "night_thermal_damage",
+    "population_flood_risk",
+    "rescue_accessibility",
+    "sea_ice_monitoring",
+    "slope_landslide",
+    "snow_disaster",
+    "soil_liquefaction",
+    "soil_moisture",
+    "typhoon_port_damage",
+    "urban_heat_island",
+    "volcano_thermal_anomaly",
+    "water_quality_flood",
+    "wildfire_progression",
+    "zonal_flood_stats"
+  ],
+  "validation": {
+    "description": "所有工具调用参数已通过源码核对，修复了5处设计错误",
+    "fixes": [
+      {
+        "tool": "geo_basic.pixel_area",
+        "wrong_params": [
+          "pixel_count",
+          "resolution_m"
+        ],
+        "correct_params": [
+          "pixels",
+          "gsd_m"
+        ],
+        "source_line": "geobasic.py:387"
+      },
+      {
+        "tool": "geo_statistics.count_pixels_condition",
+        "wrong_params": [
+          "raster_path",
+          "condition: '==255' (字符串)"
+        ],
+        "correct_params": [
+          "input_path",
+          "lower: 254 (数值下界)"
+        ],
+        "source_line": "geo_statistics.py:248"
+      },
+      {
+        "tool": "geo_statistics.percentage_change",
+        "wrong_params": [
+          "before",
+          "after"
+        ],
+        "correct_params": [
+          "a",
+          "b"
+        ],
+        "source_line": "geo_statistics.py:343"
+      },
+      {
+        "tool": "geoanalysis.getis_ord_gi_star",
+        "wrong_params": [
+          "values (列表)",
+          "coords (坐标列表)"
+        ],
+        "correct_params": [
+          "image_path (栅格路径)",
+          "output_path",
+          "weight_matrix (空间权重矩阵)"
+        ],
+        "source_line": "geoanalysis.py:662"
+      },
+      {
+        "tool": "geo_raster.calc_snow_loss_stats",
+        "wrong_params": [
+          "pre_path",
+          "post_path"
+        ],
+        "correct_params": [
+          "binary_map_path (单张二值损失图，需先用 raster_diff 生成)"
+        ],
+        "source_line": "georaster.py:858"
+      }
+    ],
+    "verified_signatures": {
+      "geo_basic.pixel_area": {
+        "required": [
+          "pixels",
+          "gsd_m"
+        ],
+        "returns": [
+          "area_m2",
+          "area_km2",
+          "pixel_area_m2"
+        ]
+      },
+      "geo_statistics.count_pixels_condition": {
+        "required": [
+          "input_path"
+        ],
+        "optional": [
+          "lower",
+          "upper"
+        ],
+        "returns": [
+          "count",
+          "total",
+          "ratio"
+        ]
+      },
+      "geo_statistics.percentage_change": {
+        "required": [
+          "a",
+          "b"
+        ],
+        "returns": [
+          "percentage_change"
+        ]
+      },
+      "geoanalysis.getis_ord_gi_star": {
+        "required": [
+          "image_path",
+          "output_path",
+          "weight_matrix"
+        ],
+        "returns": [
+          "status",
+          "output_path"
+        ]
+      },
+      "geo_raster.calc_snow_loss_stats": {
+        "required": [
+          "binary_map_path"
+        ],
+        "returns": [
+          "percentage",
+          "total_pixels",
+          "loss_pixels"
+        ]
+      },
+      "geo_raster.calculate_index": {
+        "required": [
+          "band_a_path",
+          "band_b_path",
+          "output_path"
+        ],
+        "returns": [
+          "status",
+          "output_path"
+        ]
+      },
+      "geo_raster.calculate_frp": {
+        "required": [
+          "input_path",
+          "output_path"
+        ],
+        "returns": [
+          "output_path",
+          "fire_pixels",
+          "fire_coverage_pct"
+        ]
+      },
+      "geo_raster.create_fire_increase_map": {
+        "required": [
+          "pre_path",
+          "post_path",
+          "output_path"
+        ],
+        "returns": [
+          "output_path",
+          "new_fire_pixels"
+        ]
+      },
+      "geo_raster.threshold_segmentation": {
+        "note": "pixels > threshold → 255, others → 0",
+        "required": [
+          "input_path",
+          "threshold",
+          "output_path"
+        ],
+        "returns": [
+          "output_path"
+        ]
+      },
+      "geo_perception.bbox_area": {
+        "required": [
+          "bboxes"
+        ],
+        "optional": [
+          "gsd_m"
+        ],
+        "returns": [
+          "total_area_px2",
+          "per_bbox_area_px2",
+          "count"
+        ]
+      },
+      "geo_perception.bbox_to_centroid": {
+        "required": [
+          "bboxes"
+        ],
+        "returns": [
+          "centroids",
+          "count"
+        ]
+      },
+      "geo_perception.centroid_distance_extremes": {
+        "required": [
+          "centroids"
+        ],
+        "returns": [
+          "min_distance",
+          "max_distance",
+          "min_pair_indices",
+          "max_pair_indices"
+        ]
+      }
+    }
+  }
+}

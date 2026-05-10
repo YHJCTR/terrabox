@@ -30,7 +30,8 @@ def _json_schema_to_pydantic(slug: str, schema: dict[str, Any]):
 
     fields: dict[str, Any] = {}
     for name, prop in properties.items():
-        py_type = _TYPE_MAP.get(prop.get("type", "string"), str)
+        prop_type = prop.get("type")
+        py_type = Any if prop_type is None else _TYPE_MAP.get(prop_type, str)
         if name in required:
             fields[name] = (py_type, ...)
         else:

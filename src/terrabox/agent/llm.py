@@ -20,14 +20,15 @@ def get_llm(config: AgentConfig) -> ChatOpenAI:
             # Docker container mode
             from ..managers.docker.agent_llm_manager import AgentLLMDockerManager
             AgentLLMDockerManager.start_service(config)
+            api_base = AgentLLMDockerManager._api_base()
             logger.info("Using local LLM (Docker container)")
         else:
             # Subprocess mode — uses the local unsloth conda env
             from ..managers.agent_llm_manager import AgentLLMServiceManager
             AgentLLMServiceManager.start_service(config)
+            api_base = f"http://{config.local_llm_host}:{config.local_llm_port}/v1"
             logger.info("Using local LLM (subprocess)")
 
-        api_base = f"http://{config.local_llm_host}:{config.local_llm_port}/v1"
         # Docker mode mounts the model at /model inside the container, so vLLM
         # serves it as "/model". Subprocess mode serves the model under its host
         # path. Use the correct name accordingly.

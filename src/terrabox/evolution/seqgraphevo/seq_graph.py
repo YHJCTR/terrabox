@@ -18,6 +18,12 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
+try:
+    import networkx as nx
+    _HAS_NX = True
+except ImportError:
+    _HAS_NX = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,13 +36,23 @@ class SeqGraph:
     Patterns   = frequent contiguous tool subsequences (ordered workflows)
     """
 
-    def __init__(self):
+    def __init__(self, graph_mode: str = "graph"):
+        """
+        Args:
+            graph_mode: "graph" uses NetworkX algorithms (PageRank, multi-hop BFS,
+                        topological sort) for expansion. "dict" uses the original
+                        dict-based logic. Falls back to "dict" if networkx is
+                        not installed.
+        """
         self._nodes: dict[str, dict] = {}          # tool_slug → {count, avg_f1, task_types}
         self._fwd_adj: dict[str, dict[str, dict]] = {}   # src → {tgt → edge_data}
         self._anti_pairs: set[frozenset] = set()   # frozenset({tool_a, tool_b})
         self._patterns: list[dict] = []            # list of pattern dicts
         self._anti_patterns: list[dict] = []       # list of anti-pattern dicts
         self._trajectory_count: int = 0
+        # Graph algorithm support
+        self._graph_mode: str = graph_mode if (_HAS_NX or graph_mode == "dict") else "dict"
+        self._nx_graph: Optional[object] = None    # lazy nx.DiGraph
 
     # ------------------------------------------------------------------
     # Construction

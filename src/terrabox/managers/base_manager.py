@@ -95,7 +95,7 @@ class ServiceRegistry:
     def evict_lru_for_gpu(
         cls,
         min_free_mib: int,
-        exclude_cls: Type["BaseServiceManager"],
+        exclude_cls: Type["BaseServiceManager"] | None = None,
         count: int = 1,
     ) -> None:
         """Stop LRU-registered services (excluding exclude_cls) until GPU has enough free memory.
@@ -255,6 +255,35 @@ class BaseServiceManager:
 _subprocess_logger = logging.getLogger("subprocess_manager")
 
 
+def _service_log_disabled() -> bool:
+    return os.environ.get("TERRABOX_DISABLE_SERVICE_FILE_LOGS", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def service_log_path(service_name: str, stream_name: str) -> str | None:
+    """Return a writable service log path, or None when file logs are disabled."""
+    if _service_log_disabled():
+        return None
+
+    log_root = os.environ.get("TERRABOX_SERVICE_LOG_DIR", "tmp/service_logs")
+    service_slug = service_name.lower().replace(" ", "_").replace("-", "_")
+    log_dir = os.path.abspath(os.path.join(log_root, service_slug))
+    os.makedirs(log_dir, exist_ok=True)
+    return os.path.join(log_dir, f"{service_slug}_{stream_name}.log")
+
+
+def open_service_log(service_name: str, stream_name: str):
+    """Open a writable service log stream, or return DEVNULL when disabled."""
+    path = service_log_path(service_name, stream_name)
+    if path is None:
+        return subprocess.DEVNULL
+    return open(path, "w")
+
+
 class SubprocessServiceManager(BaseServiceManager):
     """Base class for subprocess-based GPU service managers.
 
@@ -265,6 +294,8 @@ class SubprocessServiceManager(BaseServiceManager):
 
     _instance = None
     _process = None
+    _stdout_log = None
+    _stderr_log = None
 
     SERVICE_NAME: str = "Service"
     PYTHON_EXEC: str = ""
@@ -309,13 +340,14 @@ class SubprocessServiceManager(BaseServiceManager):
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = cls.GPU_DEVICES
         env["PYTHONPATH"] = f"{cls.WORK_DIR}:{env.get('PYTHONPATH', '')}"
-        log_name = cls.SERVICE_NAME.lower().replace(" ", "_").replace("-", "_")
+        cls._stdout_log = open_service_log(cls.SERVICE_NAME, "stdout")
+        cls._stderr_log = open_service_log(cls.SERVICE_NAME, "stderr")
         cls._process = subprocess.Popen(
             cls._build_cmd(),
             cwd=cls.WORK_DIR,
             env=env,
-            stdout=open(os.path.join(cls.WORK_DIR, f"{log_name}_stdout.log"), "w"),
-            stderr=open(os.path.join(cls.WORK_DIR, f"{log_name}_stderr.log"), "w"),
+            stdout=cls._stdout_log,
+            stderr=cls._stderr_log,
         )
         for _ in range(cls.MAX_RETRIES):
             if cls.is_running():
@@ -323,8 +355,10 @@ class SubprocessServiceManager(BaseServiceManager):
                 return
             time.sleep(1)
         cls.stop_service()
+        log_path = service_log_path(cls.SERVICE_NAME, "stderr")
+        hint = f" Check {log_path}." if log_path else ""
         raise RuntimeError(
-            f"{cls.SERVICE_NAME} service failed to start. Check logs in {cls.WORK_DIR}/"
+            f"{cls.SERVICE_NAME} service failed to start.{hint}"
         )
 
     @classmethod
@@ -333,3 +367,11 @@ class SubprocessServiceManager(BaseServiceManager):
             _subprocess_logger.info(f"Stopping {cls.SERVICE_NAME} Service...")
             cls._process.terminate()
             cls._process = None
+        for attr in ("_stdout_log", "_stderr_log"):
+            handle = getattr(cls, attr, None)
+            if handle and handle is not subprocess.DEVNULL:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+            setattr(cls, attr, None)

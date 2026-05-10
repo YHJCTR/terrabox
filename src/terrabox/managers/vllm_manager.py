@@ -4,7 +4,7 @@ import os
 import requests
 import logging
 import sys
-from .base_manager import BaseServiceManager
+from .base_manager import BaseServiceManager, open_service_log, service_log_path
 
 logger = logging.getLogger("vllm_manager")
 
@@ -12,6 +12,8 @@ logger = logging.getLogger("vllm_manager")
 class VLLMServiceManager(BaseServiceManager):
     _instance = None
     _process = None
+    _stdout_log = None
+    _stderr_log = None
 
     MODEL_PATH = os.environ.get("VLM_MODEL_PATH", "")
     HOST = "127.0.0.1"
@@ -23,7 +25,8 @@ class VLLMServiceManager(BaseServiceManager):
 
     GPU_DEVICES = os.environ.get("VLM_GPU_DEVICES", "0")
     TENSOR_PARALLEL_SIZE = int(os.environ.get("VLM_TENSOR_PARALLEL_SIZE", "1"))
-    MAX_MODEL_LEN = 4096
+    MIN_IMAGE_MODEL_LEN = int(os.environ.get("VLM_MIN_IMAGE_MODEL_LEN", "16384"))
+    MAX_MODEL_LEN = MIN_IMAGE_MODEL_LEN
     GPU_MEMORY_UTILIZATION = 0.9
 
     def __new__(cls):
@@ -45,6 +48,16 @@ class VLLMServiceManager(BaseServiceManager):
             return False
 
     @classmethod
+    def _ensure_image_context_len(cls):
+        if int(cls.MAX_MODEL_LEN) < int(cls.MIN_IMAGE_MODEL_LEN):
+            logger.warning(
+                "vlm_max_model_len=%s is too small for image tasks; using %s.",
+                cls.MAX_MODEL_LEN,
+                cls.MIN_IMAGE_MODEL_LEN,
+            )
+            cls.MAX_MODEL_LEN = int(cls.MIN_IMAGE_MODEL_LEN)
+
+    @classmethod
     def start_service(cls):
         """Start the vLLM subprocess using the isolated conda environment."""
         try:
@@ -61,6 +74,8 @@ class VLLMServiceManager(BaseServiceManager):
             cls.API_BASE = f"http://{cls.HOST}:{cls.PORT}/v1"
         except Exception:
             pass
+
+        cls._ensure_image_context_len()
 
         if cls.is_running():
             return
@@ -91,11 +106,13 @@ class VLLMServiceManager(BaseServiceManager):
             "--timeout-keep-alive", "3600",
         ]
 
+        cls._stdout_log = open_service_log("vLLM", "stdout")
+        cls._stderr_log = open_service_log("vLLM", "stderr")
         cls._process = subprocess.Popen(
             cmd,
             env=env,
-            stdout=open("vllm_stdout.log", "w"),
-            stderr=open("vllm_stderr.log", "w")
+            stdout=cls._stdout_log,
+            stderr=cls._stderr_log,
         )
 
         logger.info("Waiting for vLLM to load model...")
@@ -110,7 +127,9 @@ class VLLMServiceManager(BaseServiceManager):
                 logger.info(f"Still loading... ({i * 5}s elapsed)")
 
             if cls._process.poll() is not None:
-                raise RuntimeError("vLLM process exited unexpectedly! Check vllm_stderr.log.")
+                log_path = service_log_path("vLLM", "stderr")
+                hint = f" Check {log_path}." if log_path else ""
+                raise RuntimeError(f"vLLM process exited unexpectedly!{hint}")
 
             time.sleep(5)
 
@@ -135,6 +154,14 @@ class VLLMServiceManager(BaseServiceManager):
                 logger.error(f"Error stopping vLLM: {e}")
             finally:
                 cls._process = None
+        for attr in ("_stdout_log", "_stderr_log"):
+            handle = getattr(cls, attr, None)
+            if handle and handle is not subprocess.DEVNULL:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+            setattr(cls, attr, None)
 
 
 vllm_manager = VLLMServiceManager()

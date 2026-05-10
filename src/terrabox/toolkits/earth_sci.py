@@ -539,7 +539,7 @@ def calculate_turbidity_handler(arguments: Dict[str, Any], context: Any, account
 def setup(registrar):
     registrar.toolkit(
         name="earth_sci",
-        description="Physical parameter inversion tools (Atmosphere, LST, Microwave, Water)",
+        description="Physical parameter inversion: atmospheric correction (6S/FLAASH), land surface temperature, soil moisture, water quality indices (turbidity, chlorophyll, TSS), and microwave parameter retrieval.",
         version="0.2.0"
     )
 

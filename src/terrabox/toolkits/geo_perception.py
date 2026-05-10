@@ -10,6 +10,9 @@ import logging
 import os
 import base64
 import mimetypes
+import re
+import time
+import uuid
 import requests
 from typing import Any, Dict, List
 from ..core.registry import ToolSpec
@@ -55,6 +58,20 @@ def _encode_image_to_base64(image_path: str) -> str:
     return f"data:{mime_type};base64,{encoded_string}"
 
 
+def _reduced_vlm_output_budget(error_text: str) -> int | None:
+    """Parse vLLM context errors and return a safe retry output budget."""
+    max_match = re.search(r"maximum context length is\s+(\d+)", error_text)
+    input_match = re.search(r"request has\s+(\d+)\s+input tokens", error_text)
+    if not max_match or not input_match:
+        return None
+    max_context = int(max_match.group(1))
+    input_tokens = int(input_match.group(1))
+    retry_budget = max_context - input_tokens - 128
+    if retry_budget <= 0:
+        return None
+    return max(1, retry_budget)
+
+
 def _call_service(manager, url: str, payload: dict, timeout: int = 120) -> dict:
     """Start *manager* if not running, POST to *url*, return parsed JSON or error dict."""
     try:
@@ -68,6 +85,53 @@ def _call_service(manager, url: str, payload: dict, timeout: int = 120) -> dict:
         return {"status": "error", "message": f"API error {resp.status_code}: {resp.text}"}
     except Exception as e:
         return {"status": "error", "message": f"Connection failed: {e}"}
+
+
+def _write_tool_artifact(tool_name: str, payload: dict) -> str:
+    """Persist large tool payloads and return a repo-local artifact path."""
+    root = os.environ.get("TERRABOX_TOOL_ARTIFACT_DIR", "tmp/tool_artifacts")
+    tool_slug = tool_name.lower().replace(".", "_").replace("-", "_")
+    out_dir = os.path.abspath(os.path.join(root, tool_slug))
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"{int(time.time())}_{uuid.uuid4().hex[:8]}.json")
+    with open(out_path, "w") as f:
+        json.dump(payload, f, ensure_ascii=False)
+    return out_path
+
+
+def _array_shape(value: Any) -> list[int]:
+    shape: list[int] = []
+    cursor = value
+    while isinstance(cursor, list):
+        shape.append(len(cursor))
+        cursor = cursor[0] if cursor else None
+    return shape
+
+
+def _count_positive(value: Any) -> int:
+    if isinstance(value, list):
+        return sum(_count_positive(item) for item in value)
+    try:
+        return int(float(value) > 0)
+    except Exception:
+        return 0
+
+
+def _summarize_remotesam_result(result: dict) -> dict:
+    summary: dict[str, Any] = {}
+    payload = result.get("result", result)
+    if isinstance(payload, dict):
+        for name, value in payload.items():
+            if isinstance(value, list):
+                summary[str(name)] = {
+                    "shape": _array_shape(value),
+                    "positive_pixels": _count_positive(value),
+                }
+            elif isinstance(value, dict):
+                summary[str(name)] = {"keys": sorted(value.keys())}
+            else:
+                summary[str(name)] = value
+    return summary
 
 
 # --- Handlers ---
@@ -125,7 +189,11 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
     logger.debug(f"parsed image_paths: {image_paths}")
 
     prompt = arguments.get("prompt", "Analyze these images.")
-    max_tokens = arguments.get("max_tokens", 512)
+    max_tokens = arguments.get("max_tokens", 8192)
+    try:
+        max_tokens = int(max_tokens)
+    except Exception:
+        max_tokens = 8192
     
     try:
         vllm_manager.start_service()
@@ -158,35 +226,52 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
     }
 
     try:
-        response = requests.post(
-            api_url,
-            headers={"Content-Type": "application/json"},
-            json=payload,
-            timeout=300,
-            proxies={"http": None, "https": None},
-        )
-        if response.status_code == 200:
-            res_json = response.json()
-            content = res_json['choices'][0]['message']['content']
-            # Try to extract structured bboxes from model text output
-            import re as _re, json as _json
-            bboxes = []
-            m = _re.search(r'"bboxes"\s*:\s*(\[.*?\])', content, _re.DOTALL)
-            if not m:
-                m = _re.search(r'(\[\s*\{[^[\]]*"x1"[^[\]]*\}\s*\])', content, _re.DOTALL)
-            if m:
-                try:
-                    bboxes = _json.loads(m.group(1))
-                except Exception:
-                    bboxes = []
-            return {
-                "status": "success",
-                "analysis": content,
-                "bboxes": bboxes,
-                "processed_images": len(image_paths)
-            }
-        else:
+        response = None
+        for attempt in range(2):
+            response = requests.post(
+                api_url,
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                timeout=300,
+                proxies={"http": None, "https": None},
+            )
+            if response.status_code == 200:
+                break
+            if attempt == 0 and response.status_code == 400:
+                retry_budget = _reduced_vlm_output_budget(response.text)
+                if retry_budget is not None and retry_budget < int(payload["max_tokens"]):
+                    logger.warning(
+                        "Retrying VLM request with max_tokens=%s after context error: %s",
+                        retry_budget,
+                        response.text,
+                    )
+                    payload["max_tokens"] = retry_budget
+                    continue
             return {"status": "error", "message": f"API Error {response.status_code}: {response.text}"}
+
+        if response is None or response.status_code != 200:
+            return {"status": "error", "message": "VLM request failed before receiving a response"}
+
+        res_json = response.json()
+        content = res_json['choices'][0]['message']['content']
+        # Try to extract structured bboxes from model text output
+        import json as _json
+        bboxes = []
+        m = re.search(r'"bboxes"\s*:\s*(\[.*?\])', content, re.DOTALL)
+        if not m:
+            m = re.search(r'(\[\s*\{[^[\]]*"x1"[^[\]]*\}\s*\])', content, re.DOTALL)
+        if m:
+            try:
+                bboxes = _json.loads(m.group(1))
+            except Exception:
+                bboxes = []
+        return {
+            "status": "success",
+            "analysis": content,
+            "bboxes": bboxes,
+            "processed_images": len(image_paths),
+            "max_tokens_used": payload["max_tokens"],
+        }
     except Exception as e:
         return {"status": "error", "message": f"Connection failed: {str(e)}"}
         
@@ -305,10 +390,14 @@ def remotesam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> 
     )
     if result.get("status") == "error":
         return result
+    artifact_path = _write_tool_artifact("geo_perception.remotesam", result)
+    result_summary = _summarize_remotesam_result(result)
     return {
         "status": "success",
-        "result": result,
+        "artifact_path": artifact_path,
+        "result_summary": result_summary,
         "bboxes": result.get("bboxes", []),
+        "result_keys": sorted(result.keys()),
         "message": f"RemoteSAM {task_type} completed.",
     }
 def instructsam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
@@ -588,7 +677,7 @@ def change_os_detect_mock_handler(arguments: Dict[str, Any], context: Any, accou
 def setup(registrar):
     registrar.toolkit(
         name="geo_perception",
-        description="Advanced AI perception tools including Multi-Image VLM.",
+        description="AI perception for remote sensing imagery: VLM analysis, object detection (STRIP-RCNN), semantic/instance segmentation (RemoteSAM, InstructSAM, SAM2), change detection, OCR extraction, text/marker annotation, and image compositing.",
         version="0.1.0"
     )
 
@@ -614,7 +703,18 @@ def setup(registrar):
                         "description": "Question or instruction.",
                         "default": "",
                     },
-                    "max_tokens": {"type": "integer", "default": 512},
+                    "max_tokens": {
+                        "type": "integer",
+                        "default": 8192,
+                        "minimum": 1024,
+                        "description": (
+                            "Maximum output tokens for the VLM analysis. "
+                            "This is the response budget, not the image input context. "
+                            "Use 8192 by default for image tasks, especially multi-image comparison, "
+                            "bbox extraction, damage/flood/fire analysis, or area/statistics reasoning. "
+                            "Do not use small values such as 256 or 512 for image analysis."
+                        ),
+                    },
                 },
                 "required": [],
             },

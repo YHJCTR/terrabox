@@ -14,6 +14,11 @@
    - 2.2 EvoSkill
    - 2.3 AgentEvolver
    - 2.4 MemRL
+   - 2.5 ExpeL（已实现）
+   - 2.6 SeqGraphEvo（已实现，原创）
+   - 2.7 CausalTextEvo（已实现，原创）
+   - 2.8 CausalPolicyEvo（已实现，原创）
+   - 2.9 SelfCritic（已实现，原创）
 4. [相关工作全景](#3-相关工作全景)
    - 3.1 奠基性工作（2023）
    - 3.2 经验/记忆驱动（2024–2026）
@@ -233,6 +238,264 @@ $$\alpha = \max\left(0.05,\ \frac{0.3}{1 + 0.1 \cdot \text{visits}}\right)$$
 
 - 随着记忆库增大，检索开销线性增长；
 - 性能上界受冻结基础模型能力限制。
+
+***
+
+### 2.5 ExpeL — 成功轨迹原则蒸馏
+
+**论文**：*ExpeL: LLM Agents Are Experiential Learners*
+**arXiv**：[2308.10144](https://arxiv.org/abs/2308.10144)  **年份**：2023  **状态**：已实现
+
+#### 核心机制
+
+```
+成功轨迹
+    ↓ LLM 提取
+PrincipleBank
+    ├── general         (跨任务通用原则)
+    ├── task_specific   (任务类型专属原则)
+    └── mistakes        (失败模式教训)
+
+推理时：
+用户问题 → 关键词过滤 → top-k principles → 注入 system prompt
+```
+
+#### 存储格式（`principles.json`）
+
+```json
+{
+  "general": [
+    {"text": "Always retrieve area boundary before calling raster tools",
+     "score": 0.91, "source_task": "flood_042"}
+  ],
+  "task_specific": {
+    "flood_detection": [
+      {"text": "NDWI threshold 0.3 works best for water/land separation", "score": 0.85}
+    ]
+  },
+  "mistakes": [
+    {"text": "Do not call vlm_analyze on raw bands without preprocessing", "score": 0.78}
+  ]
+}
+```
+
+#### 与 SkillRL 的区别
+
+ExpeL 使用 flat 两层结构（通用/任务专属），SkillRL 使用三层层次结构并支持递归进化触发。ExpeL 是 SkillRL 的前驱论文，两者均已在本项目中独立实现。
+
+***
+
+### 2.6 SeqGraphEvo — 序列图模式挖掘
+
+**原创方法（本项目）**  **年份**：2026  **状态**：已实现
+
+#### 核心机制
+
+从轨迹统计工具调用的顺序共现关系，构建有向图和频繁模式库，无需 LLM。
+
+```
+训练轨迹
+    ↓ 统计 A→B 转移频率
+有向序列图 (nodes + edges)
+    ↓ Apriori 频繁模式挖掘
+patterns (正模式) + anti_patterns (失败轨迹中出现的工具对)
+
+推理时：
+用户查询 → 提取种子工具（关键词匹配）
+         → 图中找含种子工具的模式
+         → 按 support × avg_f1 × task_type_boost 排序
+         → 合成工作流，过滤 anti_pattern 违规
+         → 注入 system prompt
+```
+
+#### 存储格式（`seq_graph.json`）
+
+```json
+{
+  "nodes": {
+    "stac_basic.search": {"freq": 145, "avg_f1": 0.84}
+  },
+  "edges": {
+    "stac_basic.search→geo_raster.calculate_index": {"count": 98, "avg_f1": 0.87}
+  },
+  "patterns": [
+    {"pattern": ["stac_basic.search", "geo_raster.calculate_index", "geobasic.area"],
+     "support": 45, "avg_f1": 0.89, "task_types": {"flood_detection": 38}}
+  ],
+  "anti_patterns": [
+    {"pattern": ["geo_perception.vlm_analyze", "stac_basic.search"],
+     "note": "vlm called before fetching imagery — appears in failures"}
+  ]
+}
+```
+
+#### 关键创新
+
+- 纯统计，无需 LLM，构建成本极低（阶段1方法，可并行）
+- 同时捕获**正模式**（推荐）和**反模式**（避免），双向约束工具调用
+- 作为 CausalTextEvo 的 Build 阶段子组件，也可独立使用
+
+***
+
+### 2.7 CausalTextEvo — 因果文本梯度优化
+
+**原创方法（本项目）**  **年份**：2026  **状态**：已实现
+
+#### 核心机制（两阶段）
+
+```
+阶段 1 — Build（无 LLM）：
+  CausalEvo CCA  → tool_keywords, cca_scores
+  SeqGraphEvo    → seq_patterns, anti_patterns
+  → 初始化 KnowledgeState θ
+
+阶段 2 — Optimize（需 LLM）：
+  θ → 生成 system prompt → 运行 agent → 计算 F1
+  F1 下降 → LLM 分析"哪段描述导致错误"
+  → 生成文本梯度 (text gradient) → 更新 θ 中的 skill_texts
+  → 若 F1 提升则保留，否则回滚到 snapshot（早停）
+```
+
+#### 存储格式（`knowledge_state.json`）
+
+```json
+{
+  "tool_keywords": {
+    "geo_raster.calculate_index": ["ndwi", "flood", "water", "inundation"]
+  },
+  "seq_patterns": [
+    {"pattern": ["stac_basic.search", "geo_raster.calculate_index", "geobasic.area"],
+     "support": 45, "avg_f1": 0.89}
+  ],
+  "anti_patterns": [
+    {"pattern": ["geo_perception.vlm_analyze", "stac_basic.search"]}
+  ],
+  "skill_texts": {
+    "flood_detection": "For flood mapping: 1) search imagery via STAC, 2) compute NDWI..."
+  },
+  "cca_scores": {"geo_raster.calculate_index": 0.82},
+  "epoch": 8,
+  "best_f1": 0.742
+}
+```
+
+#### 关键创新
+
+将 TextGrad（文本梯度优化）用于工具调用策略文本，是唯一通过**迭代 LLM 反馈优化自然语言策略描述**的方法，同时继承 CausalEvo 和 SeqGraphEvo 的统计知识作为初始化。
+
+#### 局限性
+
+- Optimize 阶段需要 LLM，且需要多轮迭代（~10 epoch）
+- TextGrad 更新方向依赖 LLM 的分析质量
+
+***
+
+### 2.8 CausalPolicyEvo — 外部策略状态自进化
+
+**原创方法（本项目）**  **年份**：2026  **状态**：已实现
+
+#### 核心机制（两阶段，与 CausalTextEvo 并行在 GPU 3）
+
+```
+阶段 1 — Build（无 LLM）：
+  统计 tool_priors, task_tool_priors（各工具在各任务类型下的使用频率）
+  CCA → cca_scores, transition_scores（工具转移得分）
+  失败轨迹 → anti_pairs（禁止工具对）
+  → 初始化 PolicyState
+
+阶段 2 — Optimize（需 LLM）：
+  PolicyState → 生成包含"工具优先级 + 禁止规则 + 恢复策略"的 prompt
+  → 运行 agent → F1 反馈
+  → LLM 修订 stop_rules / recovery_rules / policy_texts
+  → 保留或回滚
+```
+
+#### 存储格式（`policy_state.json`）
+
+```json
+{
+  "tool_priors": {"stac_basic.search": 0.82, "geo_raster.calculate_index": 0.75},
+  "task_tool_priors": {
+    "flood_detection": {"stac_basic.search": 0.95, "geo_raster.calculate_index": 0.91}
+  },
+  "anti_pairs": [["geo_perception.vlm_analyze", "stac_basic.search"]],
+  "stop_rules": {
+    "geo_raster.statistics": "skip if geobasic.area already called"
+  },
+  "recovery_rules": {
+    "stac_basic.search_fail": "retry with broader bbox"
+  },
+  "policy_texts": {"flood_detection": "Prioritize NDWI-based analysis..."},
+  "cca_scores": {"geo_raster.calculate_index": 0.82},
+  "epoch": 5,
+  "best_f1": 0.731
+}
+```
+
+#### 与 CausalTextEvo 的区别
+
+| 维度 | CausalTextEvo | CausalPolicyEvo |
+|------|--------------|----------------|
+| 优化对象 | skill_texts（自由文本策略） | stop_rules / recovery_rules（结构化规则） |
+| 知识表示 | 自然语言描述 | 结构化规则 + 统计先验 |
+| 注入内容 | 每个任务类型的完整策略文本 | 工具级别的禁止/恢复规则 + 优先级 |
+
+两者并行运行（同用 GPU 3），可单独使用也可组合。
+
+***
+
+### 2.9 SelfCritic — 成功轨迹反事实最优链蒸馏
+
+**原创方法（本项目）**  **年份**：2026  **状态**：已实现（独立模块）
+
+#### 动机：现有方法缺失的学习信号
+
+```
+失败轨迹 → "避免什么"  （SkillRL mistakes / EvoSkill）    ← 已有
+成功轨迹 → "做了什么"  （SkillRL general / ExpeL）         ← 已有
+成功轨迹 → "本可以更好" （SelfCritic）                     ← 本方法填补的空白
+```
+
+成功轨迹也可能包含冗余步骤，但没有任何现有方法问过 LLM："这条成功链哪里可以更精简？"
+
+#### 核心机制
+
+```
+成功轨迹（F1 ≥ min_f1，chain_len ≥ 3）
+    ↓ SelfCriticDistiller → Docker vLLM
+Critique Prompt:
+  "此链成功。哪些步骤是多余的？最优链是什么？"
+    ↓ 返回 {redundant_steps, optimal_chain, critique}
+    ↓ 验证：redundant_steps ⊆ original_chain
+    ↓ 跳过：optimal == original（已最优）
+    ↓ 去重（content hash）
+CriticSkillBank → critic_skills.json
+
+推理时：
+用户查询 → task_type 过滤 + BM25 → top-k critic skills
+         → 注入 ## Optimized Tool Chains (Self-Critic) 节
+```
+
+#### 存储格式（`critic_skills.json`）
+
+```json
+{
+  "content": "Task type: flood_detection\nOriginal chain: stac_basic.search → geo_raster.calculate_index → geo_raster.statistics → geobasic.area\nOptimized chain: stac_basic.search → geo_raster.calculate_index → geobasic.area\nCritique: geo_raster.statistics is redundant — geobasic.area computes flood area directly from the index layer\nRedundant steps: geo_raster.statistics",
+  "task_type": "flood_detection",
+  "optimal_chain": ["stac_basic.search", "geo_raster.calculate_index", "geobasic.area"],
+  "redundant_steps": ["geo_raster.statistics"],
+  "source_tasks": ["flood_042"]
+}
+```
+
+#### 与 SkillRL 的互补关系
+
+SkillRL 的 general tier 记录"做了什么"，SelfCritic 记录"本可以怎么做得更好"，两者独立存储，不互相干扰。SelfCritic 作为独立模块与其他所有方法并列，通过 `get_prompt_augmenter("selfcritic")` 使用。
+
+#### 局限性
+
+- 需要 Docker vLLM（Build 阶段），推理阶段仅读文件
+- min_f1 参数需按数据源调整：SFT 数据用 0.0，真实轨迹用 0.8
 
 ***
 
@@ -507,17 +770,32 @@ $$\alpha = \max\left(0.05,\ \frac{0.3}{1 + 0.1 \cdot \text{visits}}\right)$$
 
 ## 4. 方法横向对比
 
+> 本项目共实现 13 个方法（含 baseline）。下表按学习信号来源分组。
+
+### 4.1 核心论文复现（4个）
+
 | 维度         | SkillRL          | EvoSkill         | AgentEvolver | MemRL         |
 | ---------- | ---------------- | ---------------- | ------------ | ------------- |
 | **知识载体**   | 层次文本技能           | 结构化 SkillModule  | 经验池 + 模板     | 情节记忆 IEU      |
 | **检索方式**   | BM25 + 任务类型过滤    | Pareto 管理（非检索）   | BM25 相似度     | 意图相似 → Q 值排序  |
 | **进化机制**   | 蒸馏 + 性能漂移触发      | 失败驱动 + Pareto 过滤 | 三机制闭环        | Bellman Q 值更新 |
 | **权重更新**   | 否（本实现）           | 否                | 否（本实现）       | 否             |
-| **在线学习**   | 有（漂移检测）          | 有（失败驱动）          | 有（经验积累）      | 有（Q 值在线更新）    |
-| **失败轨迹利用** | 蒸馏 mistakes tier | 核心（失败驱动发现）       | 归因区分高/低信用    | Q 值惩罚低效记忆     |
-| **冷启动**    | 需要训练数据蒸馏         | 需要一批任务执行         | 需要挖掘模板       | 可逐步填充         |
-| **存储**     | JSON 文件（3个）      | JSON 文件（2个）      | JSONL 文件     | SQLite DB     |
-| **计算开销**   | 中（LLM 蒸馏）        | 中（三智能体循环）        | 低（规则导航）      | 低（Q 值更新）      |
+| **失败轨迹利用** | mistakes tier    | 核心（失败驱动发现）       | 归因区分高/低信用    | Q 值惩罚低效记忆     |
+| **存储**     | JSON × 3         | JSON × 2         | JSONL        | SQLite DB     |
+| **需 LLM**  | 是（蒸馏）            | 是（三智能体）          | 否            | 否             |
+
+### 4.2 原创方法（8个）
+
+| 维度           | ExpeL       | CausalEvo     | SeqGraphEvo      | RewardEvo     | GraphSkillEvo | CausalTextEvo       | CausalPolicyEvo     | SelfCritic        |
+| ------------ | ----------- | ------------- | ---------------- | ------------- | ------------- | ------------------- | ------------------- | ----------------- |
+| **知识载体**     | 原则文本（flat）  | CTFM 因果规则     | 有向序列图 + 频繁模式      | LLM伪标注→MemRL | 工具共现图         | KnowledgeState θ    | PolicyState         | 最优链批评文本           |
+| **检索/注入方式**  | 关键词过滤       | CCA 因果图合成     | 种子工具 → 图模式合成     | MemRL 检索      | 共现边权重排序       | 直接注入 θ 全部知识         | 直接注入优先级 + 规则       | task_type + BM25  |
+| **学习信号来源**   | 成功轨迹        | 成功+失败轨迹统计     | 所有轨迹统计           | LLM 打分        | 所有轨迹统计        | CCA + SeqGraph + TextGrad | CCA + 统计 + LLM优化 | 成功轨迹（LLM批评）      |
+| **缺失信号填补**   | 成功→"做了什么"   | 工具因果功能建模      | 顺序规律 + 反模式       | 无 GT 的伪奖励     | 工具协同关系        | 文本策略迭代优化            | 结构化规则迭代优化           | 成功→"本可以更好"       |
+| **阶段数**      | 1（Build）    | 1（Build）      | 1（Build）         | 1（LLM标注）     | 1（Build）      | 2（Build + Optimize） | 2（Build + Optimize） | 1（Build）          |
+| **需 LLM**    | 否           | 否             | 否                | 是             | 否             | 第2阶段               | 第2阶段               | 是（Build）          |
+| **存储**       | JSON        | JSON          | JSON             | SQLite DB     | JSON          | JSON                | JSON                | JSON              |
+| **run_evolution.sh** | ✗ 未接入 | ✓            | ✓               | ✓             | ✓             | ✓                   | ✓                   | ✗ 未接入             |
 
 ***
 
@@ -798,6 +1076,8 @@ $$\Delta W^\* = \arg\min\_{\Delta W} \mathcal{L}_{\text{new}}(W\_0 + \Delta W) \
 
 ### 7.2 RewardEvo — 自进化奖励模型（无需人工标注）
 
+> **状态**：**已实现**（`evolution/rewardevo/`）。以下为论文动机与完整设计，实现采用简化版 SCPL（当前用 LLM-as-judge 打分写入 MemRL 格式，完整 RM 进化为论文扩展方向）。
+>
 > **副标题**：*Self-Bootstrapping Reward Models for Annotation-Free Agent Evolution via Self-Consistent Pseudo-Labeling*
 
 #### 动机：监督信号的部署瓶颈
@@ -890,6 +1170,8 @@ $$\hat{\tau}^\* = \arg\max\_\tau \text{vote}(\tau; {\tau\_i}) = \arg\max\_\tau \
 
 ### 7.3 GraphSkillEvo — 图结构技能库 + GNN 路由器
 
+> **状态**：**已实现**（`evolution/graphskillevo/`）。当前实现为工具共现图 + 边权重排序（统计方法，无 GNN），GNN 路由器为论文扩展方向。
+>
 > **副标题**：*Relational Skill Graph with Graph Neural Network Routing for Structured Agent Self-Evolution*
 
 #### 动机：技能库的结构性缺失
@@ -1134,19 +1416,26 @@ GraphSkillEvo（图结构技能库）
 
 ***
 
-### 7.6 方法全景对比（含新思路）
+### 7.6 方法全景对比
 
-| 方法                | 知识载体             | 检索/规划           | 信用归因          | 参数更新        | 无标注支持               |
-| ----------------- | ---------------- | --------------- | ------------- | ----------- | ------------------- |
-| SkillRL           | 3-tier 文本技能      | BM25            | 无             | 否           | 否                   |
-| EvoSkill          | SkillModule JSON | Pareto          | 无             | 否           | 否                   |
-| AgentEvolver      | 经验池 + 模板         | BM25 导航         | 折扣归因          | 否           | 否                   |
-| MemRL             | IEU 情节记忆         | 语义 + Q 值        | Q 值（episode）  | 否           | 否                   |
-| CausalEvo         | CTFM 因果规则        | 因果图合成           | 反事实 CCA       | 否           | 否                   |
-| **AdaptEvo**      | LoRA 权重          | Meta-Controller | CCA（GRPO 权重）  | **是（LoRA）** | 否                   |
-| **RewardEvo**     | 伪标注 + RM         | RM 打分           | 自洽投票          | **是（RM）**   | **是**               |
-| **GraphSkillEvo** | 技能关系图            | **GNN 子图**      | 边权重           | **是（GNN）**  | 否                   |
-| **GRPOEvo**       | 工具序列策略           | GRPO 采样         | **TLRD（工具级）** | **是（LoRA）** | **是（配合 RewardEvo）** |
+> ✓ = 已在本项目实现；★ = 论文思路（未实现）
+
+| 方法                | 状态  | 知识载体             | 检索/规划           | 信用归因          | 参数更新        | 无标注支持               |
+| ----------------- | --- | ---------------- | --------------- | ------------- | ----------- | ------------------- |
+| SkillRL           | ✓   | 3-tier 文本技能      | BM25            | 无             | 否           | 否                   |
+| EvoSkill          | ✓   | SkillModule JSON | Pareto          | 无             | 否           | 否                   |
+| AgentEvolver      | ✓   | 经验池 + 模板         | BM25 导航         | 折扣归因          | 否           | 否                   |
+| MemRL             | ✓   | IEU 情节记忆         | 语义 + Q 值        | Q 值（episode）  | 否           | 否                   |
+| ExpeL             | ✓   | 原则文本（flat）       | 关键词过滤           | 无             | 否           | 否                   |
+| CausalEvo         | ✓   | CTFM 因果规则        | 因果图合成           | 反事实 CCA       | 否           | 否                   |
+| SeqGraphEvo       | ✓   | 有向序列图 + 频繁模式     | 种子工具图模式合成       | 无             | 否           | 否                   |
+| RewardEvo         | ✓   | LLM伪标注→MemRL    | MemRL 检索        | LLM 打分        | 否           | **是**               |
+| GraphSkillEvo     | ✓   | 工具共现图            | 边权重排序           | 无             | 否           | 否                   |
+| CausalTextEvo     | ✓   | KnowledgeState θ | 直接注入全量知识        | TextGrad      | 否           | 否                   |
+| CausalPolicyEvo   | ✓   | PolicyState      | 直接注入规则+优先级      | LLM 修订规则      | 否           | 否                   |
+| SelfCritic        | ✓   | 最优链批评文本          | task_type+BM25  | 无             | 否           | 否                   |
+| **AdaptEvo**      | ★   | LoRA 权重          | Meta-Controller | CCA（GRPO 权重）  | **是（LoRA）** | 否                   |
+| **GRPOEvo**       | ★   | 工具序列策略           | GRPO 采样         | **TLRD（工具级）** | **是（LoRA）** | **是（配合 RewardEvo）** |
 
 ***
 

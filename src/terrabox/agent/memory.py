@@ -30,7 +30,15 @@ class UserMemoryManager:
             self._vector_store = VectorStore()
         return self._vector_store
 
-    def _upsert_vector(self, mem_id: str, key: str, value: str, session_id: str, old_embedding_id: str | None):
+    def _upsert_vector(
+        self,
+        mem_id: str,
+        user_id: str,
+        key: str,
+        value: str,
+        session_id: str,
+        old_embedding_id: str | None,
+    ):
         """Delete stale vector (if any) and insert fresh one. Returns the new embedding_id."""
         embedding_svc = self._get_embedding()
         vs = self._get_vector_store()
@@ -45,8 +53,16 @@ class UserMemoryManager:
             ids=[mem_id],
             vectors=[vec],
             contents=[f"{key}: {value}"],
-            doc_ids=[session_id or ""],
-            metadatas=[json.dumps({"key": key, "created_at": datetime.utcnow().isoformat()}, ensure_ascii=False)],
+            doc_ids=[str(user_id)],
+            metadatas=[json.dumps(
+                {
+                    "key": key,
+                    "user_id": str(user_id),
+                    "source_session_id": session_id or "",
+                    "created_at": datetime.utcnow().isoformat(),
+                },
+                ensure_ascii=False,
+            )],
         )
         return mem_id
 
@@ -93,7 +109,7 @@ class UserMemoryManager:
                     old_embedding_id = existing.embedding_id
                     existing.value = value
                     existing.source_session_id = session_id
-                    self._upsert_vector(existing.id, key, value, session_id, old_embedding_id)
+                    self._upsert_vector(existing.id, str(user_id), key, value, session_id, old_embedding_id)
                     existing.embedding_id = existing.id
                 else:
                     mem_id = str(uuid.uuid4())
@@ -105,29 +121,53 @@ class UserMemoryManager:
                         source_session_id=session_id,
                     )
                     db.add(mem)
-                    self._upsert_vector(mem_id, key, value, session_id, None)
+                    self._upsert_vector(mem_id, str(user_id), key, value, session_id, None)
                     mem.embedding_id = mem_id
             except Exception as e:
                 logger.warning("Memory upsert failed for key '%s': %s", key, e)
 
         db.commit()
 
-    def retrieve(self, user_id: str, query: str, top_k: int = 3) -> List[dict]:
+    def _memory_belongs_to_user(self, result: dict, user_id: str, db: Session | None) -> bool:
+        metadata = json.loads(result.get("metadata", "{}"))
+        if metadata.get("user_id"):
+            return str(metadata.get("user_id")) == str(user_id)
+        if db is None:
+            return False
+        try:
+            from ..db.models import UserMemory
+
+            return db.query(UserMemory).filter_by(id=result.get("id"), user_id=user_id).first() is not None
+        except Exception:
+            return False
+
+    def retrieve(self, user_id: str, query: str, top_k: int = 3, db: Session | None = None) -> List[dict]:
         try:
             embedding_svc = self._get_embedding()
             vs = self._get_vector_store()
             query_vec = embedding_svc.embed_single(query)
-            results = vs.search(kb_id=_MEMORY_COLLECTION, query_vector=query_vec, top_k=top_k)
+            search_k = max(top_k * 5, top_k)
+            results = vs.search(
+                kb_id=_MEMORY_COLLECTION,
+                query_vector=query_vec,
+                top_k=search_k,
+                doc_ids=[str(user_id)],
+            )
+            if len(results) < top_k:
+                broader = vs.search(kb_id=_MEMORY_COLLECTION, query_vector=query_vec, top_k=search_k)
+                known_ids = {r.get("id") for r in results}
+                results.extend(r for r in broader if r.get("id") not in known_ids)
+            filtered = [r for r in results if self._memory_belongs_to_user(r, user_id, db)]
             return [
                 {"content": r["content"], "score": r["score"], "metadata": json.loads(r.get("metadata", "{}"))}
-                for r in results
+                for r in filtered[:top_k]
             ]
         except Exception as e:
             logger.warning("Memory retrieval failed: %s", e)
             return []
 
-    def get_context_str(self, user_id: str, query: str, top_k: int = 3) -> str:
-        memories = self.retrieve(user_id, query, top_k)
+    def get_context_str(self, user_id: str, query: str, top_k: int = 3, db: Session | None = None) -> str:
+        memories = self.retrieve(user_id, query, top_k, db=db)
         if not memories:
             return ""
         return "[User memories]\n" + "\n".join(f"- {m['content']}" for m in memories)

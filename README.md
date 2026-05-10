@@ -138,7 +138,8 @@ uvicorn terrabox.main:app --app-dir src --reload --host 0.0.0.0 --port 8000
 uvicorn terrabox.main:app --app-dir src --host 0.0.0.0 --port 8000 --workers 4
 
 # Background run
-nohup uvicorn terrabox.main:app --app-dir src --host 0.0.0.0 --port 8000 > server.log 2>&1 &
+mkdir -p logs
+nohup uvicorn terrabox.main:app --app-dir src --host 0.0.0.0 --port 8000 > logs/server.log 2>&1 &
 ```
 
 ### Step 7: Verify Installation
@@ -632,14 +633,14 @@ python -m memory_profiler your_script.py
 #### View Application Logs
 ```bash
 # View logs in real-time
-tail -f server.log
+tail -f logs/server.log
 
 # View error logs
-grep -i error server.log
-grep -i exception server.log
+grep -i error logs/server.log
+grep -i exception logs/server.log
 
 # View logs by time
-tail -n 100 server.log | grep "$(date '+%Y-%m-%d')"
+tail -n 100 logs/server.log | grep "$(date '+%Y-%m-%d')"
 ```
 
 #### Enable Detailed Logs

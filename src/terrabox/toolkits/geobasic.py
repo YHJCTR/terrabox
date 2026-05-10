@@ -733,7 +733,7 @@ def setup(registrar):
     """Entry point called by the platform to register this toolkit and tools."""
     registrar.toolkit(
         name="geo_basic",
-        description="Geo basics: AOI validate/area, geodesic distance, pixel-area conversions, gridify, line length",
+        description="Geometric primitives: AOI validation, geodesic distance, pixel-area conversion, gridify, line length, and bounding box utilities (expansion, centroid extraction, pairwise distance extremes, area calculation).",
         version="0.3.0"
     )
 

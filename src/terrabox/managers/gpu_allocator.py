@@ -75,6 +75,7 @@ def allocate_gpu(
     min_free_mib: int = DEFAULT_MIN_FREE_MIB,
     fallback: str = "0",
     env_var: Optional[str] = None,
+    strict: bool = False,
 ) -> str:
     """
     Return the ID of the GPU with the most free memory.
@@ -97,15 +98,24 @@ def allocate_gpu(
     try:
         gpus = _query_gpu_free_memory()
     except RuntimeError as e:
+        if strict:
+            raise
         logger.warning(f"GPU query failed: {e}. Falling back to GPU {fallback!r}.")
         return fallback
 
     if not gpus:
+        if strict:
+            raise RuntimeError("No GPUs found.")
         logger.warning(f"No GPUs found. Falling back to GPU {fallback!r}.")
         return fallback
 
     eligible = [g for g in gpus if g["free_mib"] >= min_free_mib]
     if not eligible:
+        if strict:
+            raise RuntimeError(
+                f"No GPU has >= {min_free_mib} MiB free. "
+                f"Best: GPU {gpus[0]['id']} with {gpus[0]['free_mib']} MiB free."
+            )
         logger.warning(
             f"No GPU meets min_free_mib={min_free_mib} MiB. "
             f"Best: GPU {gpus[0]['id']} with {gpus[0]['free_mib']} MiB free. "
@@ -125,6 +135,7 @@ def allocate_gpus(
     min_free_mib: int = DEFAULT_MIN_FREE_MIB,
     fallback: str = "0,1",
     env_var: Optional[str] = None,
+    strict: bool = False,
 ) -> str:
     """
     Return comma-separated IDs of the `count` GPUs with the most free memory.
@@ -147,12 +158,20 @@ def allocate_gpus(
     try:
         gpus = _query_gpu_free_memory()
     except RuntimeError as e:
+        if strict:
+            raise
         logger.warning(f"GPU query failed: {e}. Falling back to GPUs {fallback!r}.")
         return fallback
 
     eligible = [g for g in gpus if g["free_mib"] >= min_free_mib]
 
     if len(eligible) < count:
+        if strict:
+            best = gpus[0]["free_mib"] if gpus else "none"
+            raise RuntimeError(
+                f"Not enough GPUs with >= {min_free_mib} MiB free "
+                f"(need {count}, eligible {len(eligible)} / {len(gpus)} total, best={best})."
+            )
         logger.warning(
             f"Not enough GPUs with >= {min_free_mib} MiB free "
             f"(need {count}, eligible {len(eligible)} / {len(gpus)} total). "

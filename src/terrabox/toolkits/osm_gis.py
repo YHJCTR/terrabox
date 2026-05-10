@@ -1,23 +1,33 @@
 """
 OSM GIS Toolkit
 ---------------
-Geographic data acquisition from OpenStreetMap (OSM) and raster utilities.
-Inspired by OpenEarthAgent's GIS tools (GetAreaBoundary, AddPoisLayer, ComputeDistance).
+Geographic data acquisition from OpenStreetMap (OSM) using GeoPackage as the
+shared data container between tools — aligned with OpenEarthAgent's architecture.
 
-Key features:
-1. Fetch geographic boundaries from place names or bounding boxes.
-2. Query Points of Interest (POIs) from OSM.
-3. Compute road-network distances and estimated travel times.
-4. Extract bounding box info from GeoTIFF files.
+Data flow:
+  1. GetAreaBoundary creates a .gpkg file with an "area_boundary" layer.
+  2. AddPoisLayer reads the boundary from the gpkg and appends a new POI layer.
+  3. ComputeRouteDistance reads two POI layers from the gpkg and computes
+     pairwise road-network distances, appending a distances line layer.
+  4. GetBboxFromRaster extracts metadata from a GeoTIFF (standalone).
+
+The agent orchestrator auto-injects the current gpkg path into downstream tools
+so the LLM only needs to pass a placeholder reference.
 """
 
 import json
 import os
 import logging
+import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional
+
 from ..core.registry import ToolSpec
 
 logger = logging.getLogger(__name__)
+
+CRS = "EPSG:4326"
+DEFAULT_ROUTE_DIST_MAX_PAIRS = int(os.environ.get("TERRABOX_ROUTE_DIST_MAX_PAIRS", "5000"))
 
 
 # ------------------------------------------------------------------------------
@@ -42,67 +52,279 @@ def _lazy_rasterio():
         raise ImportError("Missing rasterio. Install: pip install rasterio")
 
 
+def _lazy_gpd():
+    try:
+        import geopandas as gpd
+        return gpd
+    except ImportError:
+        raise ImportError("Missing geopandas. Install: pip install geopandas")
+
+
+def _is_valid_bbox(bbox):
+    """Validate bbox = (west, south, east, north)."""
+    if not isinstance(bbox, (tuple, list)) or len(bbox) != 4:
+        return False
+    try:
+        west, south, east, north = [float(v) for v in bbox]
+    except (ValueError, TypeError):
+        return False
+    return (-180 <= west <= 180 and -180 <= east <= 180
+            and -90 <= south <= 90 and -90 <= north <= 90
+            and west < east and south < north)
+
+
+def _get_save_dir() -> str:
+    """Return (and create) a directory for gpkg outputs."""
+    save_dir = os.environ.get("TERRABOX_GPKG_OUTPUT_DIR") or os.path.join(os.getcwd(), "tmp", "gpkg_output")
+    os.makedirs(save_dir, exist_ok=True)
+    return save_dir
+
+
+def _deadline_exceeded(context: Any) -> bool:
+    if not isinstance(context, dict):
+        return False
+    deadline = context.get("deadline")
+    if not deadline:
+        return False
+    try:
+        return datetime.now().timestamp() > float(deadline)
+    except Exception:
+        return False
+
+
+def _tool_timeout_result(tool: str, context: Any, message: str) -> Dict[str, Any]:
+    timeout = context.get("timeout") if isinstance(context, dict) else None
+    return {
+        "status": "error",
+        "error_type": "tool_timeout",
+        "tool": tool,
+        "timeout_seconds": timeout,
+        "message": message,
+        "recovery_suggestions": [
+            "Retry with a smaller area of interest.",
+            "Reduce top/limit if the tool supports it.",
+            "Filter source or target layers before retrying.",
+            "Do not repeat the same arguments that timed out.",
+        ],
+    }
+
+
+def _is_placeholder_path(path: str) -> bool:
+    lowered = path.lower()
+    return (
+        lowered.startswith("/path/")
+        or lowered.startswith("path/")
+        or "path_to_" in lowered
+        or "/path/to/" in lowered
+        or "<" in path
+        or ">" in path
+    )
+
+
+def _get_name_from_row(row):
+    """Return best display name for an OSM feature row."""
+    import pandas as pd
+    fields = row.index
+    for key in ("name:en", "name"):
+        if key in fields:
+            val = row.get(key, "")
+            if pd.notna(val) and str(val).strip():
+                return str(val)
+    for key in fields:
+        if key.startswith("name"):
+            val = row.get(key, "")
+            if pd.notna(val) and str(val).strip():
+                return str(val)
+    return ""
+
+
+def _clean_for_gpkg(gdf):
+    """Sanitize column names for GeoPackage driver compatibility."""
+    gdf = gdf.copy()
+    gdf.columns = gdf.columns.str.lower().str[:30]
+    gdf = gdf.loc[:, ~gdf.columns.duplicated()]
+    return gdf
+
+
 # ------------------------------------------------------------------------------
 # Handlers
 # ------------------------------------------------------------------------------
 
 def get_area_boundary_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """
-    Fetch the geographic boundary of a place from OpenStreetMap by place name
-    or a bounding box. Returns GeoJSON FeatureCollection.
+    Create a GeoPackage with the boundary of a place saved as 'area_boundary' layer.
+    Returns a short summary and the gpkg path — no large GeoJSON in the response.
     """
     ox = _lazy_osmnx()
+    gpd = _lazy_gpd()
+    from shapely.geometry import box as shapely_box
 
-    place_name = arguments.get("place_name")
-    bbox = arguments.get("bbox")  # [west, south, east, north]
+    # Accept both "area" (OpenEarthAgent compat) and "place_name" (legacy)
+    area = arguments.get("area") or arguments.get("place_name")
+    bbox = arguments.get("bbox")
+    buffer_m = arguments.get("buffer_m")
     output_path = arguments.get("output_path")
+    if isinstance(output_path, str) and _is_placeholder_path(output_path):
+        output_path = None
 
-    if place_name:
+    # Parse bbox from string if needed (e.g. "(1.2, 3.4, 5.6, 7.8)")
+    if isinstance(area, str) and not bbox:
+        bbox_pattern = r"^[\(\[]\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+)\s*[\)\]]$"
+        match = re.match(bbox_pattern, area.strip())
+        if match:
+            try:
+                bbox = tuple(float(v) for v in match.groups())
+                area = None
+            except ValueError:
+                pass
+
+    if area and isinstance(area, str):
         try:
-            gdf = ox.geocode_to_gdf(place_name)
+            gdf = ox.geocode_to_gdf(area).to_crs(CRS)
         except Exception as e:
-            return {"status": "error", "message": f"Failed to geocode '{place_name}': {e}"}
+            return {"status": "error", "message": f"Failed to geocode '{area}': {e}"}
+        geom = gdf.geometry.union_all()
+        name = area
+    elif bbox and _is_valid_bbox(bbox):
+        west, south, east, north = [float(v) for v in bbox]
+        geom = shapely_box(west, south, east, north)
+        name = f"bbox({west},{south},{east},{north})"
     elif bbox:
-        try:
-            import geopandas as gpd
-            from shapely.geometry import box as shapely_box
-            west, south, east, north = [float(v) for v in bbox]
-            geom = shapely_box(west, south, east, north)
-            gdf = gpd.GeoDataFrame({"geometry": [geom]}, crs="EPSG:4326")
-        except Exception as e:
-            return {"status": "error", "message": f"Failed to create bbox geometry: {e}"}
+        return {"status": "error", "message": f"Invalid bbox: {bbox}"}
     else:
-        raise ValueError("Provide either 'place_name' or 'bbox'")
+        return {"status": "error", "message": "Provide either 'area' (place name) or 'bbox'."}
 
-    geojson = json.loads(gdf.to_crs("EPSG:4326").to_json())
+    # Apply buffer if requested
+    if buffer_m and float(buffer_m) > 0:
+        buffer_m = float(buffer_m)
+        gseries = gpd.GeoSeries([geom], crs=CRS).to_crs("EPSG:3857")
+        geom = gseries.buffer(buffer_m).to_crs(CRS).iloc[0]
+        name = f"{name}_buffer{int(buffer_m)}m"
 
-    if output_path:
+    gdf_out = gpd.GeoDataFrame(
+        {"name": [name], "created_at": [datetime.now().isoformat()], "year": [datetime.now().year]},
+        geometry=[geom], crs=CRS,
+    )
+
+    # Determine save path
+    if not output_path:
+        gpkg_name = f"aoi_{datetime.now():%Y%m%d_%H%M%S}.gpkg"
+        output_path = os.path.join(_get_save_dir(), gpkg_name)
+    else:
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-        with open(output_path, "w") as f:
-            json.dump(geojson, f)
-        return {"status": "success", "output_path": output_path, "feature_count": len(geojson.get("features", []))}
+
+    try:
+        gdf_out.to_file(output_path, layer="area_boundary", driver="GPKG")
+    except Exception as e:
+        return {"status": "error", "message": f"Error saving GeoPackage: {e}"}
+
+    gpkg_basename = os.path.basename(output_path)
+    bounds = gdf_out.total_bounds.tolist()  # [minx, miny, maxx, maxy]
 
     return {
         "status": "success",
-        "geojson": geojson,
-        "feature_count": len(geojson.get("features", [])),
+        "text": f"Saved boundary to {gpkg_basename}",
+        "gpkg": output_path,
+        "feature_count": 1,
+        "bbox": bounds,
     }
 
 
 def add_pois_layer_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """
-    Query Points of Interest (POI) from OpenStreetMap within a place or bounding box.
-    Returns GeoJSON FeatureCollection of matching POIs.
-
-    Common amenity tags: school, hospital, restaurant, bank, fuel, pharmacy, hotel, etc.
-    Common tags for building types: residential, commercial, industrial.
+    Add POIs from OSM into an existing GeoPackage, clipped to the area_boundary.
+    The gpkg path is auto-injected by the orchestrator.
     """
     ox = _lazy_osmnx()
+    gpd = _lazy_gpd()
+    import pandas as pd
 
+    gpkg = arguments.get("gpkg")
+    query = arguments.get("query") or arguments.get("tags", {"amenity": True})
+    layer_name = arguments.get("layer_name", "pois")
+
+    # Legacy compat: if no gpkg but place_name given, fall back
+    if not gpkg:
+        place_name = arguments.get("place_name")
+        if place_name:
+            return _add_pois_legacy(arguments, context, account)
+        return {"status": "error", "message": "Missing 'gpkg' parameter. Run get_area_boundary first."}
+
+    if not os.path.exists(gpkg):
+        return {"status": "error", "message": f"GeoPackage not found: {gpkg}"}
+
+    # Read boundary
+    try:
+        area_gdf = gpd.read_file(gpkg, layer="area_boundary")
+        geom = area_gdf.geometry.iloc[0]
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to read area_boundary from gpkg: {e}"}
+
+    # Parse query
+    if isinstance(query, str):
+        try:
+            query = json.loads(query)
+        except Exception:
+            # Treat as POI name
+            try:
+                pois = ox.geocode_to_gdf(query).to_crs(CRS)
+                pois = pois[pois.geometry.within(geom)]
+                if pois.empty:
+                    return {"status": "error", "message": f"POI '{query}' not found inside study area."}
+            except Exception as e:
+                return {"status": "error", "message": f"OSM query failed: {e}"}
+            pois["display_name"] = pois.apply(_get_name_from_row, axis=1)
+            pois = pois[pois["display_name"] != ""]
+            pois = pois.drop_duplicates(subset="display_name", keep="first")
+            pois = _clean_for_gpkg(pois)
+            pois.to_file(gpkg, layer=layer_name, driver="GPKG")
+            gpkg_basename = os.path.basename(gpkg)
+            return {
+                "status": "success",
+                "text": f"Saved {len(pois)} POIs to layer '{layer_name}' in {gpkg_basename}",
+                "gpkg": gpkg,
+                "poi_count": len(pois),
+            }
+
+    if not isinstance(query, dict):
+        return {"status": "error", "message": f"query must be dict or str, got {type(query).__name__}"}
+
+    try:
+        pois = ox.features_from_polygon(geom, query).to_crs(CRS)
+    except Exception as e:
+        err_msg = str(e)
+        if "No matching" in err_msg or "No data" in err_msg:
+            return {"status": "error", "message": f"OSM query failed: No matching features. Check query location, tags, and log."}
+        return {"status": "error", "message": f"OSM query failed: {e}"}
+
+    if pois.empty:
+        return {"status": "error", "message": f"No POIs found for {query} inside boundary."}
+
+    # Extract display names and deduplicate
+    pois["display_name"] = pois.apply(_get_name_from_row, axis=1)
+    pois = pois[pois["display_name"] != ""]
+    pois = pois.drop_duplicates(subset="display_name", keep="first")
+
+    if pois.empty:
+        return {"status": "error", "message": f"No named POIs found for {query} inside boundary."}
+
+    pois = _clean_for_gpkg(pois)
+    pois.to_file(gpkg, layer=layer_name, driver="GPKG")
+
+    gpkg_basename = os.path.basename(gpkg)
+    return {
+        "status": "success",
+        "text": f"Saved {len(pois)} POIs to layer '{layer_name}' in {gpkg_basename}",
+        "gpkg": gpkg,
+        "poi_count": len(pois),
+    }
+
+
+def _add_pois_legacy(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Legacy fallback: query POIs by place_name without gpkg."""
+    ox = _lazy_osmnx()
     place_name = arguments.get("place_name")
-    bbox = arguments.get("bbox")  # [west, south, east, north]
     tags = arguments.get("tags", {"amenity": True})
-    output_path = arguments.get("output_path")
     max_results = int(arguments.get("max_results", 500))
 
     if isinstance(tags, str):
@@ -112,65 +334,243 @@ def add_pois_layer_handler(arguments: Dict[str, Any], context: Any, account: Any
             tags = {"amenity": tags}
 
     try:
-        if place_name:
-            gdf = ox.features_from_place(place_name, tags=tags)
-        elif bbox:
-            west, south, east, north = [float(v) for v in bbox]
-            gdf = ox.features_from_bbox(bbox=(north, south, east, west), tags=tags)
-        else:
-            raise ValueError("Provide either 'place_name' or 'bbox'")
+        gdf = ox.features_from_place(place_name, tags=tags)
     except Exception as e:
         return {"status": "error", "message": f"OSM query failed: {e}"}
 
     if len(gdf) > max_results:
         gdf = gdf.head(max_results)
 
-    # Keep only Point geometries for cleaner output
     points_gdf = gdf[gdf.geometry.geom_type == "Point"].copy() if len(gdf) > 0 else gdf
-    geojson = json.loads(points_gdf.to_crs("EPSG:4326")[["geometry", "name"] if "name" in points_gdf.columns else ["geometry"]].to_json())
+    poi_count = len(points_gdf)
 
-    if output_path:
-        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-        with open(output_path, "w") as f:
-            json.dump(geojson, f)
-        return {"status": "success", "output_path": output_path, "poi_count": len(points_gdf)}
+    # Save to temp gpkg instead of returning inline GeoJSON
+    save_dir = _get_save_dir()
+    gpkg_path = os.path.join(save_dir, f"pois_{datetime.now():%Y%m%d_%H%M%S}.gpkg")
+    if poi_count > 0:
+        _clean_for_gpkg(points_gdf.to_crs(CRS)).to_file(gpkg_path, layer="pois", driver="GPKG")
 
     return {
         "status": "success",
-        "geojson": geojson,
-        "poi_count": len(points_gdf),
-        "total_features": len(gdf),
+        "text": f"Found {poi_count} POIs for '{place_name}'",
+        "poi_count": poi_count,
+        "gpkg": gpkg_path if poi_count > 0 else None,
     }
 
 
 def compute_route_dist_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """
-    Compute road-network distance and estimated travel time between two geographic points.
-    Uses OpenStreetMap road network via osmnx + networkx.
+    Compute pairwise road-network distances between features of two layers
+    in a GeoPackage. Saves results as a new line layer. Returns text summary.
 
-    Returns shortest path distance in meters and estimated travel time in minutes.
+    If gpkg/src_layer/tar_layer are given → gpkg-based mode (OpenEarthAgent compat).
+    If origin/destination are given → legacy point-to-point mode.
     """
+    gpkg = arguments.get("gpkg")
+    src_layer = arguments.get("src_layer")
+    tar_layer = arguments.get("tar_layer")
+
+    if gpkg and src_layer and tar_layer:
+        return _compute_dist_gpkg(arguments, context, account)
+    else:
+        return _compute_dist_legacy(arguments, context, account)
+
+
+def _compute_dist_gpkg(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Compute pairwise distances between two layers in a GeoPackage."""
+    ox = _lazy_osmnx()
+    gpd = _lazy_gpd()
+    import networkx as nx
+    from shapely.geometry import LineString, Point
+
+    gpkg = arguments["gpkg"]
+    src_layer = arguments["src_layer"]
+    tar_layer = arguments["tar_layer"]
+    top = arguments.get("top")
+    if top is not None:
+        top = int(top)
+        if top <= 0:
+            return {"status": "error", "message": "top must be a positive integer."}
+
+    if not os.path.exists(gpkg):
+        return {"status": "error", "message": f"GeoPackage not found: {gpkg}"}
+
+    try:
+        src_gdf = gpd.read_file(gpkg, layer=src_layer).to_crs(CRS)
+        tar_gdf = gpd.read_file(gpkg, layer=tar_layer).to_crs(CRS)
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to read layers: {e}"}
+
+    if src_gdf.empty or tar_gdf.empty:
+        return {"status": "error", "message": f"One or both layers are empty: {src_layer}={len(src_gdf)}, {tar_layer}={len(tar_gdf)}"}
+
+    per_source_targets = min(len(tar_gdf), top) if top is not None else len(tar_gdf)
+    estimated_pairs = len(src_gdf) * per_source_targets
+    max_pairs = int(
+        arguments.get("max_pairs")
+        or (context.get("max_pairs") if isinstance(context, dict) else 0)
+        or DEFAULT_ROUTE_DIST_MAX_PAIRS
+    )
+    if estimated_pairs > max_pairs:
+        return {
+            "status": "error",
+            "error_type": "tool_cost_guard",
+            "tool": "osm_gis.compute_route_dist",
+            "message": (
+                f"Route distance call is too large: estimated {estimated_pairs} pairwise computations "
+                f"({src_layer}={len(src_gdf)}, {tar_layer}={len(tar_gdf)}, top={top or 'all'}), "
+                f"limit={max_pairs}."
+            ),
+            "estimated_pairs": estimated_pairs,
+            "src_count": len(src_gdf),
+            "tar_count": len(tar_gdf),
+            "top": top,
+            "max_pairs": max_pairs,
+            "recovery_suggestions": [
+                "Retry with a smaller top value.",
+                "Use a smaller area boundary around the actual landmark or target place.",
+                "Filter one or both POI layers before computing route distances.",
+                "If exact road distance is not required, use a cheaper direct/geodesic calculation.",
+            ],
+        }
+
+    if _deadline_exceeded(context):
+        return _tool_timeout_result(
+            "osm_gis.compute_route_dist",
+            context,
+            "Timed out before route distance computation started.",
+        )
+
+    # Get display names
+    name_col_src = "display_name" if "display_name" in src_gdf.columns else ("name" if "name" in src_gdf.columns else None)
+    name_col_tar = "display_name" if "display_name" in tar_gdf.columns else ("name" if "name" in tar_gdf.columns else None)
+
+    # Build road network from boundary
+    use_network = True
+    try:
+        boundary_gdf = gpd.read_file(gpkg, layer="area_boundary")
+        boundary = boundary_gdf.geometry.iloc[0]
+        network = ox.graph_from_polygon(boundary, network_type="drive", simplify=True)
+        network = ox.project_graph(network)
+        network = ox.add_edge_speeds(network, fallback=40)
+        for u, v, k, data in network.edges(keys=True, data=True):
+            if "speed_kph" not in data or data["speed_kph"] is None:
+                data["speed_kph"] = 40
+        network = ox.add_edge_travel_times(network)
+    except Exception as e:
+        logger.warning(f"Failed to build road network, falling back to geodesic: {e}")
+        use_network = False
+
+    results = []
+    for _, f1 in src_gdf.iterrows():
+        if _deadline_exceeded(context):
+            return _tool_timeout_result(
+                "osm_gis.compute_route_dist",
+                context,
+                f"Timed out while computing route distances; partial source rows processed: {len(results)} result pairs.",
+            )
+        name1 = f1[name_col_src] if name_col_src and name_col_src in f1.index else f"src_{_}"
+        if not str(name1).strip():
+            continue
+        pt1 = f1.geometry.centroid
+
+        row_results = []
+        for _, f2 in tar_gdf.iterrows():
+            if _deadline_exceeded(context):
+                return _tool_timeout_result(
+                    "osm_gis.compute_route_dist",
+                    context,
+                    f"Timed out while computing route distances; partial source rows processed: {len(results)} result pairs.",
+                )
+            name2 = f2[name_col_tar] if name_col_tar and name_col_tar in f2.index else f"tar_{_}"
+            if not str(name2).strip():
+                continue
+            pt2 = f2.geometry.centroid
+
+            dist = None
+            travel_time = None
+            geom_line = LineString([pt1, pt2])
+
+            if use_network:
+                try:
+                    graph_crs = network.graph["crs"]
+                    pt1_proj = gpd.GeoSeries([pt1], crs=CRS).to_crs(graph_crs).iloc[0]
+                    pt2_proj = gpd.GeoSeries([pt2], crs=CRS).to_crs(graph_crs).iloc[0]
+                    orig_node = ox.distance.nearest_nodes(network, pt1_proj.x, pt1_proj.y)
+                    dest_node = ox.distance.nearest_nodes(network, pt2_proj.x, pt2_proj.y)
+                    dist = nx.shortest_path_length(network, orig_node, dest_node, weight="length")
+                    travel_time = nx.shortest_path_length(network, orig_node, dest_node, weight="travel_time")
+                except Exception:
+                    dist = None
+
+            # Fallback to geodesic distance
+            if dist is None:
+                from pyproj import Geod
+                geod = Geod(ellps="WGS84")
+                _, _, dist = geod.inv(pt1.x, pt1.y, pt2.x, pt2.y)
+
+            row_results.append({
+                src_layer: str(name1),
+                tar_layer: str(name2),
+                "distance_m": round(dist, 2),
+                "travel_time_s": round(travel_time, 1) if travel_time else None,
+                "geometry": geom_line,
+            })
+
+        row_results.sort(key=lambda r: r["distance_m"])
+        if top is not None:
+            results.extend(row_results[:top])
+        else:
+            results.extend(row_results)
+
+    if not results:
+        return {"status": "error", "message": "No valid feature pairs found between the two layers."}
+
+    # Save distances as line layer
+    dist_layer_name = f"{src_layer}_to_{tar_layer}_distances"
+    dist_gdf = gpd.GeoDataFrame(results, geometry="geometry", crs=CRS)
+    dist_gdf.to_file(gpkg, layer=dist_layer_name, driver="GPKG")
+
+    # Build text summary
+    out_lines = [f"Distances (in meters) saved to line layer: '{dist_layer_name}': "]
+    distances = []
+    for r in results:
+        txt = f"{r[src_layer]} , {r[tar_layer]}, distance={r['distance_m']:.2f} m"
+        if r.get("travel_time_s"):
+            txt += f", travel_time={r['travel_time_s']:.1f} s"
+        out_lines.append(txt)
+        distances.append(r["distance_m"])
+    out_lines.append(f"distances = {distances}")
+
+    return {
+        "status": "success",
+        "text": "\n".join(out_lines),
+        "gpkg": gpkg,
+        "pair_count": len(results),
+    }
+
+
+def _compute_dist_legacy(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Legacy: point-to-point route distance."""
     ox = _lazy_osmnx()
 
-    origin = arguments.get("origin")       # [lon, lat]
-    destination = arguments.get("destination")  # [lon, lat]
-    travel_mode = arguments.get("travel_mode", "drive")  # drive / walk / bike
+    origin = arguments.get("origin")
+    destination = arguments.get("destination")
+    travel_mode = arguments.get("travel_mode", "drive")
 
     if not origin or not destination:
-        raise ValueError("Provide 'origin' and 'destination' as [lon, lat] pairs")
+        return {"status": "error", "message": "Provide 'origin' and 'destination' as [lon, lat] pairs"}
 
     orig_lon, orig_lat = float(origin[0]), float(origin[1])
     dest_lon, dest_lat = float(destination[0]), float(destination[1])
 
-    # Download local graph around the route
     center_lat = (orig_lat + dest_lat) / 2
     center_lon = (orig_lon + dest_lon) / 2
-    # Estimate needed radius (rough haversine)
     import math
     dlat = abs(orig_lat - dest_lat)
     dlon = abs(orig_lon - dest_lon)
     dist_deg = math.sqrt(dlat**2 + dlon**2)
-    radius_m = max(int(dist_deg * 111320 * 1.5), 2000)  # at least 2km, 1.5x buffer
+    radius_m = max(int(dist_deg * 111320 * 1.5), 2000)
 
     try:
         G = ox.graph_from_point((center_lat, center_lon), dist=radius_m, network_type=travel_mode)
@@ -180,19 +580,17 @@ def compute_route_dist_handler(arguments: Dict[str, Any], context: Any, account:
         import networkx as nx
         path_length = nx.shortest_path_length(G, orig_node, dest_node, weight="length")
 
-        # Estimate travel time: drive=50km/h, walk=5km/h, bike=15km/h
         speeds = {"drive": 50_000 / 60, "walk": 5_000 / 60, "bike": 15_000 / 60}
         speed = speeds.get(travel_mode, 50_000 / 60)
         travel_time_min = path_length / speed
 
         return {
             "status": "success",
+            "text": f"Distance: {path_length:.1f} m ({path_length/1000:.3f} km), travel time: {travel_time_min:.1f} min ({travel_mode})",
             "distance_m": round(path_length, 1),
             "distance_km": round(path_length / 1000, 3),
             "travel_time_minutes": round(travel_time_min, 1),
             "travel_mode": travel_mode,
-            "origin": [orig_lon, orig_lat],
-            "destination": [dest_lon, dest_lat],
         }
     except Exception as e:
         return {"status": "error", "message": f"Route computation failed: {e}"}
@@ -215,7 +613,7 @@ def get_bbox_from_raster_handler(arguments: Dict[str, Any], context: Any, accoun
         width, height = src.width, src.height
         count = src.count
         dtype = str(src.dtypes[0])
-        res = src.res  # (x_res, y_res) in CRS units
+        res = src.res
 
     return {
         "status": "success",
@@ -243,113 +641,122 @@ def setup(registrar):
     """Register all OSM GIS tools."""
     registrar.toolkit(
         name="osm_gis",
-        description="Geospatial data acquisition from OpenStreetMap: area boundaries, POI layers, road-network distances, and raster metadata extraction.",
-        version="1.0.0"
+        description=(
+            "Geospatial data acquisition from OpenStreetMap: area boundaries (saved as GeoPackage), "
+            "POI layer queries (fire stations, hospitals, schools, etc.), "
+            "pairwise road-network distance computation between POI layers, "
+            "and raster metadata extraction."
+        ),
+        version="2.0.0"
     )
 
-    # 1. Get area boundary
+    # 1. Get area boundary → creates GeoPackage
     registrar.tool(
         ToolSpec(
             slug="osm_gis.get_area_boundary",
             name="Get Area Boundary",
-            description="Fetch the geographic boundary of a place from OpenStreetMap by place name or bounding box. Returns GeoJSON polygon.",
+            description=(
+                "Fetch the geographic boundary of a place from OpenStreetMap and save as a GeoPackage. "
+                "Returns a gpkg file path (not raw GeoJSON). Downstream tools (add_pois_layer, "
+                "compute_route_dist) use this gpkg automatically."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "place_name": {
+                    "area": {
                         "type": "string",
-                        "description": "Place name to geocode and fetch boundary for (e.g., 'Beijing, China', 'Central Park, New York')."
+                        "description": "Place name (e.g., 'Banff National Park, Alberta, Canada') or bbox as string '(west,south,east,north)'."
                     },
-                    "bbox": {
-                        "type": "array",
-                        "items": {"type": "number"},
-                        "description": "Bounding box as [west, south, east, north] in WGS84 degrees. Used if place_name is not provided."
+                    "buffer_m": {
+                        "type": "number",
+                        "description": "Optional buffer distance in meters around the boundary."
                     },
                     "output_path": {
                         "type": "string",
-                        "description": "Optional path to save the result as a GeoJSON file."
-                    }
+                        "description": "Optional: explicit output path for the GeoPackage file."
+                    },
                 },
-                "required": []
+                "required": ["area"]
             },
             requires_connection=False
         ),
         get_area_boundary_handler,
     )
 
-    # 2. Add POIs layer
+    # 2. Add POIs layer → appends layer to existing GeoPackage
     registrar.tool(
         ToolSpec(
             slug="osm_gis.add_pois_layer",
             name="Add POIs Layer",
-            description="Query Points of Interest (POIs) from OpenStreetMap within a place or bounding box. Supports amenities like schools, hospitals, restaurants, banks, etc.",
+            description=(
+                "Query Points of Interest (POIs) from OpenStreetMap within the area boundary "
+                "stored in a GeoPackage. Appends results as a new named layer. "
+                "This tool can be called repeatedly with different queries to create multiple "
+                "entity layers before downstream comparison. Common queries: "
+                "{\"amenity\": \"restaurant\"}, {\"leisure\": \"park\"}, "
+                "{\"amenity\": \"fire_station\"}, {\"amenity\": \"police\"}, "
+                "{\"amenity\": \"hospital\"}, {\"amenity\": \"school\"}."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "place_name": {
+                    "gpkg": {
                         "type": "string",
-                        "description": "Place name to search POIs within (e.g., 'Nanjing, China')."
+                        "description": "Path to the GeoPackage (auto-injected from get_area_boundary)."
                     },
-                    "bbox": {
-                        "type": "array",
-                        "items": {"type": "number"},
-                        "description": "Bounding box [west, south, east, north] in WGS84. Used if place_name is not provided."
+                    "query": {
+                        "description": "OSM tags as dict (e.g. {\"amenity\": \"fire_station\"}) or POI name as string."
                     },
-                    "tags": {
-                        "description": "OSM tags to filter POIs. Can be a dict like {\"amenity\": \"school\"} or {\"amenity\": true} for all amenities. Defaults to all amenities.",
-                        "default": {"amenity": True}
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "default": 500,
-                        "description": "Maximum number of POIs to return."
-                    },
-                    "output_path": {
+                    "layer_name": {
                         "type": "string",
-                        "description": "Optional path to save the result as a GeoJSON file."
-                    }
+                        "description": "Layer name for saving POIs in the GeoPackage (e.g. 'fire_stations')."
+                    },
                 },
-                "required": []
+                "required": ["gpkg", "query", "layer_name"]
             },
             requires_connection=False
         ),
         add_pois_layer_handler,
     )
 
-    # 3. Compute route distance
+    # 3. Compute route distance → reads two layers, computes distances
     registrar.tool(
         ToolSpec(
             slug="osm_gis.compute_route_dist",
             name="Compute Road Network Distance",
-            description="Compute shortest road-network distance (meters) and estimated travel time (minutes) between two geographic points using OpenStreetMap.",
+            description=(
+                "Compute pairwise road-network distances between features of two POI layers "
+                "in a GeoPackage. Saves distance line layer back to the gpkg. "
+                "Use 'top' parameter to keep only k nearest per source feature."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "origin": {
-                        "type": "array",
-                        "items": {"type": "number"},
-                        "description": "Origin point as [longitude, latitude] in WGS84."
-                    },
-                    "destination": {
-                        "type": "array",
-                        "items": {"type": "number"},
-                        "description": "Destination point as [longitude, latitude] in WGS84."
-                    },
-                    "travel_mode": {
+                    "gpkg": {
                         "type": "string",
-                        "enum": ["drive", "walk", "bike"],
-                        "default": "drive",
-                        "description": "Transportation mode: 'drive' (50km/h), 'walk' (5km/h), or 'bike' (15km/h)."
-                    }
+                        "description": "Path to the GeoPackage."
+                    },
+                    "src_layer": {
+                        "type": "string",
+                        "description": "Source POI layer name in the GeoPackage."
+                    },
+                    "tar_layer": {
+                        "type": "string",
+                        "description": "Target POI layer name in the GeoPackage."
+                    },
+                    "top": {
+                        "type": "integer",
+                        "description": "Optional: keep k nearest targets per source (default=all)."
+                    },
                 },
-                "required": ["origin", "destination"]
+                "required": ["gpkg", "src_layer", "tar_layer"]
             },
             requires_connection=False
         ),
         compute_route_dist_handler,
     )
 
-    # 4. Get bbox from raster
+    # 4. Get bbox from raster (standalone, unchanged)
     registrar.tool(
         ToolSpec(
             slug="osm_gis.get_bbox_from_raster",

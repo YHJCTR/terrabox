@@ -58,7 +58,7 @@ def start_run(session_id: str | None, user_message: str, image_paths: list[str],
         config=config,
     )
     _CTX.set(ctx)
-    emit_event("run_start", run_id=run.id, session_id=session_id, mode=config.agent_mode)
+    emit_event("run_start", session_id=session_id, mode=config.agent_mode)
     return ctx
 
 

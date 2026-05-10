@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import yaml
 
+from .modes import list_agent_modes
+
 
 @dataclass
 class AgentConfig:
@@ -37,12 +39,14 @@ class AgentConfig:
     # Agent behavior
     max_iterations: int = 15
 
-    # Tool loading strategy: "standard" | "progressive" | "category_scoped"
+    # Tool loading strategy: "standard" | "progressive" | "category_scoped" | "artifact_progressive"
     #   standard        — load all tools at once (full ReAct)
     #   progressive     — 3-level discovery, single-tool execution with retry
     #   category_scoped — LLM picks categories first, then full ReAct on subset
+    #   artifact_progressive — disclose tools from runtime artifacts and tool IO contracts
     agent_mode: str = "standard"
     max_retries_on_error: int = 3       # retries for progressive mode
+    max_progressive_steps: int = 10     # max discovery→execute cycles for progressive mode
     max_category_expansions: int = 2    # max expansion rounds for category_scoped mode
 
     # Harness runtime guards
@@ -79,9 +83,6 @@ class AgentConfig:
     enable_agent_rate_limit: bool = False
 
 
-_VALID_AGENT_MODES = {"standard", "progressive", "category_scoped"}
-
-
 def load_config() -> AgentConfig:
     """Load AgentConfig from agent_config.yaml (project root) or return defaults."""
     import logging as _logging
@@ -100,10 +101,11 @@ def load_config() -> AgentConfig:
     if config.circuit_breaker_overrides is None:
         config.circuit_breaker_overrides = {}
 
-    if config.agent_mode not in _VALID_AGENT_MODES:
+    valid_modes = list_agent_modes()
+    if config.agent_mode not in valid_modes:
         raise ValueError(
             f"Invalid agent_mode {config.agent_mode!r}. "
-            f"Must be one of: {sorted(_VALID_AGENT_MODES)}"
+            f"Must be one of: {list(valid_modes)}"
         )
     if config.max_iterations <= 0:
         raise ValueError(f"max_iterations must be > 0, got {config.max_iterations}")
