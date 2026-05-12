@@ -10,9 +10,10 @@ from typing import AsyncIterator
 from langchain_core.messages import SystemMessage
 from sqlalchemy.orm import Session
 
-from ..events import to_sse
+from ..events import drain_events_as_sse, to_sse
 from ..harness import drain_events, emit_event, fail_run, finish_run, record_step
 from ..llm import get_llm
+from ..prompt_blocks import PromptBlock, PromptRenderer
 from ..session import (
     _REACT_SYSTEM_PROMPT,
     ThinkParser,
@@ -22,7 +23,9 @@ from ..session import (
     log_session_start,
     prepare_history,
 )
+from ..tool_contracts import ToolContractValidator
 from ..tools import build_langchain_tools
+from ..trace_config import build_langchain_config
 from .runtime import emit_failure_sse, ensure_run_context, finalize_stream_result
 
 logger = logging.getLogger(__name__)
@@ -66,7 +69,7 @@ def _classify_intent(user_message: str, has_tools: bool = True, has_kbs: bool = 
         return IntentType.TOOL_CALL
 
 
-def _record_decision_step(intent, rewritten: str, has_tools: bool, has_kbs: bool) -> None:
+def _record_decision_step(intent, rewritten: str, has_tools: bool, has_kbs: bool, prompt_blocks=None) -> None:
     from ..harness import current_context
 
     current = current_context()
@@ -82,6 +85,7 @@ def _record_decision_step(intent, rewritten: str, has_tools: bool, has_kbs: bool
             "has_tools": has_tools,
             "has_kbs": has_kbs,
             "rewritten_query": rewritten,
+            "prompt_blocks": PromptRenderer.describe(prompt_blocks or []),
         },
         output_data={"rewritten_query": rewritten},
     )
@@ -95,21 +99,48 @@ def _record_decision_step(intent, rewritten: str, has_tools: bool, has_kbs: bool
     )
 
 
-def _prepare_standard_prompt(history: list, user_message: str, user, db, llm, tools: list):
+def _build_standard_prompt_blocks(rag_context: str = "") -> list[PromptBlock]:
+    blocks = [
+        PromptBlock(
+            name="react_system",
+            content=_REACT_SYSTEM_PROMPT,
+            source="standard",
+            cache_policy="static",
+            version="v1",
+        )
+    ]
+    if rag_context:
+        blocks.append(
+            PromptBlock(
+                name="rag_context",
+                content="## Relevant Knowledge Base Context\n\n" + rag_context,
+                source="rag",
+                cache_policy="dynamic",
+            )
+        )
+    return blocks
+
+
+def _build_standard_system_messages(rag_context: str = "") -> list[SystemMessage]:
+    return PromptRenderer.render_system_messages(_build_standard_prompt_blocks(rag_context))
+
+
+def _prepare_standard_prompt(history: list, user_message: str, user, db, llm, tools: list, *, include_prompt_blocks: bool = False):
     from ...db.models import KnowledgeBase
 
     has_kbs = db.query(KnowledgeBase).filter_by(owner_id=user.id).first() is not None
     intent = _classify_intent(user_message, has_tools=bool(tools), has_kbs=has_kbs)
     rewritten = _rewrite_query(user_message, history, llm)
-    _record_decision_step(intent, rewritten, has_tools=bool(tools), has_kbs=has_kbs)
 
-    system_prompt = _REACT_SYSTEM_PROMPT
+    rag_context = ""
     if intent.value in ("knowledge_qa", "tool_call"):
         rag_context = _inject_rag_context(rewritten, user, db)
-        if rag_context:
-            system_prompt += "\n\n## Relevant Knowledge Base Context\n\n" + rag_context
-    history = [SystemMessage(content=system_prompt)] + history
+    prompt_blocks = _build_standard_prompt_blocks(rag_context)
+    _record_decision_step(intent, rewritten, has_tools=bool(tools), has_kbs=has_kbs, prompt_blocks=prompt_blocks)
+    history = PromptRenderer.render_system_messages(prompt_blocks) + history
 
+    if include_prompt_blocks:
+        return intent, history, prompt_blocks
     return intent, history
 
 
@@ -125,7 +156,7 @@ def run_standard_agent(
 
     ensure_run_context(session_id, user_message, image_paths, user, db, config)
     llm = get_llm(config)
-    tools = build_langchain_tools(user)
+    tools = build_langchain_tools(user, pre_execute_validator=ToolContractValidator())
     graph = create_react_agent(llm, tools)
 
     record, history = prepare_history(session_id, user_message, image_paths, user, db, llm=llm)
@@ -141,7 +172,11 @@ def run_standard_agent(
                 future = executor.submit(
                     graph.invoke,
                     {"messages": history},
-                    config={"recursion_limit": config.max_iterations},
+                    config=build_langchain_config(
+                        config,
+                        recursion_limit=config.max_iterations,
+                        metadata={"intent": intent.value, "image_count": len(image_paths)},
+                    ),
                 )
                 try:
                     result = future.result(timeout=timeout_s)
@@ -150,7 +185,11 @@ def run_standard_agent(
         else:
             result = graph.invoke(
                 {"messages": history},
-                config={"recursion_limit": config.max_iterations},
+                config=build_langchain_config(
+                    config,
+                    recursion_limit=config.max_iterations,
+                    metadata={"intent": intent.value, "image_count": len(image_paths)},
+                ),
             )
     except Exception as exc:
         io.error(f"[ERROR]    {type(exc).__name__}: {exc}")
@@ -182,7 +221,7 @@ async def stream_standard_agent(
         for event in drain_events():
             yield to_sse(event)
         llm = await loop.run_in_executor(None, get_llm, config)
-        tools = build_langchain_tools(user)
+        tools = build_langchain_tools(user, pre_execute_validator=ToolContractValidator())
         graph = create_react_agent(llm, tools)
         record, history = prepare_history(session_id, user_message, image_paths, user, db, llm=llm)
         intent, history = _prepare_standard_prompt(history, user_message, user, db, llm, tools)
@@ -207,7 +246,11 @@ async def stream_standard_agent(
         aiter = graph.astream_events(
             {"messages": history},
             version="v2",
-            config={"recursion_limit": config.max_iterations},
+            config=build_langchain_config(
+                config,
+                recursion_limit=config.max_iterations,
+                metadata={"intent": intent.value, "image_count": len(image_paths)},
+            ),
         )
         loop = _asyncio.get_running_loop()
         next_event = loop.create_task(aiter.__anext__())
@@ -220,8 +263,8 @@ async def stream_standard_agent(
                 if deadline and loop.time() > deadline:
                     raise TimeoutError(f"Agent stream timed out after {timeout_s}s")
                 if not done:
-                    for pending in drain_events():
-                        yield to_sse(pending)
+                    for sse in drain_events_as_sse(drain_events):
+                        yield sse
                     yield ": keepalive\n\n"
                     continue
 
@@ -236,18 +279,18 @@ async def stream_standard_agent(
                 if etype == "on_chat_model_stream":
                     chunk = event["data"]["chunk"]
                     token = chunk.content if isinstance(chunk.content, str) else ""
-                    if not token:
-                        continue
-                    for ptype, text in parser.feed(token):
-                        if text:
-                            yield f"data: {json.dumps({'type': ptype, 'token': text}, ensure_ascii=False)}\n\n"
-                    for pending in drain_events():
-                        yield to_sse(pending)
+                    if token:
+                        for ptype, text in parser.feed(token):
+                            if text:
+                                yield f"data: {json.dumps({'type': ptype, 'token': text}, ensure_ascii=False)}\n\n"
 
                 elif etype == "on_chain_end":
                     output = event.get("data", {}).get("output") or {}
                     if isinstance(output, dict) and "messages" in output:
                         final_state = output
+
+                for sse in drain_events_as_sse(drain_events):
+                    yield sse
         finally:
             if not next_event.done():
                 next_event.cancel()
@@ -268,5 +311,5 @@ async def stream_standard_agent(
             yield f"data: {json.dumps({'type': ptype, 'token': text}, ensure_ascii=False)}\n\n"
 
     finalize_stream_result(record, final_state, db, io, metadata_update={"intent": intent.value})
-    for event in drain_events():
-        yield to_sse(event)
+    for sse in drain_events_as_sse(drain_events):
+        yield sse

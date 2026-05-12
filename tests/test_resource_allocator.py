@@ -114,6 +114,91 @@ class ResourceAllocatorTests(unittest.TestCase):
         self.assertTrue(removed)
         self.assertIn(["docker", "rm", "-f", "terrabox-vllm-9000"], commands)
 
+    def test_find_reusable_managed_lease_matches_existing_container(self):
+        def fake_run(cmd, capture_output=True, text=True):
+            if cmd[:2] == ["docker", "ps"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="terrabox-agent-llm-9110\n", stderr="")
+            if cmd[:2] == ["docker", "inspect"]:
+                payload = [{
+                    "Name": "/terrabox-agent-llm-9110",
+                    "State": {"Running": True},
+                    "Config": {
+                        "Image": "terrabox/agent-llm:latest",
+                        "Cmd": ["--model", "/model", "--max-model-len", "24576"],
+                        "Labels": {
+                            "terrabox.port": "9110",
+                            "terrabox.gpu_devices": "2",
+                        },
+                    },
+                    "Mounts": [{"Source": "/models/qwen", "Destination": "/model"}],
+                }]
+                return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr="")
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        with mock.patch.object(ra.subprocess, "run", fake_run):
+            lease = ra.find_reusable_managed_lease(
+                service="agent-llm",
+                image="terrabox/agent-llm:latest",
+                container_base="terrabox-agent-llm",
+                host="127.0.0.1",
+                internal_port=8000,
+                required_model_path="/models/qwen",
+                required_cmd_args={"--max-model-len": "24576"},
+                health_check=lambda port: port == 9110,
+            )
+
+        self.assertIsNotNone(lease)
+        assert lease is not None
+        self.assertTrue(lease.reused)
+        self.assertEqual(lease.container_name, "terrabox-agent-llm-9110")
+        self.assertEqual(lease.port, 9110)
+        self.assertEqual(lease.gpu_devices, "2")
+
+    def test_find_reusable_managed_lease_can_adopt_legacy_named_container(self):
+        def fake_run(cmd, capture_output=True, text=True):
+            if cmd[:2] == ["docker", "ps"] and "label=terrabox.managed=true" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if cmd[:2] == ["docker", "ps"] and "name=terrabox-vllm" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="terrabox-vllm\n", stderr="")
+            if cmd[:2] == ["docker", "inspect"]:
+                payload = [{
+                    "Name": "/terrabox-vllm",
+                    "State": {"Running": True},
+                    "Config": {
+                        "Image": "terrabox/vllm:latest",
+                        "Cmd": ["--model", "/model", "--tensor-parallel-size", "1"],
+                        "Labels": {},
+                        "Env": ["CUDA_VISIBLE_DEVICES=0"],
+                    },
+                    "NetworkSettings": {
+                        "Ports": {
+                            "8000/tcp": [{"HostIp": "0.0.0.0", "HostPort": "9000"}],
+                        },
+                    },
+                    "Mounts": [{"Source": "/models/vlm", "Destination": "/model"}],
+                }]
+                return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr="")
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        with mock.patch.object(ra.subprocess, "run", fake_run):
+            lease = ra.find_reusable_managed_lease(
+                service="vlm",
+                image="terrabox/vllm:latest",
+                container_base="terrabox-vllm",
+                host="127.0.0.1",
+                internal_port=8000,
+                required_model_path="/models/vlm",
+                required_cmd_args={"--tensor-parallel-size": "1"},
+                health_check=lambda port: port == 9000,
+            )
+
+        self.assertIsNotNone(lease)
+        assert lease is not None
+        self.assertTrue(lease.reused)
+        self.assertEqual(lease.container_name, "terrabox-vllm")
+        self.assertEqual(lease.port, 9000)
+        self.assertEqual(lease.gpu_devices, "0")
+
     def test_record_service_event_updates_manifest(self):
         lease = ra.ResourceLease(
             service="sam2",

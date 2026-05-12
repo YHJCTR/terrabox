@@ -13,6 +13,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from terrabox.core.utils.config import settings
 from terrabox.db.models import Base, User, ApiKey
+from terrabox.db.schema_compat import ensure_sqlite_schema_compat
 from terrabox.core.utils.auth import hash_password, generate_api_key, hash_api_key, generate_public_id
 from datetime import datetime
 
@@ -53,6 +54,7 @@ def init_database():
     # Create engine and tables
     engine = create_engine(settings.DB_URL)
     Base.metadata.create_all(bind=engine)
+    ensure_sqlite_schema_compat(engine)
     print("Database tables created successfully")
     
     return engine

@@ -163,6 +163,22 @@ class DockerResourceManagerTests(unittest.TestCase):
         self.assertIn("9010:8000", run_cmd)
         self.assertEqual(mod.VLLMDockerManager.API_BASE, "http://127.0.0.1:9010/v1")
 
+    def test_vllm_docker_manager_adopts_reusable_container(self):
+        from terrabox.managers.docker import vllm_manager as mod
+
+        lease = _lease("vlm", 9017, 8000)
+        lease = ResourceLease(**{**lease.__dict__, "reused": True})
+
+        with (
+            mock.patch.object(mod.VLLMDockerManager, "is_running", classmethod(lambda cls: False)),
+            mock.patch.object(mod, "find_reusable_managed_lease", return_value=lease),
+            mock.patch.object(mod.VLLMDockerManager, "_start_docker", side_effect=AssertionError("should not start")),
+        ):
+            mod.VLLMDockerManager.start_service()
+
+        self.assertEqual(mod.VLLMDockerManager.CONTAINER_NAME, lease.container_name)
+        self.assertEqual(mod.VLLMDockerManager.API_BASE, "http://127.0.0.1:9017/v1")
+
     def test_agent_llm_docker_manager_returns_dynamic_api_base(self):
         from terrabox.managers.docker import agent_llm_manager as mod
 
@@ -180,6 +196,7 @@ class DockerResourceManagerTests(unittest.TestCase):
         with (
             mock.patch.object(mod.AgentLLMDockerManager, "is_running", classmethod(fake_is_running)),
             mock.patch.object(mod.AgentLLMDockerManager, "_container_is_running", classmethod(fake_container_is_running)),
+            mock.patch.object(mod, "find_reusable_managed_lease", return_value=None),
             mock.patch.object(mod, "acquire_docker_lease", return_value=lease),
             mock.patch.object(mod, "remove_container_if_exists", return_value=False),
             mock.patch.object(mod.subprocess, "run", recorder),
@@ -189,6 +206,23 @@ class DockerResourceManagerTests(unittest.TestCase):
         self.assertEqual(mod.AgentLLMDockerManager._api_base(), "http://127.0.0.1:9110/v1")
         run_cmd = next(cmd for cmd in recorder.commands if cmd[:3] == ["docker", "run", "-d"])
         self.assertIn("9110:8000", run_cmd)
+
+    def test_agent_llm_docker_manager_adopts_reusable_container(self):
+        from terrabox.managers.docker import agent_llm_manager as mod
+
+        lease = _lease("agent-llm", 9112, 8000)
+        lease = ResourceLease(**{**lease.__dict__, "reused": True})
+
+        with (
+            mock.patch.object(mod.AgentLLMDockerManager, "is_running", classmethod(lambda cls: False)),
+            mock.patch.object(mod.AgentLLMDockerManager, "_container_is_running", classmethod(lambda cls: False)),
+            mock.patch.object(mod, "find_reusable_managed_lease", return_value=lease),
+            mock.patch.object(mod, "acquire_docker_lease", side_effect=AssertionError("should not allocate")),
+        ):
+            mod.AgentLLMDockerManager.start_service(config=None)
+
+        self.assertEqual(mod.AgentLLMDockerManager.CONTAINER_NAME, lease.container_name)
+        self.assertEqual(mod.AgentLLMDockerManager._api_base(), "http://127.0.0.1:9112/v1")
 
 
 if __name__ == "__main__":

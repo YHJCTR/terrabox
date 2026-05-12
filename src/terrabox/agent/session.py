@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from sqlalchemy.orm import Session
 
 from .harness import current_context
+from .prompt_blocks import PromptBlock, PromptRenderer
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +64,13 @@ Output only these sections:
 ## 工具与数据结果
 ## 约束与决策
 ## 后续待办
+"""
+
+_BTW_SYSTEM_PROMPT = """You are answering a /btw quick aside inside an existing Terrabox agent session.
+
+Use the session context below to answer the aside directly and concisely.
+Do not call tools, do not change the main task, and do not introduce new commitments.
+If the aside cannot be answered from the available context, say what is missing.
 """
 
 
@@ -154,12 +162,7 @@ def _fallback_structured_summary(previous_summary: str, transcript: str) -> str:
     )
 
 
-def _summarize_history(history: list, llm=None, previous_summary: str = "") -> str:
-    _, summary_threshold, keep_recent = _history_limits()
-    if len(history) <= summary_threshold:
-        return ""
-    to_summarize = history[:-keep_recent]
-    transcript = _render_messages_for_summary(to_summarize)
+def _summarize_transcript(transcript: str, llm=None, previous_summary: str = "") -> str:
     if not transcript and not previous_summary:
         return ""
     if llm is None:
@@ -175,6 +178,15 @@ def _summarize_history(history: list, llm=None, previous_summary: str = "") -> s
         return result.content
     except Exception:
         return _fallback_structured_summary(previous_summary, transcript)
+
+
+def _summarize_history(history: list, llm=None, previous_summary: str = "") -> str:
+    _, summary_threshold, keep_recent = _history_limits()
+    if len(history) <= summary_threshold:
+        return ""
+    to_summarize = history[:-keep_recent]
+    transcript = _render_messages_for_summary(to_summarize)
+    return _summarize_transcript(transcript, llm=llm, previous_summary=previous_summary)
 
 
 def get_user_memory_context(user_message: str, user, db: Session | None = None, top_k: int = 3) -> str:
@@ -219,14 +231,32 @@ _REACT_SYSTEM_PROMPT = """You are a geospatial analysis assistant with access to
 Remember: Quality over quantity. A single well-chosen tool is better than many unnecessary calls."""
 
 
-def prepare_history(session_id: str, user_message: str, image_paths: list, user, db: Session, llm=None):
+def prepare_history(
+    session_id: str,
+    user_message: str,
+    image_paths: list,
+    user,
+    db: Session,
+    llm=None,
+    *,
+    include_prompt_blocks: bool = False,
+):
     from ..db.models import AgentSession
-    content = user_message
+    from ..core.utils.uploads import uploaded_files_metadata_text
+
+    prompt_blocks: list[PromptBlock] = []
+    human_context_blocks: list[PromptBlock] = []
     if image_paths:
-        content += (
-            f"\n\n[Uploaded image file(s) — use these local paths when calling image tools: "
-            f"{', '.join(image_paths)}]"
+        uploaded_block = PromptBlock(
+            name="uploaded_files_metadata",
+            role="human_context",
+            source="upload_inspection",
+            cache_policy="dynamic",
+            content=uploaded_files_metadata_text(image_paths),
+            metadata={"title": "Uploaded files metadata", "file_count": len(image_paths)},
         )
+        human_context_blocks.append(uploaded_block)
+        prompt_blocks.append(uploaded_block)
     record = db.query(AgentSession).filter_by(id=session_id, user_id_fk=user.id).first()
     if record is None:
         record = AgentSession(id=session_id, user_id_fk=user.id, messages_json="[]", summary_json="[]")
@@ -239,26 +269,105 @@ def prepare_history(session_id: str, user_message: str, image_paths: list, user,
     previous_summary = _extract_existing_summary(existing_summaries)
     summary = _summarize_history(history, llm=llm, previous_summary=previous_summary)
     if summary:
-        summary_msg = SystemMessage(content=f"{_CONVERSATION_MEMORY_HEADER}\n{summary}")
+        summary_content = f"{_CONVERSATION_MEMORY_HEADER}\n{summary}"
+        summary_msg = SystemMessage(content=summary_content)
         record.summary_json = serialize_messages([summary_msg])
+        prompt_blocks.append(
+            PromptBlock(
+                name="conversation_summary",
+                content=summary_content,
+                source="session_summary",
+                cache_policy="dynamic",
+            )
+        )
         history = history[-keep_recent:]
 
     if len(history) > max_messages:
         history = history[-max_messages:]
-    history.append(HumanMessage(content=content))
+    history.append(PromptRenderer.render_human_message(user_message, human_context_blocks))
 
     memory_ctx = get_user_memory_context(user_message, user, db=db)
     prefix_messages = []
     if memory_ctx:
         memory_ctx = memory_ctx.removeprefix("[User memories]\n")
-        prefix_messages.append(SystemMessage(content=f"{_USER_MEMORY_HEADER}\n{memory_ctx}"))
+        memory_content = f"{_USER_MEMORY_HEADER}\n{memory_ctx}"
+        memory_block = PromptBlock(
+            name="user_memory",
+            content=memory_content,
+            source="user_memory",
+            cache_policy="dynamic",
+        )
+        prefix_messages.extend(PromptRenderer.render_system_messages([memory_block]))
+        prompt_blocks.append(memory_block)
     summaries = deserialize_messages(record.summary_json)
     if summaries:
-        prefix_messages.append(summaries[-1])
+        summary_content = summaries[-1].content
+        summary_block = PromptBlock(
+            name="conversation_summary",
+            content=summary_content,
+            source="session_summary",
+            cache_policy="dynamic",
+        )
+        prefix_messages.extend(PromptRenderer.render_system_messages([summary_block]))
+        if not any(block.name == "conversation_summary" for block in prompt_blocks):
+            prompt_blocks.append(summary_block)
     if prefix_messages:
         history = prefix_messages + history
 
+    if include_prompt_blocks:
+        return record, history, prompt_blocks
     return record, history
+
+
+class BtwSessionNotFound(ValueError):
+    """Raised when /btw is requested for a missing or unauthorized session."""
+
+
+def prepare_btw_messages(session_id: str, question: str, user, db: Session) -> list:
+    """Build read-only context for a /btw aside without mutating session history."""
+    from ..db.models import AgentSession
+
+    record = db.query(AgentSession).filter_by(id=session_id, user_id_fk=user.id).first()
+    if record is None:
+        raise BtwSessionNotFound(f"Agent session not found: {session_id}")
+
+    max_messages, _summary_threshold, _keep_recent = _history_limits()
+    history = strip_transient_system_messages(deserialize_messages(record.messages_json))
+    if len(history) > max_messages:
+        history = history[-max_messages:]
+
+    messages = [SystemMessage(content=_BTW_SYSTEM_PROMPT)]
+    memory_ctx = get_user_memory_context(question, user, db=db)
+    if memory_ctx:
+        memory_ctx = memory_ctx.removeprefix("[User memories]\n")
+        messages.append(SystemMessage(content=f"{_USER_MEMORY_HEADER}\n{memory_ctx}"))
+    summaries = deserialize_messages(record.summary_json)
+    if summaries:
+        messages.append(summaries[-1])
+    messages.extend(history)
+    messages.append(HumanMessage(content=f"/btw {question}"))
+    return messages
+
+
+def run_btw_query(session_id: str, question: str, user, db: Session, llm) -> dict:
+    """Answer a quick aside from session context without persisting the exchange."""
+    messages = prepare_btw_messages(session_id, question, user, db)
+    result = llm.invoke(messages)
+    raw = getattr(result, "content", str(result))
+    parser = ThinkParser()
+    thinking_parts: list[str] = []
+    response_parts: list[str] = []
+    for ptype, text in parser.feed(raw) + parser.flush():
+        if ptype == "thinking":
+            thinking_parts.append(text)
+        else:
+            response_parts.append(text)
+    return {
+        "session_id": session_id,
+        "response": "".join(response_parts),
+        "thinking": "".join(thinking_parts),
+        "persisted": False,
+    }
 
 
 def log_messages(io: logging.Logger, messages: list) -> None:
@@ -308,6 +417,112 @@ def maybe_writeback_user_memory(messages: list, db, io: logging.Logger) -> None:
 
 def new_session_id() -> str:
     return str(uuid.uuid4())
+
+
+def _estimate_text_tokens(text: str) -> int:
+    """Cheap UI-facing estimate; real provider tokenization can differ."""
+    if not text:
+        return 0
+    return max(1, (len(text) + 3) // 4)
+
+
+def _estimate_messages_tokens(messages: list) -> int:
+    total = 0
+    for msg in messages:
+        role_overhead = 4
+        total += role_overhead + _estimate_text_tokens(str(getattr(msg, "content", "") or ""))
+    return total
+
+
+def _session_status_payload(session_id: str, record, *, max_model_len: int | None = None) -> dict:
+    max_messages, summary_threshold, keep_recent = _history_limits()
+    if record is None:
+        budget = max_model_len or 0
+        return {
+            "session_id": session_id,
+            "exists": False,
+            "raw_message_count": 0,
+            "summary_message_count": 0,
+            "has_summary": False,
+            "summary_preview": "",
+            "estimated_raw_tokens": 0,
+            "estimated_summary_tokens": 0,
+            "estimated_context_tokens": 0,
+            "max_model_len": budget,
+            "remaining_context_tokens": budget,
+            "can_compact": False,
+            "max_history_messages": max_messages,
+            "summary_threshold": summary_threshold,
+            "summary_keep_recent": keep_recent,
+        }
+
+    raw_messages = strip_transient_system_messages(deserialize_messages(record.messages_json))
+    summary_messages = deserialize_messages(record.summary_json)
+    summary_text = _extract_existing_summary(summary_messages)
+    raw_tokens = _estimate_messages_tokens(raw_messages)
+    summary_tokens = _estimate_messages_tokens(summary_messages)
+    context_tokens = raw_tokens + summary_tokens
+    budget = max_model_len or 0
+    remaining = max(0, budget - context_tokens) if budget else 0
+    return {
+        "session_id": session_id,
+        "exists": True,
+        "raw_message_count": len(raw_messages),
+        "summary_message_count": len(summary_messages),
+        "has_summary": bool(summary_text),
+        "summary_preview": summary_text[:500],
+        "estimated_raw_tokens": raw_tokens,
+        "estimated_summary_tokens": summary_tokens,
+        "estimated_context_tokens": context_tokens,
+        "max_model_len": budget,
+        "remaining_context_tokens": remaining,
+        "can_compact": len(raw_messages) > summary_threshold,
+        "max_history_messages": max_messages,
+        "summary_threshold": summary_threshold,
+        "summary_keep_recent": keep_recent,
+    }
+
+
+def get_context_status(session_id: str, db: Session, user_id_fk, *, max_model_len: int | None = None) -> dict:
+    """Return an observable summary of the stored conversation context."""
+    from ..db.models import AgentSession
+
+    record = db.query(AgentSession).filter_by(id=session_id, user_id_fk=user_id_fk).first()
+    return _session_status_payload(session_id, record, max_model_len=max_model_len)
+
+
+def compact_session(session_id: str, db: Session, user_id_fk, llm=None, *, max_model_len: int | None = None) -> dict:
+    """Manually compact old raw messages into the session rolling summary."""
+    from ..db.models import AgentSession
+
+    record = db.query(AgentSession).filter_by(id=session_id, user_id_fk=user_id_fk).first()
+    if record is None:
+        status = _session_status_payload(session_id, None, max_model_len=max_model_len)
+        status["compacted"] = False
+        return status
+
+    _max_messages, _summary_threshold, keep_recent = _history_limits()
+    history = strip_transient_system_messages(deserialize_messages(record.messages_json))
+    if len(history) <= keep_recent:
+        status = _session_status_payload(session_id, record, max_model_len=max_model_len)
+        status["compacted"] = False
+        return status
+
+    existing_summaries = deserialize_messages(record.summary_json)
+    previous_summary = _extract_existing_summary(existing_summaries)
+    to_summarize = history[:-keep_recent]
+    transcript = _render_messages_for_summary(to_summarize)
+    summary = _summarize_transcript(transcript, llm=llm, previous_summary=previous_summary)
+    if summary:
+        summary_msg = SystemMessage(content=f"{_CONVERSATION_MEMORY_HEADER}\n{summary}")
+        record.summary_json = serialize_messages([summary_msg])
+    record.messages_json = serialize_messages(history[-keep_recent:])
+    record.updated_at = datetime.utcnow()
+    db.commit()
+
+    status = _session_status_payload(session_id, record, max_model_len=max_model_len)
+    status["compacted"] = True
+    return status
 
 
 def clear_session(session_id: str, db: Session, user_id_fk) -> None:

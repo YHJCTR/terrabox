@@ -10,7 +10,7 @@ with a description of the needed capability and the input data. The tool:
   3. On error: feeds the traceback back to the LLM and retries up to MAX_RETRIES times
   4. Returns the script output (or the final error if all retries exhausted)
 
-LLM endpoint: http://localhost:LLM_PORT/v1 (hardcoded, see constants below)
+LLM endpoint: dynamically allocated via the Docker GPU/port resource scheduler
 Sandbox image: SANDBOX_IMAGE (pulled on first use if not present)
 """
 
@@ -21,16 +21,28 @@ import logging
 import os
 import subprocess
 import tempfile
+import time
 from typing import Any
 
 import requests
 
 from ..core.registry import ToolSpec
+from ..agent.config import load_config
+from ..managers.resource_allocator import (
+    ResourceLease,
+    acquire_docker_lease,
+    labels_for_lease,
+    record_service_event,
+    remove_container_if_exists,
+)
 
 logger = logging.getLogger(__name__)
 
-# ── Constants (hardcoded per user request) ────────────────────────────────────
-LLM_PORT: int = 9100                    # local vLLM serving the language model
+# ── Constants ────────────────────────────────────────────────────────────────
+CODEGEN_LLM_SERVICE: str = "codegen-llm"
+CODEGEN_LLM_CONTAINER_BASE: str = "terrabox-codegen-llm"
+CODEGEN_LLM_INTERNAL_PORT: int = 8000
+CODEGEN_LLM_HOST: str = "127.0.0.1"
 LLM_MODEL: str = "/model"              # model name as served by vLLM
 SANDBOX_IMAGE: str = "terrabox/codegen-sandbox:latest"  # lightweight sandbox image (~1.9GB)
 SANDBOX_CONTAINER: str = "terrabox-codegen-sandbox"  # preferred: exec into pre-warmed container (fast)
@@ -38,6 +50,8 @@ MAX_RETRIES: int = 3                    # max LLM fix attempts on sandbox error
 SANDBOX_TIMEOUT_S: int = 30            # per-run Docker timeout (seconds)
 LLM_TIMEOUT_S: int = 60               # LLM HTTP request timeout (seconds)
 LLM_MAX_TOKENS: int = 1024
+CODEGEN_LLM_STARTUP_RETRIES: int = 120
+CODEGEN_LLM_STARTUP_POLL_S: float = 5.0
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -92,7 +106,98 @@ def _extract_code(text: str) -> str:
 
 # ── LLM helpers ──────────────────────────────────────────────────────────────
 
-def _call_llm(messages: list[dict], no_thinking: bool = False) -> str:
+def _codegen_llm_is_healthy(port: int) -> bool:
+    try:
+        resp = requests.get(
+            f"http://{CODEGEN_LLM_HOST}:{port}/health",
+            timeout=1,
+            proxies={"http": None, "https": None},
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def _start_codegen_llm_service(config) -> tuple[str, ResourceLease]:
+    """Start a dedicated, temporary vLLM service for code generation."""
+    image = os.environ.get("CODEGEN_LLM_DOCKER_IMAGE", getattr(config, "local_llm_docker_image", "terrabox/agent-llm:latest"))
+    model_path = os.environ.get("CODEGEN_LLM_MODEL_PATH", getattr(config, "local_llm_model_path", ""))
+    tensor_parallel = str(os.environ.get("CODEGEN_LLM_TENSOR_PARALLEL", getattr(config, "local_llm_tensor_parallel", 1)))
+    max_model_len = str(os.environ.get("CODEGEN_LLM_MAX_MODEL_LEN", getattr(config, "local_llm_max_model_len", 24576)))
+    base_port = int(os.environ.get("CODEGEN_LLM_BASE_PORT", getattr(config, "local_llm_port", 9100)))
+    fallback_gpu = os.environ.get("CODEGEN_LLM_GPU_DEVICES", getattr(config, "local_llm_gpu_devices", "0"))
+
+    lease = acquire_docker_lease(
+        service=CODEGEN_LLM_SERVICE,
+        image=image,
+        container_base=CODEGEN_LLM_CONTAINER_BASE,
+        host=CODEGEN_LLM_HOST,
+        base_port=base_port,
+        internal_port=CODEGEN_LLM_INTERNAL_PORT,
+        gpu_count=int(tensor_parallel),
+        min_free_mib=int(os.environ.get("CODEGEN_LLM_MIN_FREE_MIB", os.environ.get("AGENT_LLM_MIN_FREE_MIB", "16000"))),
+        fallback_gpu_devices=fallback_gpu,
+        gpu_env_var="CODEGEN_LLM_GPU_DEVICES",
+    )
+    remove_container_if_exists(lease.container_name, service=CODEGEN_LLM_SERVICE, reason="before_docker_run")
+
+    cmd = [
+        "docker", "run", "-d",
+        "--name", lease.container_name,
+        *labels_for_lease(lease),
+        "--gpus", "all",
+        "-e", f"CUDA_VISIBLE_DEVICES={lease.gpu_devices}",
+        "-p", f"{lease.port}:{lease.internal_port}",
+        "-v", f"{model_path}:/model:ro",
+        "--shm-size=8g",
+        image,
+        "--model", "/model",
+        "--trust-remote-code",
+        "--host", "0.0.0.0",
+        "--port", str(CODEGEN_LLM_INTERNAL_PORT),
+        "--tensor-parallel-size", tensor_parallel,
+        "--max-model-len", max_model_len,
+        "--gpu-memory-utilization", os.environ.get("CODEGEN_LLM_GPU_MEMORY_UTILIZATION", "0.85"),
+        "--enforce-eager",
+    ]
+
+    logger.info(
+        "[codegen] Starting temporary LLM service (GPU: %s, port: %s, model: %s)",
+        lease.gpu_devices,
+        lease.port,
+        model_path,
+    )
+    record_service_event({"event": "start_requested", "service": CODEGEN_LLM_SERVICE, "lease": lease.__dict__})
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        subprocess.run(["docker", "rm", "-f", lease.container_name], capture_output=True)
+        record_service_event({
+            "event": "start_failed",
+            "service": CODEGEN_LLM_SERVICE,
+            "stderr": result.stderr,
+            "lease": lease.__dict__,
+        })
+        raise RuntimeError(f"Failed to start codegen LLM container.\nstderr: {result.stderr}")
+
+    for i in range(CODEGEN_LLM_STARTUP_RETRIES):
+        if _codegen_llm_is_healthy(lease.port):
+            record_service_event({"event": "ready", "service": CODEGEN_LLM_SERVICE, "lease": lease.__dict__})
+            return f"http://{lease.host}:{lease.port}/v1", lease
+        if i % 6 == 0:
+            logger.info("[codegen] Waiting for temporary LLM service... (%ss elapsed)", i * CODEGEN_LLM_STARTUP_POLL_S)
+        time.sleep(CODEGEN_LLM_STARTUP_POLL_S)
+
+    _stop_codegen_llm_service(lease)
+    raise TimeoutError(f"Codegen LLM service failed to start within timeout. Check: docker logs {lease.container_name}")
+
+
+def _stop_codegen_llm_service(lease: ResourceLease) -> None:
+    logger.info("[codegen] Stopping temporary LLM container %s", lease.container_name)
+    subprocess.run(["docker", "rm", "-f", lease.container_name], capture_output=True, timeout=10)
+    record_service_event({"event": "stopped", "service": CODEGEN_LLM_SERVICE, "container": lease.container_name})
+
+
+def _call_llm(api_base: str, messages: list[dict], no_thinking: bool = False) -> str:
     """POST to local vLLM and return the assistant reply text.
 
     no_thinking=True disables the thinking-token output for models that support it
@@ -100,7 +205,7 @@ def _call_llm(messages: list[dict], no_thinking: bool = False) -> str:
     blocks and interleaved prose from contaminating the response. Ignored by models
     that do not recognise chat_template_kwargs.
     """
-    url = f"http://localhost:{LLM_PORT}/v1/chat/completions"
+    url = f"{api_base.rstrip('/')}/chat/completions"
     payload: dict = {
         "model": LLM_MODEL,
         "messages": messages,
@@ -122,7 +227,7 @@ def _call_llm(messages: list[dict], no_thinking: bool = False) -> str:
         raise RuntimeError(f"LLM call failed: {exc}") from exc
 
 
-def _generate_code(description: str, input_data: str) -> str:
+def _generate_code(api_base: str, description: str, input_data: str) -> str:
     """Ask LLM to write a self-contained Python script for the given task."""
     system = (
         "You are an expert Python programmer. "
@@ -140,6 +245,9 @@ CRITICAL requirements:
 - Do NOT import libraries outside the above list (e.g. torch, tensorflow, requests are not available)
 - The last statement must be: print(json.dumps(<result>))
 - Do not include any input() calls, argparse, or sys.stdin reads
+- Match the requested output schema exactly. Use the exact field names requested by the user.
+- Do NOT add extra output fields unless the user explicitly asks for them.
+- If the user asks for rounding or formatting, apply it in the JSON result, not only in comments.
 
 The script skeleton (fill in the logic):
 ```python
@@ -156,13 +264,14 @@ INPUT_DATA value for reference:
 Output the complete script inside a ```python ... ``` fence:"""
 
     raw = _call_llm(
+        api_base,
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         no_thinking=True,
     )
     return _extract_code(raw)
 
 
-def _fix_code(original_code: str, error: str, description: str) -> str:
+def _fix_code(api_base: str, original_code: str, error: str, description: str) -> str:
     """Ask LLM to fix code given the sandbox error output."""
     user = f"""The following Python script raised an error when executed.
 
@@ -177,7 +286,7 @@ def _fix_code(original_code: str, error: str, description: str) -> str:
 
 Fix the script so it runs correctly. Output the corrected script inside a ```python ... ``` fence:"""
 
-    return _extract_code(_call_llm([{"role": "user", "content": user}], no_thinking=True))
+    return _extract_code(_call_llm(api_base, [{"role": "user", "content": user}], no_thinking=True))
 
 
 # ── Docker sandbox ────────────────────────────────────────────────────────────
@@ -315,40 +424,63 @@ def codegen_generate_and_run_handler(
 
     logger.info(f"[codegen] Generating code for: {description[:80]!r}")
 
-    # ── Attempt loop ──────────────────────────────────────────────────────────
-    code = ""
-    last_error = ""
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            if attempt == 1:
-                code = _generate_code(description, input_data)
-            else:
-                logger.info(f"[codegen] Attempt {attempt}: fixing code after error")
-                code = _fix_code(code, last_error, description)
-        except RuntimeError as exc:
-            return {"error": str(exc), "success": False, "attempts": attempt}
+    lease: ResourceLease | None = None
+    try:
+        api_base, lease = _start_codegen_llm_service(load_config())
 
-        logger.info(f"[codegen] Running in Docker sandbox (attempt {attempt}/{MAX_RETRIES})")
-        result = _run_in_sandbox(code, input_data)
+        # ── Attempt loop ──────────────────────────────────────────────────────
+        code = ""
+        last_error = ""
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                if attempt == 1:
+                    code = _generate_code(api_base, description, input_data)
+                else:
+                    logger.info(f"[codegen] Attempt {attempt}: fixing code after error")
+                    code = _fix_code(api_base, code, last_error, description)
+            except RuntimeError as exc:
+                return {"error": str(exc), "success": False, "attempts": attempt}
 
-        if result["success"]:
-            logger.info(f"[codegen] Success on attempt {attempt}")
-            return {
-                "success": True,
-                "output": result["output"],
-                "code": code,
-                "attempts": attempt,
-            }
+            logger.info(f"[codegen] Running in Docker sandbox (attempt {attempt}/{MAX_RETRIES})")
+            result = _run_in_sandbox(code, input_data)
 
-        last_error = result["error"]
-        logger.warning(f"[codegen] Attempt {attempt} failed: {last_error[:120]}")
+            if result["success"]:
+                logger.info(f"[codegen] Success on attempt {attempt}")
+                return {
+                    "success": True,
+                    "output": result["output"],
+                    "code": code,
+                    "executed_code": code,
+                    "attempts": attempt,
+                    "llm_service": {
+                        "container_name": lease.container_name,
+                        "port": lease.port,
+                        "gpu_devices": lease.gpu_devices,
+                    },
+                    "final_answer_instruction": (
+                        "When answering the user, include the sandbox output and also include "
+                        "the executed_code field as a fenced python code block."
+                    ),
+                }
 
-    return {
-        "success": False,
-        "error": f"All {MAX_RETRIES} attempts failed. Last error: {last_error}",
-        "code": code,
-        "attempts": MAX_RETRIES,
-    }
+            last_error = result["error"]
+            logger.warning(f"[codegen] Attempt {attempt} failed: {last_error[:120]}")
+
+        return {
+            "success": False,
+            "error": f"All {MAX_RETRIES} attempts failed. Last error: {last_error}",
+            "code": code,
+            "executed_code": code,
+            "attempts": MAX_RETRIES,
+            "llm_service": {
+                "container_name": lease.container_name,
+                "port": lease.port,
+                "gpu_devices": lease.gpu_devices,
+            },
+        }
+    finally:
+        if lease is not None:
+            _stop_codegen_llm_service(lease)
 
 
 # ── Toolkit registration ──────────────────────────────────────────────────────
@@ -368,7 +500,9 @@ def setup(registrar) -> None:
                 "Use this tool when no existing tool can accomplish the required task. "
                 "Describe the computation needed and provide the input data as JSON. "
                 "The tool will generate Python code, run it in an isolated Docker sandbox, "
-                "and return the result. "
+                "and return the result plus the exact executed_code. "
+                "When the user is testing, auditing, or asking how the computation was done, "
+                "include executed_code in the final answer as a fenced python code block. "
                 "Example use cases: custom raster algebra, novel index calculations, "
                 "multi-step statistical operations not covered by existing tools."
             ),

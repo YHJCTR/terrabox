@@ -11,6 +11,7 @@ from .core.logging_config import setup_logging
 from .core.utils.config import settings
 from .db.session import engine
 from .db.models import Base
+from .db.schema_compat import ensure_sqlite_schema_compat
 from .extensions import load_builtin_toolkits, load_entrypoint_plugins
 from .routers import auth as auth_router
 from .routers import tools as tools_router
@@ -37,6 +38,7 @@ def init_db():
     """
     if settings.ENV == "dev":
         Base.metadata.create_all(bind=engine)  # Use Alembic in production
+        ensure_sqlite_schema_compat(engine)
 
 
 @asynccontextmanager

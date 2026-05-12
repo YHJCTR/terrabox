@@ -16,6 +16,9 @@ from ..core.services.agent_run_service import AgentRunService
 from ..core.schemas import (
     AgentApprovalResponse,
     AgentArtifactResponse,
+    AgentBtwRequest,
+    AgentBtwResponse,
+    AgentContextStatusResponse,
     AgentReplayEventResponse,
     AgentRunDetailResponse,
     AgentRunResponse,
@@ -25,7 +28,10 @@ from ..core.schemas import (
 from ..routers.deps import current_user_from_jwt
 from ..core.utils.uploads import save_upload_files
 from .graph import clear_session, new_session_id, run_agent_with_meta, stream_agent
+from .config import load_config
 from .runtime import get_runtime
+from .session import BtwSessionNotFound, compact_session, get_context_status, run_btw_query
+from .llm import get_llm
 
 router = APIRouter(prefix="/v1/gui/agent", tags=["agent"])
 
@@ -100,6 +106,63 @@ def delete_session(
     """Clear the conversation history for a session."""
     clear_session(session_id, db, current_user.id)
     return {"status": "ok", "session_id": session_id}
+
+
+@router.get("/sessions/{session_id}/context", response_model=AgentContextStatusResponse)
+def get_session_context_status(
+    session_id: str,
+    current_user: models.User = Depends(current_user_from_jwt),
+    db: Session = Depends(get_db),
+):
+    """Return context budget and compression state for the current user's session."""
+    config = load_config()
+    return get_context_status(
+        session_id,
+        db,
+        current_user.id,
+        max_model_len=getattr(config, "local_llm_max_model_len", 0),
+    )
+
+
+@router.post("/sessions/{session_id}/compact", response_model=AgentContextStatusResponse)
+def compact_session_context(
+    session_id: str,
+    current_user: models.User = Depends(current_user_from_jwt),
+    db: Session = Depends(get_db),
+):
+    """Manually compact old raw messages into the session rolling summary."""
+    config = load_config()
+    return compact_session(
+        session_id,
+        db,
+        current_user.id,
+        llm=None,
+        max_model_len=getattr(config, "local_llm_max_model_len", 0),
+    )
+
+
+@router.post("/sessions/{session_id}/btw", response_model=AgentBtwResponse)
+async def answer_btw_aside(
+    session_id: str,
+    request: AgentBtwRequest,
+    current_user: models.User = Depends(current_user_from_jwt),
+    db: Session = Depends(get_db),
+):
+    """Answer a quick aside from session context without persisting it."""
+    config = load_config()
+    try:
+        loop = asyncio.get_running_loop()
+        def _run_btw():
+            return run_btw_query(session_id, request.message, current_user, db, get_llm(config))
+
+        return await loop.run_in_executor(
+            None,
+            _run_btw,
+        )
+    except BtwSessionNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"/btw error: {exc}") from exc
 
 
 @router.get("/runs", response_model=list[AgentRunResponse])

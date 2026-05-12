@@ -642,6 +642,39 @@ class AgentRunDetailResponse(BaseModel):
     approvals: List[AgentApprovalResponse]
 
 
+class AgentContextStatusResponse(BaseModel):
+    """Observable context state for an agent session."""
+    session_id: str
+    exists: bool
+    raw_message_count: int
+    summary_message_count: int
+    has_summary: bool
+    summary_preview: str = ""
+    estimated_raw_tokens: int = 0
+    estimated_summary_tokens: int = 0
+    estimated_context_tokens: int = 0
+    max_model_len: int = 0
+    remaining_context_tokens: int = 0
+    can_compact: bool = False
+    max_history_messages: int = 0
+    summary_threshold: int = 0
+    summary_keep_recent: int = 0
+    compacted: Optional[bool] = None
+
+
+class AgentBtwRequest(BaseModel):
+    """Quick aside request for an existing agent session."""
+    message: str = Field(..., min_length=1)
+
+
+class AgentBtwResponse(BaseModel):
+    """Quick aside response that does not mutate the stored session."""
+    session_id: str
+    response: str
+    thinking: str = ""
+    persisted: bool = False
+
+
 class AgentReplayEventResponse(BaseModel):
     """Replay event schema."""
     type: str

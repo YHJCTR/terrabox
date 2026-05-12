@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 from typing import Any, Callable
 
-from ..events import to_sse
+from ..events import drain_events_as_sse, to_sse
 from ..harness import current_context, drain_events, fail_run, finish_run, start_run
 from ..session import (
     ThinkParser,
@@ -17,6 +17,7 @@ from ..session import (
     serialize_messages,
     strip_transient_system_messages,
 )
+from ..trace_config import build_langchain_config
 
 
 def ensure_run_context(session_id: str, user_message: str, image_paths: list[str], user, db, config):
@@ -85,7 +86,13 @@ def run_compiled_graph_mode(
     initial_state = build_initial_state(history)
 
     try:
-        result = graph.invoke(initial_state)
+        result = graph.invoke(
+            initial_state,
+            config=build_langchain_config(
+                config,
+                metadata={"mode_label": mode_label, "image_count": len(image_paths)},
+            ),
+        )
     except Exception as exc:
         io.error(f"[ERROR]    {type(exc).__name__}: {exc}")
         fail_run(str(exc), metadata_update=metadata_update)
@@ -138,7 +145,14 @@ async def stream_compiled_graph_mode(
     final_state: dict | None = None
 
     try:
-        async for event in graph.astream_events(initial_state, version="v2"):
+        async for event in graph.astream_events(
+            initial_state,
+            version="v2",
+            config=build_langchain_config(
+                config,
+                metadata={"mode_label": mode_label, "image_count": len(image_paths)},
+            ),
+        ):
             etype = event["event"]
 
             if etype == "on_chat_model_stream":
@@ -150,13 +164,14 @@ async def stream_compiled_graph_mode(
                         for ptype, text in parser.feed(token):
                             if text:
                                 yield f"data: {json.dumps({'type': ptype, 'token': text}, ensure_ascii=False)}\n\n"
-                for pending in drain_events():
-                    yield to_sse(pending)
 
             elif etype == "on_chain_end":
                 output = event.get("data", {}).get("output") or {}
                 if isinstance(output, dict) and "messages" in output:
                     final_state = output
+
+            for sse in drain_events_as_sse(drain_events):
+                yield sse
 
     except Exception as exc:
         io.error(f"[ERROR]    {type(exc).__name__}: {exc}")
@@ -170,5 +185,5 @@ async def stream_compiled_graph_mode(
             yield f"data: {json.dumps({'type': ptype, 'token': text}, ensure_ascii=False)}\n\n"
 
     finalize_stream_result(record, final_state, db, io, metadata_update=metadata_update)
-    for event in drain_events():
-        yield to_sse(event)
+    for sse in drain_events_as_sse(drain_events):
+        yield sse

@@ -19,6 +19,7 @@ import requests
 from ..base_manager import BaseServiceManager
 from ..resource_allocator import (
     acquire_docker_lease,
+    find_reusable_managed_lease,
     labels_for_lease,
     record_service_event,
     remove_container_if_exists,
@@ -54,9 +55,13 @@ class AgentLLMDockerManager(BaseServiceManager):
 
     @classmethod
     def is_running(cls) -> bool:
+        return cls._is_healthy_on_port(cls.PORT)
+
+    @classmethod
+    def _is_healthy_on_port(cls, port: int) -> bool:
         try:
             resp = requests.get(
-                f"http://{cls.HOST}:{cls.PORT}/health",
+                f"http://{cls.HOST}:{port}/health",
                 timeout=1,
                 proxies={"http": None, "https": None},
             )
@@ -97,6 +102,26 @@ class AgentLLMDockerManager(BaseServiceManager):
         if cls._container_is_running():
             logger.info(f"Container {cls.CONTAINER_NAME} is running but service is not healthy; rebuilding it.")
             cls.stop_service()
+
+        adopted = find_reusable_managed_lease(
+            service="agent-llm",
+            image=cls.DOCKER_IMAGE,
+            container_base=cls.CONTAINER_BASE,
+            host=cls.HOST,
+            internal_port=8000,
+            required_model_path=cls.MODEL_PATH,
+            required_cmd_args={
+                "--tensor-parallel-size": cls.TENSOR_PARALLEL_SIZE,
+                "--max-model-len": cls.MAX_MODEL_LEN,
+            },
+            health_check=cls._is_healthy_on_port,
+        )
+        if adopted is not None:
+            cls._lease = adopted
+            cls.CONTAINER_NAME = adopted.container_name
+            cls.PORT = adopted.port
+            logger.info("Adopted existing agent LLM container %s on port %s", adopted.container_name, adopted.port)
+            return
 
         lease = acquire_docker_lease(
             service="agent-llm",

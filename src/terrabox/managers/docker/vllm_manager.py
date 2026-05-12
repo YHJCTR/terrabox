@@ -24,6 +24,7 @@ import logging
 from ..base_manager import BaseServiceManager
 from ..resource_allocator import (
     acquire_docker_lease,
+    find_reusable_managed_lease,
     labels_for_lease,
     record_service_event,
     remove_container_if_exists,
@@ -62,9 +63,13 @@ class VLLMDockerManager(BaseServiceManager):
 
     @classmethod
     def is_running(cls):
+        return cls._is_healthy_on_port(cls.PORT)
+
+    @classmethod
+    def _is_healthy_on_port(cls, port: int):
         try:
             resp = requests.get(
-                f"http://{cls.HOST}:{cls.PORT}/health",
+                f"http://{cls.HOST}:{port}/health",
                 timeout=1,
                 proxies={"http": None, "https": None},
             )
@@ -202,6 +207,27 @@ class VLLMDockerManager(BaseServiceManager):
                 cls.MIN_IMAGE_MODEL_LEN,
             )
             cls.stop_service()
+
+        adopted = find_reusable_managed_lease(
+            service="vlm",
+            image=cls.DOCKER_IMAGE,
+            container_base=cls.CONTAINER_BASE,
+            host=cls.HOST,
+            internal_port=8000,
+            required_model_path=cls.MODEL_PATH,
+            required_cmd_args={
+                "--tensor-parallel-size": cls.TENSOR_PARALLEL_SIZE,
+                "--max-model-len": str(cls.MAX_MODEL_LEN),
+            },
+            health_check=cls._is_healthy_on_port,
+        )
+        if adopted is not None:
+            cls._lease = adopted
+            cls.CONTAINER_NAME = adopted.container_name
+            cls.PORT = adopted.port
+            cls.API_BASE = f"http://{cls.HOST}:{cls.PORT}/v1"
+            logger.info("Adopted existing vLLM container %s on port %s", adopted.container_name, adopted.port)
+            return
 
         cls._start_docker()
 

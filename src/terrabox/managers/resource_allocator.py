@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+from collections.abc import Callable
 
 from .gpu_allocator import allocate_gpu, allocate_gpus
 
@@ -102,6 +103,136 @@ def remove_container_if_exists(container_name: str, *, service: str | None = Non
         "reason": reason,
     })
     return True
+
+
+def _cmd_arg_value(cmd: list[str], key: str) -> str | None:
+    try:
+        idx = cmd.index(key)
+        return str(cmd[idx + 1])
+    except Exception:
+        return None
+
+
+def _container_mounts_path(container: dict, *, source: str, destination: str) -> bool:
+    for mount in container.get("Mounts") or []:
+        if mount.get("Destination") == destination and os.path.abspath(str(mount.get("Source", ""))) == os.path.abspath(source):
+            return True
+    return False
+
+
+def _candidate_container_names(*, service: str, container_base: str) -> list[str]:
+    names: list[str] = []
+    queries = [
+        [
+            "docker", "ps",
+            "--filter", "label=terrabox.managed=true",
+            "--filter", f"label=terrabox.service={service}",
+            "--format", "{{.Names}}",
+        ],
+        [
+            "docker", "ps",
+            "--filter", f"name={container_base}",
+            "--format", "{{.Names}}",
+        ],
+    ]
+    for query in queries:
+        result = subprocess.run(query, capture_output=True, text=True)
+        if result.returncode != 0:
+            continue
+        for line in result.stdout.splitlines():
+            name = line.strip()
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
+def _container_host_port(container: dict, internal_port: int, labels: dict) -> int | None:
+    try:
+        return int(labels.get("terrabox.port"))
+    except Exception:
+        pass
+    bindings = (
+        container.get("NetworkSettings", {})
+        .get("Ports", {})
+        .get(f"{int(internal_port)}/tcp")
+    )
+    if bindings:
+        try:
+            return int(bindings[0]["HostPort"])
+        except Exception:
+            return None
+    return None
+
+
+def _container_gpu_devices(container: dict, labels: dict) -> str:
+    if labels.get("terrabox.gpu_devices"):
+        return str(labels["terrabox.gpu_devices"])
+    for item in container.get("Config", {}).get("Env") or []:
+        if str(item).startswith("CUDA_VISIBLE_DEVICES="):
+            return str(item).split("=", 1)[1]
+    return ""
+
+
+def find_reusable_managed_lease(
+    *,
+    service: str,
+    image: str,
+    container_base: str,
+    host: str,
+    internal_port: int,
+    required_model_path: str | None = None,
+    required_cmd_args: dict[str, str] | None = None,
+    health_check: Callable[[int], bool] | None = None,
+) -> ResourceLease | None:
+    """Return a lease for an already-running compatible managed container."""
+    names = _candidate_container_names(service=service, container_base=container_base)
+    for name in names:
+        if container_base and not name.startswith(container_base):
+            continue
+        inspected = subprocess.run(["docker", "inspect", name], capture_output=True, text=True)
+        if inspected.returncode != 0:
+            continue
+        try:
+            containers = json.loads(inspected.stdout)
+            container = containers[0] if isinstance(containers, list) and containers else {}
+        except Exception:
+            continue
+        if not container.get("State", {}).get("Running"):
+            continue
+
+        config = container.get("Config") or {}
+        if image and config.get("Image") != image:
+            continue
+        if required_model_path and not _container_mounts_path(container, source=required_model_path, destination="/model"):
+            continue
+
+        cmd = config.get("Cmd") or []
+        if required_cmd_args:
+            if any(_cmd_arg_value(cmd, key) != str(value) for key, value in required_cmd_args.items()):
+                continue
+
+        labels = config.get("Labels") or {}
+        port = _container_host_port(container, internal_port, labels)
+        if port is None:
+            continue
+        if health_check and not health_check(port):
+            continue
+
+        gpu_devices = _container_gpu_devices(container, labels)
+        lease = ResourceLease(
+            service=service,
+            container_name=name,
+            image=str(config.get("Image") or image),
+            host=host,
+            port=port,
+            internal_port=int(internal_port),
+            gpu_devices=gpu_devices,
+            created_at=datetime.now().isoformat(timespec="seconds"),
+            reused=True,
+        )
+        record_service_event({"event": "service_adopted", "service": service, "lease": lease.__dict__})
+        return lease
+    return None
 
 
 def labels_for_lease(lease: ResourceLease) -> list[str]:

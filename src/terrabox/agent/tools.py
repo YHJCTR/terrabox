@@ -45,14 +45,18 @@ def _json_schema_to_pydantic(slug: str, schema: dict[str, Any]):
     return create_model(model_name, **fields)
 
 
-def _make_tool_func(slug: str, user):
+def _make_tool_func(slug: str, user, pre_execute_validator=None):
     """Return a callable that routes tool execution through AgentToolExecutor."""
     def _call(**kwargs):
+        if pre_execute_validator is not None:
+            result = pre_execute_validator.validate(slug, kwargs)
+            if not result.ok:
+                return result.to_tool_message()
         return AgentToolExecutor.execute(slug, kwargs, user)
     return _call
 
 
-def build_langchain_tools(user, slugs: Optional[list[str]] = None) -> list[StructuredTool]:
+def build_langchain_tools(user, slugs: Optional[list[str]] = None, pre_execute_validator=None) -> list[StructuredTool]:
     """
     Wrap every tool registered in CoreRegistry as a LangChain StructuredTool.
     The agent LLM can call any of these tools autonomously.
@@ -60,6 +64,8 @@ def build_langchain_tools(user, slugs: Optional[list[str]] = None) -> list[Struc
     Args:
         user: The authenticated user object passed to each tool handler.
         slugs: Optional list of tool slugs to include. If None, all tools are included.
+        pre_execute_validator: Optional object with validate(slug, arguments) used to
+            short-circuit invalid calls before AgentToolExecutor runs.
     """
     tools = []
     for spec in registry.list_tools():
@@ -70,7 +76,7 @@ def build_langchain_tools(user, slugs: Optional[list[str]] = None) -> list[Struc
 
         args_schema = _json_schema_to_pydantic(spec.slug, spec.parameters)
         lc_tool = StructuredTool.from_function(
-            func=_make_tool_func(spec.slug, user),
+            func=_make_tool_func(spec.slug, user, pre_execute_validator=pre_execute_validator),
             # LangChain tool names must not contain dots
             name=spec.slug.replace(".", "__"),
             description=spec.description,

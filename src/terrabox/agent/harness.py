@@ -33,6 +33,8 @@ def current_context() -> HarnessContext | None:
 
 
 def start_run(session_id: str | None, user_message: str, image_paths: list[str], user, db, config) -> HarnessContext:
+    from ..core.utils.uploads import inspect_uploaded_files
+
     existing = current_context()
     if existing is not None:
         return existing
@@ -47,7 +49,10 @@ def start_run(session_id: str | None, user_message: str, image_paths: list[str],
         mode=config.agent_mode,
         original_message=user_message,
         image_paths=image_paths,
-        metadata={"agent_mode": config.agent_mode},
+        metadata={
+            "agent_mode": config.agent_mode,
+            "uploaded_files": inspect_uploaded_files(image_paths) if image_paths else [],
+        },
     )
     ctx = HarnessContext(
         run_id=run.id,
