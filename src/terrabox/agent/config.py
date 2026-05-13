@@ -38,6 +38,9 @@ class AgentConfig:
 
     # Agent behavior
     max_iterations: int = 15
+    max_tool_calls_per_run: int = 6
+    max_failed_tool_calls_per_run: int = 3
+    max_repeated_tool_failures: int = 1
 
     # Tool loading strategy: "standard" | "progressive" | "category_scoped" | "artifact_progressive"
     #   standard        — load all tools at once (full ReAct)
@@ -63,6 +66,9 @@ class AgentConfig:
     # Safety / approval
     require_approval_for_risky_tools: bool = False
     record_risky_tool_approvals: bool = True
+    human_tool_approval: dict = None  # type: ignore[assignment]
+    human_tool_approval_timeout_seconds: int = 300
+    human_tool_approval_poll_seconds: float = 1.0
 
     # Agent execution timeout (seconds); 0 = no timeout
     agent_timeout_seconds: int = 0
@@ -100,6 +106,8 @@ def load_config() -> AgentConfig:
     config = AgentConfig(**{k: v for k, v in data.items() if hasattr(AgentConfig, k)})
     if config.circuit_breaker_overrides is None:
         config.circuit_breaker_overrides = {}
+    if config.human_tool_approval is None:
+        config.human_tool_approval = {}
 
     valid_modes = list_agent_modes()
     if config.agent_mode not in valid_modes:
@@ -109,10 +117,28 @@ def load_config() -> AgentConfig:
         )
     if config.max_iterations <= 0:
         raise ValueError(f"max_iterations must be > 0, got {config.max_iterations}")
+    if config.max_tool_calls_per_run < 0:
+        raise ValueError(f"max_tool_calls_per_run must be >= 0, got {config.max_tool_calls_per_run}")
+    if config.max_failed_tool_calls_per_run < 0:
+        raise ValueError(
+            f"max_failed_tool_calls_per_run must be >= 0, got {config.max_failed_tool_calls_per_run}"
+        )
+    if config.max_repeated_tool_failures < 0:
+        raise ValueError(f"max_repeated_tool_failures must be >= 0, got {config.max_repeated_tool_failures}")
     if config.max_retries_on_error < 0:
         raise ValueError(f"max_retries_on_error must be >= 0, got {config.max_retries_on_error}")
     if config.max_category_expansions < 0:
         raise ValueError(f"max_category_expansions must be >= 0, got {config.max_category_expansions}")
+    if config.human_tool_approval_timeout_seconds < 0:
+        raise ValueError(
+            "human_tool_approval_timeout_seconds must be >= 0, "
+            f"got {config.human_tool_approval_timeout_seconds}"
+        )
+    if config.human_tool_approval_poll_seconds <= 0:
+        raise ValueError(
+            "human_tool_approval_poll_seconds must be > 0, "
+            f"got {config.human_tool_approval_poll_seconds}"
+        )
 
     # Allow per-process port override for parallel GPU execution
     if port_env := os.environ.get("AGENT_LLM_PORT"):

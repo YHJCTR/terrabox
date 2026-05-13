@@ -170,6 +170,7 @@ class AgentRunService:
         reason: str,
         step_id: str | None = None,
         status: str = "pending",
+        metadata: dict[str, Any] | None = None,
     ) -> AgentApproval:
         approval = AgentApproval(
             id=str(uuid.uuid4()),
@@ -178,12 +179,17 @@ class AgentRunService:
             tool_slug=tool_slug,
             reason=reason,
             status=status,
+            metadata_json=json.dumps(metadata or {}, ensure_ascii=False),
             decided_at=datetime.utcnow() if status != "pending" else None,
         )
         db.add(approval)
         db.commit()
         db.refresh(approval)
         return approval
+
+    @staticmethod
+    def get_approval(db: Session, approval_id: str) -> AgentApproval | None:
+        return db.query(AgentApproval).filter(AgentApproval.id == approval_id).first()
 
     @staticmethod
     def update_approval(db: Session, approval_id: str, status: str, note: str | None = None) -> AgentApproval | None:
@@ -375,6 +381,7 @@ class AgentRunService:
             "reason": approval.reason,
             "status": approval.status,
             "decision_note": approval.decision_note,
+            "metadata": _load(approval.metadata_json, {}),
             "created_at": approval.created_at,
             "updated_at": approval.updated_at,
             "decided_at": approval.decided_at,

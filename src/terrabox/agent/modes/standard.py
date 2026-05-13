@@ -5,13 +5,17 @@ import asyncio
 import concurrent.futures
 import json
 import logging
-from typing import AsyncIterator
+from typing import Annotated, AsyncIterator
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langgraph.graph import END, StateGraph
+from langgraph.graph.message import add_messages
 from sqlalchemy.orm import Session
+from typing_extensions import TypedDict
 
 from ..events import drain_events_as_sse, to_sse
 from ..harness import drain_events, emit_event, fail_run, finish_run, record_step
+from ..human_approval import ConfigurableToolApprovalPolicy, require_human_approval_before_tool
 from ..llm import get_llm
 from ..prompt_blocks import PromptBlock, PromptRenderer
 from ..session import (
@@ -29,6 +33,11 @@ from ..trace_config import build_langchain_config
 from .runtime import emit_failure_sse, ensure_run_context, finalize_stream_result
 
 logger = logging.getLogger(__name__)
+
+
+class StandardAgentState(TypedDict, total=False):
+    messages: Annotated[list, add_messages]
+    approval_blocked: bool
 
 
 def _inject_rag_context(user_message: str, user, db: Session) -> str:
@@ -125,6 +134,153 @@ def _build_standard_system_messages(rag_context: str = "") -> list[SystemMessage
     return PromptRenderer.render_system_messages(_build_standard_prompt_blocks(rag_context))
 
 
+def _build_standard_tool_validator(config) -> ToolContractValidator:
+    return ToolContractValidator(
+        max_tool_calls_per_run=getattr(config, "max_tool_calls_per_run", 6),
+        max_failed_tool_calls_per_run=getattr(config, "max_failed_tool_calls_per_run", 3),
+        max_repeated_tool_failures=getattr(config, "max_repeated_tool_failures", 1),
+    )
+
+
+def _tool_name_to_slug(name: str) -> str:
+    return name.replace("__", ".")
+
+
+def _bucket_for_tool_slug(slug: str) -> str:
+    if slug.startswith("geo_perception."):
+        return "perception"
+    if slug.startswith("bash.") or slug.startswith("ipython_code.") or slug.startswith("github."):
+        return "risky"
+    if slug.startswith("bing_search."):
+        return "network"
+    if slug.startswith("geo_raster.") or slug.startswith("georaster.") or slug.startswith("disaster_response."):
+        return "compute"
+    return "default"
+
+
+def _last_tool_calls(state: dict) -> list[dict]:
+    messages = state.get("messages") or []
+    if not messages:
+        return []
+    last = messages[-1]
+    return list(getattr(last, "tool_calls", []) or [])
+
+
+def _tool_call_needs_human_approval(call: dict, config) -> bool:
+    name = str(call.get("name") or "")
+    if not name:
+        return False
+    slug = _tool_name_to_slug(name)
+    return (
+        ConfigurableToolApprovalPolicy.from_config(config).requirement_for(
+            slug,
+            call.get("args") or {},
+            bucket=_bucket_for_tool_slug(slug),
+        )
+        is not None
+    )
+
+
+def _route_after_standard_agent(state: dict, config):
+    calls = _last_tool_calls(state)
+    if not calls:
+        return END
+    if any(_tool_call_needs_human_approval(call, config) for call in calls):
+        return "approval_gate"
+    return "tools"
+
+
+def _route_after_approval_gate(state: dict):
+    return "agent" if state.get("approval_blocked") else "tools"
+
+
+def _make_standard_agent_node(llm, tools: list):
+    model = llm.bind_tools(tools) if tools else llm
+
+    def agent_node(state: StandardAgentState):
+        response = model.invoke(state.get("messages", []))
+        return {"messages": [response], "approval_blocked": False}
+
+    return agent_node
+
+
+def _make_standard_approval_gate_node(config):
+    def approval_gate_node(state: StandardAgentState):
+        blocked_messages: list[ToolMessage] = []
+        for call in _last_tool_calls(state):
+            if not _tool_call_needs_human_approval(call, config):
+                continue
+            name = str(call.get("name") or "")
+            slug = _tool_name_to_slug(name)
+            try:
+                require_human_approval_before_tool(
+                    tool_slug=slug,
+                    arguments=call.get("args") or {},
+                    bucket=_bucket_for_tool_slug(slug),
+                    step_id=None,
+                    config=config,
+                )
+            except Exception as exc:
+                blocked_messages.append(
+                    ToolMessage(
+                        content=f"Tool execution error: Tool execution blocked before start: {exc}",
+                        tool_call_id=str(call.get("id") or ""),
+                        name=name,
+                    )
+                )
+        return {"messages": blocked_messages, "approval_blocked": bool(blocked_messages)}
+
+    return approval_gate_node
+
+
+def _make_standard_tools_node(tools: list):
+    tools_by_name = {tool.name: tool for tool in tools}
+
+    def tools_node(state: StandardAgentState):
+        outputs: list[ToolMessage] = []
+        for call in _last_tool_calls(state):
+            name = str(call.get("name") or "")
+            tool = tools_by_name.get(name)
+            if tool is None:
+                result = f"Tool execution error: Tool not found: {name}"
+            else:
+                try:
+                    result = tool.invoke(call.get("args") or {})
+                except Exception as exc:
+                    result = f"Tool execution error: {type(exc).__name__}: {exc}"
+            outputs.append(
+                ToolMessage(
+                    content=str(result),
+                    tool_call_id=str(call.get("id") or ""),
+                    name=name,
+                )
+            )
+        return {"messages": outputs, "approval_blocked": False}
+
+    return tools_node
+
+
+def build_standard_graph(llm, tools: list, config):
+    builder = StateGraph(StandardAgentState)
+    builder.add_node("agent", _make_standard_agent_node(llm, tools))
+    builder.add_node("approval_gate", _make_standard_approval_gate_node(config))
+    builder.add_node("tools", _make_standard_tools_node(tools))
+
+    builder.set_entry_point("agent")
+    builder.add_conditional_edges(
+        "agent",
+        lambda state: _route_after_standard_agent(state, config),
+        {"approval_gate": "approval_gate", "tools": "tools", END: END},
+    )
+    builder.add_conditional_edges(
+        "approval_gate",
+        _route_after_approval_gate,
+        {"tools": "tools", "agent": "agent"},
+    )
+    builder.add_edge("tools", "agent")
+    return builder.compile()
+
+
 def _prepare_standard_prompt(history: list, user_message: str, user, db, llm, tools: list, *, include_prompt_blocks: bool = False):
     from ...db.models import KnowledgeBase
 
@@ -144,6 +300,63 @@ def _prepare_standard_prompt(history: list, user_message: str, user, db, llm, to
     return intent, history
 
 
+def _tool_result_failed(message: ToolMessage) -> bool:
+    text = str(message.content).lower()
+    return any(
+        marker in text
+        for marker in (
+            "tool execution error",
+            "tool contract validation failed",
+            "tool execution timed out",
+            "traceback",
+        )
+    )
+
+
+def _tool_transparency_text(messages: list) -> str:
+    tool_names_by_id: dict[str, str] = {}
+    for message in messages:
+        for call in getattr(message, "tool_calls", []) or []:
+            call_id = call.get("id")
+            name = call.get("name")
+            if call_id and name:
+                tool_names_by_id[call_id] = name
+
+    rows: list[str] = []
+    seen: set[str] = set()
+    for message in messages:
+        if not isinstance(message, ToolMessage):
+            continue
+        call_id = getattr(message, "tool_call_id", "") or ""
+        if call_id in seen:
+            continue
+        seen.add(call_id)
+        name = tool_names_by_id.get(call_id) or getattr(message, "name", "") or "unknown_tool"
+        status = "失败" if _tool_result_failed(message) else "成功"
+        rows.append(f"- {name}: {status}")
+
+    if not rows:
+        return ""
+    return "本次工具调用：\n" + "\n".join(rows)
+
+
+def _append_tool_transparency_to_final(state: dict | None) -> str:
+    if not state or "messages" not in state or not state["messages"]:
+        return ""
+    messages = state["messages"]
+    final = messages[-1]
+    if not isinstance(final, AIMessage):
+        return ""
+    current = str(final.content or "")
+    if "本次工具调用" in current:
+        return ""
+    transparency = _tool_transparency_text(messages)
+    if not transparency:
+        return ""
+    final.content = f"{current.rstrip()}\n\n{transparency}" if current.strip() else transparency
+    return transparency
+
+
 def run_standard_agent(
     session_id: str,
     user_message: str,
@@ -152,12 +365,10 @@ def run_standard_agent(
     db: Session,
     config,
 ) -> str:
-    from langgraph.prebuilt import create_react_agent
-
     ensure_run_context(session_id, user_message, image_paths, user, db, config)
     llm = get_llm(config)
-    tools = build_langchain_tools(user, pre_execute_validator=ToolContractValidator())
-    graph = create_react_agent(llm, tools)
+    tools = build_langchain_tools(user, pre_execute_validator=_build_standard_tool_validator(config))
+    graph = build_standard_graph(llm, tools, config)
 
     record, history = prepare_history(session_id, user_message, image_paths, user, db, llm=llm)
     intent, history = _prepare_standard_prompt(history, user_message, user, db, llm, tools)
@@ -196,6 +407,7 @@ def run_standard_agent(
         fail_run(str(exc), metadata_update={"intent": intent.value})
         raise
 
+    _append_tool_transparency_to_final(result)
     log_messages(io, result["messages"][len(history):])
     final = finalize_session(record, result, db, io)
     finish_run("completed", final_response=final, metadata_update={"intent": intent.value})
@@ -210,8 +422,6 @@ async def stream_standard_agent(
     db: Session,
     config,
 ) -> AsyncIterator[str]:
-    from langgraph.prebuilt import create_react_agent
-
     yield ": keepalive\n\n"
     io = get_io_logger()
 
@@ -221,8 +431,8 @@ async def stream_standard_agent(
         for event in drain_events():
             yield to_sse(event)
         llm = await loop.run_in_executor(None, get_llm, config)
-        tools = build_langchain_tools(user, pre_execute_validator=ToolContractValidator())
-        graph = create_react_agent(llm, tools)
+        tools = build_langchain_tools(user, pre_execute_validator=_build_standard_tool_validator(config))
+        graph = build_standard_graph(llm, tools, config)
         record, history = prepare_history(session_id, user_message, image_paths, user, db, llm=llm)
         intent, history = _prepare_standard_prompt(history, user_message, user, db, llm, tools)
         for event in drain_events():
@@ -309,6 +519,11 @@ async def stream_standard_agent(
     for ptype, text in parser.flush():
         if text:
             yield f"data: {json.dumps({'type': ptype, 'token': text}, ensure_ascii=False)}\n\n"
+
+    transparency = _append_tool_transparency_to_final(final_state)
+    if transparency:
+        token = "\n\n" + transparency
+        yield f"data: {json.dumps({'type': 'response', 'token': token}, ensure_ascii=False)}\n\n"
 
     finalize_stream_result(record, final_state, db, io, metadata_update={"intent": intent.value})
     for sse in drain_events_as_sse(drain_events):

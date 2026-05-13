@@ -127,7 +127,13 @@ def record_artifact(step_id: str | None, path: str, kind: str = "file", preview_
     return artifact
 
 
-def create_approval(tool_slug: str, reason: str, step_id: str | None = None, status: str = "pending"):
+def create_approval(
+    tool_slug: str,
+    reason: str,
+    step_id: str | None = None,
+    status: str = "pending",
+    metadata: dict[str, Any] | None = None,
+):
     ctx = current_context()
     if ctx is None:
         return None
@@ -138,6 +144,7 @@ def create_approval(tool_slug: str, reason: str, step_id: str | None = None, sta
         reason=reason,
         step_id=step_id,
         status=status,
+        metadata=metadata,
     )
     emit_event(
         "approval_required" if status == "pending" else "approval_recorded",
@@ -146,6 +153,7 @@ def create_approval(tool_slug: str, reason: str, step_id: str | None = None, sta
         tool_slug=tool_slug,
         status=status,
         reason=reason,
+        metadata=metadata or {},
     )
     return approval
 

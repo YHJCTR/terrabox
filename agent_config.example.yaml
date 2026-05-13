@@ -42,6 +42,25 @@ agent_mode: category_scoped   # "standard" | "progressive" | "category_scoped"
 max_retries_on_error: 3       # retries for progressive mode
 max_category_expansions: 2    # max expansion rounds for category_scoped mode
 
+# ---- Human approval gate for GPU/model-backed tools ----
+# Runtime reads this through src/terrabox/agent/config.py.
+# Keep disabled in the example so fresh installs behave like previous versions.
+human_tool_approval:
+  enabled: false
+  include_gpu_snapshot: true
+  rules:
+    - name: gpu_model_tools
+      reason: Human approval required before starting GPU/model-backed tool execution.
+      match:
+        slugs:
+          - codegen.generate_and_run
+        prefixes:
+          - geo_perception.
+          - drone_video.
+      action: require_approval
+human_tool_approval_timeout_seconds: 300
+human_tool_approval_poll_seconds: 1.0
+
 # ============================================================
 # Perception Service Paths — Subprocess mode (use_docker: false)
 # ============================================================

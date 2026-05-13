@@ -11,15 +11,21 @@ def ensure_sqlite_schema_compat(engine: Engine) -> None:
         return
 
     inspector = inspect(engine)
-    if "agent_sessions" not in inspector.get_table_names():
+    table_names = set(inspector.get_table_names())
+    if "agent_sessions" not in table_names:
         return
 
     columns = {column["name"] for column in inspector.get_columns("agent_sessions")}
-    if "summary_json" in columns:
-        return
-
     with engine.begin() as conn:
-        conn.execute(text(
-            "ALTER TABLE agent_sessions "
-            "ADD COLUMN summary_json TEXT NOT NULL DEFAULT '[]'"
-        ))
+        if "summary_json" not in columns:
+            conn.execute(text(
+                "ALTER TABLE agent_sessions "
+                "ADD COLUMN summary_json TEXT NOT NULL DEFAULT '[]'"
+            ))
+        if "agent_approvals" in table_names:
+            approval_columns = {column["name"] for column in inspector.get_columns("agent_approvals")}
+            if "metadata_json" not in approval_columns:
+                conn.execute(text(
+                    "ALTER TABLE agent_approvals "
+                    "ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
+                ))

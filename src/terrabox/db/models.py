@@ -354,6 +354,7 @@ class AgentApproval(Base):
     reason = Column(Text, nullable=False, default="")
     status = Column(String(32), nullable=False, default="pending")
     decision_note = Column(Text)
+    metadata_json = Column(Text, nullable=False, default="{}")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     decided_at = Column(DateTime)

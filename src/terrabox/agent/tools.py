@@ -52,7 +52,10 @@ def _make_tool_func(slug: str, user, pre_execute_validator=None):
             result = pre_execute_validator.validate(slug, kwargs)
             if not result.ok:
                 return result.to_tool_message()
-        return AgentToolExecutor.execute(slug, kwargs, user)
+        result = AgentToolExecutor.execute(slug, kwargs, user)
+        if pre_execute_validator is not None and hasattr(pre_execute_validator, "observe_result"):
+            pre_execute_validator.observe_result(slug, kwargs, result)
+        return result
     return _call
 
 

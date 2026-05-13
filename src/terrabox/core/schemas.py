@@ -629,6 +629,7 @@ class AgentApprovalResponse(BaseModel):
     reason: str
     status: str
     decision_note: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     decided_at: Optional[datetime] = None
