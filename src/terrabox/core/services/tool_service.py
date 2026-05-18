@@ -1,5 +1,4 @@
 """Tool service for tool-related operations."""
-import uuid
 import asyncio
 import inspect
 from datetime import datetime
@@ -11,6 +10,13 @@ from ..registry import ToolSpec
 from ..registry import list_toolkits, get_tool, get_handler, list_tools
 from ..schemas import ToolSpecOut, ToolkitOut, ExecuteRequestIn, ExecuteResponseOut
 from ..registry import get_tool_registry, ToolDefinition
+from ..utils.runtime_paths import (
+    apply_default_output_paths,
+    generate_execution_id,
+    prepare_runtime_context,
+    write_manifest,
+)
+from ..utils.tool_chinese_descriptions import append_chinese_description
 class ToolService:
     """Service for tool-related operations."""
     
@@ -38,7 +44,7 @@ class ToolService:
                 tool_out = ToolSpecOut(
                     slug=tool.slug,
                     name=tool.name,
-                    description=tool.description,
+                    description=append_chinese_description(tool.slug, tool.description),
                     requires_connection=tool.requires_connection,
                     status=status,
                     toolkit_slug=toolkit.name,  # Use name as slug since Toolkit doesn't have slug
@@ -77,7 +83,7 @@ class ToolService:
         return ToolSpecOut(
             slug=tool.slug,
             name=tool.name,
-            description=tool.description,
+            description=append_chinese_description(tool.slug, tool.description),
             requires_connection=tool.requires_connection,
             status=status,
             toolkit_slug=toolkit_name or "",
@@ -130,7 +136,7 @@ class ToolService:
                 tool_spec = ToolSpecOut(
                     slug=tool.slug,
                     name=tool.name,
-                    description=tool.description,
+                    description=append_chinese_description(tool.slug, tool.description),
                     requires_connection=tool.requires_connection,
                     status=tool_status,
                     toolkit_slug=toolkit.name,
@@ -160,6 +166,11 @@ class ToolService:
         """Execute a tool with the given inputs."""
         from .connection_service import ConnectionService
         from .tool_override_service import ToolOverrideService
+
+        metadata = dict(request.metadata or {})
+        execution_id = str(metadata.get("execution_id") or generate_execution_id())
+        runtime_metadata: Dict[str, Any] = {}
+        prepared_inputs = dict(request.inputs or {})
         
         try:
             # Get tool definition
@@ -177,6 +188,16 @@ class ToolService:
                 if any(t.slug == tool_slug for t in toolkit_tools):
                     app_key = toolkit.name
                     break
+
+            runtime_metadata = prepare_runtime_context(user_id, tool_slug, execution_id=execution_id)
+            metadata.update(runtime_metadata)
+            execution_id = metadata["execution_id"]
+            prepared_inputs = apply_default_output_paths(
+                tool_slug,
+                prepared_inputs,
+                tool.parameters,
+                metadata,
+            )
             
             # Check if tool requires connection
             connection = None
@@ -225,8 +246,8 @@ class ToolService:
             }
             
             # Merge metadata into context if provided
-            if request.metadata:
-                context.update(request.metadata)
+            if metadata:
+                context.update(metadata)
             
             # Execute the tool (supports async handlers)
             # Check handler signature to determine if it accepts connection parameter
@@ -235,27 +256,37 @@ class ToolService:
             
             if inspect.iscoroutinefunction(handler):
                 if accepts_connection:
-                    result_data = await handler(request.inputs or {}, context, connection)
+                    result_data = await handler(prepared_inputs, context, connection)
                 else:
-                    result_data = await handler(request.inputs or {}, context)
+                    result_data = await handler(prepared_inputs, context)
             else:
                 loop = asyncio.get_running_loop()
                 if accepts_connection:
-                    result_data = await loop.run_in_executor(None, lambda: handler(request.inputs or {}, context, connection))
+                    result_data = await loop.run_in_executor(None, lambda: handler(prepared_inputs, context, connection))
                 else:
-                    result_data = await loop.run_in_executor(None, lambda: handler(request.inputs or {}, context))
+                    result_data = await loop.run_in_executor(None, lambda: handler(prepared_inputs, context))
             
             # Record tool execution
-            execution_id = str(uuid.uuid4())
             ToolService._log_tool_execution(
                 db, user_id, tool_slug, connection, execution_id, 
-                request.inputs, result_data, True, None, app_key
+                prepared_inputs, result_data, True, None, app_key
             )
+            manifest_path = write_manifest(
+                execution_id=execution_id,
+                user_id=user_id,
+                tool_slug=tool_slug,
+                runtime=metadata,
+                inputs=prepared_inputs,
+                outputs=result_data if isinstance(result_data, dict) else {"result": result_data},
+                status="success",
+            )
+            metadata["manifest_path"] = manifest_path
             
             return ExecuteResponseOut(
                 success=True,
                 outputs=result_data,
-                execution_id=execution_id
+                execution_id=execution_id,
+                metadata=metadata,
             )
             
         except Exception as e:
@@ -265,13 +296,28 @@ class ToolService:
             
             # Log failed execution
             ToolService._log_tool_execution(
-                db, user_id, tool_slug, None, str(uuid.uuid4()),
-                request.inputs, None, False, str(e), None
+                db, user_id, tool_slug, None, execution_id,
+                prepared_inputs, None, False, str(e), None
             )
+            if runtime_metadata:
+                metadata.update(runtime_metadata)
+                manifest_path = write_manifest(
+                    execution_id=execution_id,
+                    user_id=user_id,
+                    tool_slug=tool_slug,
+                    runtime=metadata,
+                    inputs=prepared_inputs,
+                    outputs=None,
+                    status="error",
+                    error=str(e),
+                )
+                metadata["manifest_path"] = manifest_path
             
             return ExecuteResponseOut(
                 success=False,
-                error=str(e)
+                error=str(e),
+                execution_id=execution_id,
+                metadata=metadata or None,
             )
     
     @staticmethod
