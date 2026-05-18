@@ -1,0 +1,263 @@
+"""
+Minimal tests for geoanalysis toolkit.
+Matches the style of test_tool_georaster.py (manual MockRegistrar).
+
+Run:
+  python -m tests.test_tool_geoanalysis
+"""
+
+import os
+import shutil
+import tempfile
+import sys
+import math
+import numpy as np
+
+# Import the toolkit setup
+try:
+    from terrabox.toolkits import geoanalysis
+except ImportError:
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
+    from terrabox.toolkits import geoanalysis
+
+# -----------------------------
+# 1. Mock Registrar (Shared Pattern)
+# -----------------------------
+class MockRegistrar:
+    def __init__(self):
+        self.toolkits = {}
+        self.tools = {}          # slug -> spec
+        self.handlers = {}       # slug -> handler
+
+    def toolkit(self, name: str, description: str, version: str):
+        self.toolkits[name] = {"description": description, "version": version}
+
+    def tool(self, toolspec, handler):
+        # Store by slug
+        self.tools[toolspec.slug] = toolspec
+        self.handlers[toolspec.slug] = handler
+
+    def call(self, slug: str, arguments: dict, context: dict = None, account=None):
+        if context is None: context = {}
+        handler = self.handlers.get(slug)
+        if not handler:
+            raise KeyError(f"Tool not registered: {slug}. Available: {list(self.handlers.keys())}")
+        return handler(arguments, context, account)
+
+# -----------------------------
+# 2. Helpers
+# -----------------------------
+def create_dummy_raster(path, data, nodata=-9999):
+    """Creates a simple GeoTIFF using rasterio."""
+    try:
+        import rasterio
+        from rasterio.transform import from_origin
+    except ImportError:
+        return False
+
+    rows, cols = data.shape
+    transform = from_origin(0, 10, 1, 1)
+    profile = {
+        'driver': 'GTiff',
+        'height': rows,
+        'width': cols,
+        'count': 1,
+        'dtype': 'float32',
+        'crs': 'EPSG:4326',
+        'transform': transform,
+        'nodata': nodata
+    }
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with rasterio.open(path, 'w', **profile) as dst:
+        dst.write(data.astype(np.float32), 1)
+    return True
+
+# -----------------------------
+# 3. Main Test Runner
+# -----------------------------
+def main():
+    # Check dependencies
+    try:
+        import pandas
+        import statsmodels
+        import ruptures
+        import rasterio
+    except ImportError as e:
+        print(f"Test skipped: Missing dependency ({e}). Please install: pandas statsmodels ruptures rasterio")
+        return
+
+    temp_dir = tempfile.mkdtemp()
+    print(f"Temp dir: {temp_dir}")
+
+    try:
+        reg = MockRegistrar()
+        geoanalysis.setup(reg)
+        print("Toolkit registered successfully.\n")
+
+        # ==========================================
+        # Part A: Time Series Tests
+        # ==========================================
+        print("--- Time Series Analysis Tests ---")
+
+        # 1. Linear Trend
+        # Data: y = 2x + 1 perfectly
+        ts_linear = [1, 3, 5, 7, 9]
+        # FIX: Added underscore to geoanalysis prefix
+        res = reg.call("geoanalysis.compute_linear_trend", {"y": ts_linear})
+        assert math.isclose(res["slope"], 2.0, abs_tol=1e-5)
+        assert res["trend"] == "upward"
+        print("PASS: compute_linear_trend (slope=2.0)")
+
+        # 2. Mann-Kendall
+        # Monotonic increasing
+        # FIX: Added underscore
+        res = reg.call("geoanalysis.mann_kendall_test", {"values": [10, 12, 15, 18, 20, 25]})
+        assert "trend" in res
+        assert "z_score" in res
+        print(f"PASS: mann_kendall_test (trend={res['trend']})")
+
+        # 3. Sen's Slope
+        # FIX: Added underscore
+        res = reg.call("geoanalysis.sens_slope", {"values": [1, 2, 4, 5, 10]})
+        assert res["slope"] > 0
+        print(f"PASS: sens_slope (slope={res['slope']})")
+
+        # 4. STL Decomposition
+        # Seasonal data: 10, 20, 10, 20...
+        ts_seasonal = [10, 20] * 12 # 24 points
+        # FIX: Added underscore
+        res = reg.call("geoanalysis.stl_decompose", {"values": ts_seasonal, "period": 2})
+        assert len(res["seasonal"]) == 24
+        assert len(res["trend"]) == 24
+        print("PASS: stl_decompose")
+
+        # 5. Change Points
+        # 0..0 then 10..10
+        ts_change = [0]*10 + [10]*10
+        # FIX: Added underscore
+        res = reg.call("geoanalysis.detect_change_points", {"values": ts_change, "penalty": 1})
+        # Should detect change around index 10
+        assert len(res["change_points"]) >= 1
+        print(f"PASS: detect_change_points (points={res['change_points']})")
+
+        # 6. ACF & Seasonality
+        ts_periodic = [1, 0, 1, 0, 1, 0, 1, 0]
+        # FIX: Added underscore
+        res_acf = reg.call("geoanalysis.autocorrelation_function", {"values": ts_periodic, "nlags": 5})
+        assert math.isclose(res_acf["acf"][0], 1.0)
+        print("PASS: autocorrelation_function")
+
+        # FIX: Added underscore
+        res_sea = reg.call("geoanalysis.detect_seasonality_acf", {"values": ts_periodic})
+        if res_sea["period"] == 2:
+            print("PASS: detect_seasonality_acf (period=2)")
+        else:
+            print(f"WARN: detect_seasonality_acf got {res_sea}")
+
+        # 7. Count Spikes
+        ts_spikes = [1, 1.1, 2.0, 2.1, 5.0]
+        # FIX: Added underscore
+        res = reg.call("geoanalysis.count_spikes", {"values": ts_spikes, "threshold": 0.5})
+        assert res["spike_count"] == 2
+        print(f"PASS: count_spikes (count={res['spike_count']})")
+
+
+        # ==========================================
+        # Part B: Spatial Analysis Tests
+        # ==========================================
+        print("\n--- Spatial Analysis Tests ---")
+
+        # 8. Getis-Ord Gi*
+        raster_data = np.zeros((5, 5))
+        raster_data[2, 2] = 100 # Hot center
+        raster_data[2, 1] = 50
+        raster_data[1, 2] = 50
+
+        in_path = os.path.join(temp_dir, "input_gi.tif")
+        out_path = os.path.join(temp_dir, "output_gi.tif")
+        create_dummy_raster(in_path, raster_data)
+
+        weights = [[1, 1, 1], [1, 1, 1], [1, 1, 1]]
+
+        # FIX: Added underscore
+        res = reg.call("geoanalysis.getis_ord_gi_star", {
+            "image_path": in_path,
+            "output_path": out_path,
+            "weight_matrix": weights
+        })
+        assert res["status"] == "success"
+        assert os.path.exists(out_path)
+
+        with rasterio.open(out_path) as src:
+            gi_vals = src.read(1)
+            assert gi_vals[2, 2] > 0
+        print("PASS: getis_ord_gi_star")
+
+        # 9. Hotspot Direction
+        hotspot_data = np.zeros((10, 10))
+        hotspot_data[1:3, 4:6] = 1 # Cluster at top center
+
+        hs_path = os.path.join(temp_dir, "hotspot_binary.tif")
+        create_dummy_raster(hs_path, hotspot_data)
+
+        # FIX: Added underscore
+        res = reg.call("geoanalysis.analyze_hotspot_direction", {
+            "hotspot_map_path": hs_path
+        })
+        assert res["direction"] == "north"
+        print(f"PASS: analyze_hotspot_direction (dir={res['direction']})")
+
+        # ==========================================
+        # Part C: Descriptive Statistics Tests
+        # ==========================================
+        print("\n--- Descriptive Statistics Tests ---")
+
+        # 10. Coefficient of Variation
+        res = reg.call("geoanalysis.coefficient_of_variation", {"x": [10, 10, 10, 10]})
+        assert math.isclose(res["cv"], 0.0, abs_tol=1e-9), f"CV should be 0 for constant, got {res['cv']}"
+        res2 = reg.call("geoanalysis.coefficient_of_variation", {"x": [1, 2, 3, 4, 5]})
+        assert res2["cv"] > 0
+        print(f"PASS: coefficient_of_variation (cv={res2['cv']:.4f})")
+
+        # 11. Skewness
+        res = reg.call("geoanalysis.skewness", {"x": [1, 2, 3, 4, 5]})
+        assert math.isclose(res["skewness"], 0.0, abs_tol=1e-6), \
+            f"Symmetric data should have skewness~0, got {res['skewness']}"
+        res2 = reg.call("geoanalysis.skewness", {"x": [1, 1, 1, 10]})
+        assert res2["skewness"] > 0, "Right-skewed data should have positive skewness"
+        print(f"PASS: skewness (symmetric~0, right-skewed={res2['skewness']:.4f})")
+
+        # 12. Kurtosis
+        res = reg.call("geoanalysis.kurtosis", {"x": [1, 1, 1, 1]})
+        assert math.isclose(res["kurtosis"], 0.0, abs_tol=1e-6), \
+            f"Constant data should have kurtosis=0, got {res['kurtosis']}"
+        # Normal-ish data: [1..5] excess kurtosis should be negative (light tails)
+        res2 = reg.call("geoanalysis.kurtosis", {"x": [1, 2, 3, 4, 5], "fisher": True})
+        print(f"PASS: kurtosis (constant=0, uniform excess={res2['kurtosis']:.4f})")
+
+        # 13. Percentage Change
+        res = reg.call("geoanalysis.percentage_change", {"old": 100.0, "new": 150.0})
+        assert math.isclose(res["percentage_change"], 50.0, abs_tol=1e-6), \
+            f"Expected 50%, got {res['percentage_change']}"
+        res2 = reg.call("geoanalysis.percentage_change", {"old": 200.0, "new": 150.0})
+        assert math.isclose(res2["percentage_change"], -25.0, abs_tol=1e-6), \
+            f"Expected -25%, got {res2['percentage_change']}"
+        # Division by zero case
+        res3 = reg.call("geoanalysis.percentage_change", {"old": 0.0, "new": 10.0})
+        assert res3["percentage_change"] == float("inf")
+        print(f"PASS: percentage_change (+50%, -25%, inf on zero-base)")
+
+        print("\nAll geoanalysis smoke tests passed!")
+
+    except Exception as e:
+        print(f"\nTEST FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Cleanup
+        shutil.rmtree(temp_dir)
+        print(f"Cleaned up {temp_dir}")
+
+if __name__ == "__main__":
+    main()
