@@ -17,7 +17,7 @@ AI services start on demand — no manual launch needed.
 | Strip-RCNN | 9005 | subprocess or Docker |
 | InstructSAM | 9006 | subprocess or Docker |
 
-Docker mode is the default for this branch. Set `TERRABOX_USE_DOCKER=true` in `.env` unless you are intentionally wiring custom subprocess managers.
+Docker mode is the default deployment mode. Set `TERRABOX_USE_DOCKER=true` in `.env` unless you are intentionally wiring custom subprocess managers.
 
 ---
 

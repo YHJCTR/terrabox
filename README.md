@@ -737,7 +737,7 @@ If the above methods cannot solve the problem, please:
 
 ## Acknowledgements
 
-Several geospatial analysis tool interfaces and workflows in this branch were
+Several geospatial analysis tool interfaces and workflows were
 adapted from EarthAgent/OpenEarthAgent-style remote-sensing task pipelines and
 integrated into the Terrabox toolkit registry/runtime. The optional AI
 perception services build on external research projects including SAM2,
