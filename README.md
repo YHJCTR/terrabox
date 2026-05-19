@@ -192,6 +192,14 @@ see **[INSTALLATION.md](INSTALLATION.md)**. It covers:
 - Host-side path configuration
 - Agent LLM setup (optional)
 
+### Frontend Tool Test Data
+
+The frontend-backend integration test dataset is distributed as a GitHub Release
+asset named `frontend_tool_test_realdata.zip`.
+
+Download it from the project Releases page, unzip it, and use the contained
+files to test GUI tool upload, execution, and output download flows.
+
 ## User Guide
 
 ### Basic Usage Flow
