@@ -80,11 +80,18 @@ def _assign_uploaded_path(inputs: Dict[str, Any], param_name: str, path: str) ->
         head, *tail = [part for part in param_name.split(".") if part]
         if not head or not tail:
             return
-        current = inputs.setdefault(head, {})
+        current = inputs.get(head)
+        if not isinstance(current, dict):
+            current = {}
+            inputs[head] = current
         for part in tail[:-1]:
             if not isinstance(current, dict):
                 return
-            current = current.setdefault(part, {})
+            existing = current.get(part)
+            if not isinstance(existing, dict):
+                existing = {}
+                current[part] = existing
+            current = existing
         if isinstance(current, dict):
             current[tail[-1]] = path
         return

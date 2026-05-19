@@ -9,9 +9,17 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from .tool_chinese_descriptions import CHINESE_TOOL_DESCRIPTIONS
-
 OUTPUT_PARAMETER_NAMES = {"output_path", "output_dir"}
+TOOLS_PR_TOOLKIT_PREFIXES = {
+    "disaster_response",
+    "earth_sci",
+    "geo_perception",
+    "geo_raster",
+    "geo_statistics",
+    "geoanalysis",
+    "osm_gis",
+    "raster_viewer",
+}
 
 
 def _is_output_parameter(name: str) -> bool:
@@ -25,7 +33,8 @@ def _is_output_parameter(name: str) -> bool:
 
 def is_tools_pr_tool(slug: str) -> bool:
     """Return True for tools introduced by the tools-only PR branch."""
-    return slug in CHINESE_TOOL_DESCRIPTIONS
+    toolkit, _, _ = slug.partition(".")
+    return toolkit in TOOLS_PR_TOOLKIT_PREFIXES
 
 
 def prepare_gui_tool_parameters(

@@ -148,7 +148,7 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
         or arguments.get("image_paths")
         or arguments.get("image_path")
     )
-    
+
     if not raw_images:
          return {"status": "error", "message": "Missing images parameter."}
 
@@ -198,24 +198,24 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
         max_tokens = int(max_tokens)
     except Exception:
         max_tokens = 8192
-    
+
     try:
         vllm_manager.start_service()
     except Exception as e:
         return {"status": "error", "message": f"Failed to start AI Service: {str(e)}"}
 
     message_content = [{"type": "text", "text": prompt}]
-    
+
     try:
         for idx, path in enumerate(image_paths):
             clean_path = str(path).strip()
             if not os.path.exists(clean_path):
                 logger.error(f"File not found: {clean_path}")
                 return {"status": "error", "message": f"File not found on server: {clean_path}"}
-                
+
             b64_str = _encode_image_to_base64(clean_path)
             message_content.append({
-                "type": "image_url", 
+                "type": "image_url",
                 "image_url": {"url": b64_str}
             })
     except Exception as e:
@@ -278,7 +278,7 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
         }
     except Exception as e:
         return {"status": "error", "message": f"Connection failed: {str(e)}"}
-        
+
 
 
 
@@ -308,8 +308,8 @@ def sam2_segment_handler(arguments: Dict[str, Any], context: Any, account: Any) 
             bboxes.append({"x1": min(xs), "y1": min(ys), "x2": max(xs), "y2": max(ys)})
 
     return {"status": "success", "output": md_text, "bboxes": bboxes}
-        
-        
+
+
 # --- Wrappers ---
 
 def remoteclip_analysis_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
@@ -623,59 +623,6 @@ def bbox_area_handler(arguments: Dict[str, Any], context: Any, account: Any) -> 
     return result
 
 
-# --- Mock Handlers (placeholder until models are deployed) ---
-
-def mscn_classify_mock_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
-    """[Mock] MSCN scene classification - returns stub result."""
-    image_path = _resolve_image_path(arguments)
-    return {
-        "status": "mock",
-        "note": "MSCN model not yet deployed. This is a placeholder response.",
-        "image": image_path,
-        "predicted_class": "Unknown",
-        "confidence": 0.0,
-        "categories": [
-            "Airport", "Beach", "Bridge", "Commercial", "Desert",
-            "Farmland", "Forest", "Industrial", "Meadow", "Mountain",
-            "Park", "Parking", "Port", "Railway", "Residential",
-            "River", "Runway", "Stadium", "Storage_tank", "Urban"
-        ]
-    }
-
-
-def sm3det_detect_mock_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
-    """[Mock] SM3Det multi-category detection - returns stub result."""
-    image_path = _resolve_image_path(arguments)
-    return {
-        "status": "mock",
-        "note": "SM3Det model not yet deployed. This is a placeholder response.",
-        "image": image_path,
-        "detections": [],
-        "num_detections": 0,
-        "categories": [
-            "airplane", "ship", "storage_tank", "baseball_diamond",
-            "tennis_court", "basketball_court", "ground_track_field",
-            "harbor", "bridge", "large_vehicle", "small_vehicle",
-            "helicopter", "roundabout", "soccer_ball_field", "swimming_pool"
-        ]
-    }
-
-
-def change_os_detect_mock_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
-    """[Mock] ChangeOS change detection / building extraction - returns stub result."""
-    pre_path = arguments.get("pre_image") or arguments.get("image")
-    mode = arguments.get("mode", "change_detection")
-    return {
-        "status": "mock",
-        "note": "ChangeOS model not yet deployed. This is a placeholder response.",
-        "mode": mode,
-        "pre_image": pre_path,
-        "post_image": arguments.get("post_image"),
-        "change_mask": None,
-        "changed_pixels": 0,
-    }
-
-
 # --- Tool Registration ---
 
 def setup(registrar):
@@ -726,7 +673,7 @@ def setup(registrar):
         ),
         vlm_analyze_handler,
     )
-    
+
     registrar.tool(
         ToolSpec(
             slug="geo_perception.sam2_segment",
@@ -746,7 +693,7 @@ def setup(registrar):
         ),
         sam2_segment_handler
     )
-    
+
     # 3. RemoteCLIP (Retrieval / Classification)
     registrar.tool(
         ToolSpec(
@@ -1088,66 +1035,4 @@ def setup(registrar):
             requires_connection=False
         ),
         bbox_area_handler
-    )
-
-    # 15. MSCN Classify (Mock)
-    registrar.tool(
-        ToolSpec(
-            slug="geo_perception.mscn_classify",
-            name="MSCN Scene Classification",
-            description="[Mock] Classify a remote sensing image into one of 30 scene categories (Airport, Forest, Urban, Farmland, etc.) using MSCN scene classifier. NOTE: Returns mock results; model not yet deployed.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "image": {"type": "string", "description": "Path to the input image."}
-                },
-                "required": ["image"]
-            },
-            requires_connection=False
-        ),
-        mscn_classify_mock_handler
-    )
-
-    # 16. SM3Det (Mock)
-    registrar.tool(
-        ToolSpec(
-            slug="geo_perception.sm3det_detect",
-            name="SM3Det Multi-Category Detection",
-            description="[Mock] Detect objects in 15 categories (aircraft, ships, vehicles, buildings, fields, etc.) using SM3Det. NOTE: Returns mock results; model not yet deployed.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "image": {"type": "string", "description": "Path to the input image."},
-                    "score_threshold": {"type": "number", "default": 0.3, "description": "Confidence threshold."}
-                },
-                "required": ["image"]
-            },
-            requires_connection=False
-        ),
-        sm3det_detect_mock_handler
-    )
-
-    # 17. ChangeOS (Mock)
-    registrar.tool(
-        ToolSpec(
-            slug="geo_perception.change_os_detect",
-            name="ChangeOS Change Detection",
-            description="[Mock] Detect changes between two multi-temporal satellite images or extract building footprints using ChangeOS. NOTE: Returns mock results; model not yet deployed.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "pre_image": {"type": "string", "description": "Path to the pre-event image (or single image for building extraction)."},
-                    "post_image": {"type": "string", "description": "Path to the post-event image (optional for building extraction mode)."},
-                    "mode": {
-                        "type": "string",
-                        "enum": ["change_detection", "building_extraction"],
-                        "default": "change_detection",
-                        "description": "'change_detection': detect changes between two images. 'building_extraction': extract building footprints from a single image."
-                    }
-                },
-                "required": ["pre_image"]
-            },
-            requires_connection=False
-        ),
-        change_os_detect_mock_handler
     )

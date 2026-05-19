@@ -16,19 +16,22 @@ from ..utils.runtime_paths import (
     prepare_runtime_context,
     write_manifest,
 )
-from ..utils.tool_chinese_descriptions import append_chinese_description
+from ..utils.tool_input_coercion import coerce_tool_inputs
+from ..utils.tool_output_serialization import make_json_safe
+
+
 class ToolService:
     """Service for tool-related operations."""
-    
+
     @staticmethod
     def get_tools_with_status(db: Session, user_id: str) -> List[ToolSpecOut]:
         """Get all tools with their availability status for a user."""
         from ..registry import list_toolkits, list_tools
         from .connection_service import ConnectionService
-        
+
         toolkits = list_toolkits()
         tools = []
-        
+
         for toolkit in toolkits:
             # Get tools for this toolkit
             toolkit_tools = list_tools(toolkit.name)
@@ -40,11 +43,11 @@ class ToolService:
                     connection = ConnectionService.select_connection(db, user_id, toolkit.name)
                     if not connection:
                         status = "unavailable"
-                
+
                 tool_out = ToolSpecOut(
                     slug=tool.slug,
                     name=tool.name,
-                    description=append_chinese_description(tool.slug, tool.description),
+                    description=tool.description,
                     requires_connection=tool.requires_connection,
                     status=status,
                     toolkit_slug=toolkit.name,  # Use name as slug since Toolkit doesn't have slug
@@ -52,18 +55,18 @@ class ToolService:
                     metadata=tool.metadata if hasattr(tool, 'metadata') else None
                 )
                 tools.append(tool_out)
-        
+
         return tools
-    
+
     @staticmethod
     def get_tool_with_status(db: Session, user_id: str, tool_slug: str) -> Optional[ToolSpecOut]:
         """Get a specific tool with its availability status for a user."""
         from .connection_service import ConnectionService
-        
+
         tool = get_tool(tool_slug)
         if not tool:
             return None
-        
+
         # Find the toolkit that contains this tool
         toolkit_name = None
         for toolkit in list_toolkits():
@@ -71,7 +74,7 @@ class ToolService:
             if any(t.slug == tool_slug for t in toolkit_tools):
                 toolkit_name = toolkit.name
                 break
-        
+
         # Calculate tool status
         status = "available"
         if tool.requires_connection and toolkit_name:
@@ -79,32 +82,32 @@ class ToolService:
             connection = ConnectionService.select_connection(db, user_id, toolkit_name)
             if not connection:
                 status = "unavailable"
-        
+
         return ToolSpecOut(
             slug=tool.slug,
             name=tool.name,
-            description=append_chinese_description(tool.slug, tool.description),
+            description=tool.description,
             requires_connection=tool.requires_connection,
             status=status,
             toolkit_slug=toolkit_name or "",
             parameters=tool.parameters,
             metadata=tool.metadata if hasattr(tool, 'metadata') else None
         )
-    
+
     @staticmethod
     def get_toolkits_with_status(db: Session, user_id: str) -> List[ToolkitOut]:
         """Get all toolkits with their availability status for a user."""
         from .connection_service import ConnectionService
         from ...db.models import Toolkit as ToolkitModel
-        
+
         toolkits = list_toolkits()
         toolkit_outs = []
-        
+
         for toolkit in toolkits:
             # Check if toolkit is active in database
             db_toolkit = db.query(ToolkitModel).filter(ToolkitModel.key == toolkit.name).first()
             is_active = db_toolkit.is_active if db_toolkit else True  # Default to active if not in DB
-            
+
             # Determine toolkit status based on is_active and connection status
             if not is_active:
                 status = "inactive"
@@ -112,14 +115,14 @@ class ToolService:
                 # Check if user has valid connections for this toolkit
                 connection = ConnectionService.select_connection(db, user_id, toolkit.name)
                 status = "connected" if connection else "active"
-            
+
             # Get tools count for this toolkit
             toolkit_tools = list_tools(toolkit.name)
             tools_count = len(toolkit_tools)
-            
+
             # Count tools that require connection
             connection_required_count = sum(1 for tool in toolkit_tools if tool.requires_connection)
-            
+
             # Convert tools to ToolSpecOut objects
             tool_specs = []
             for tool in toolkit_tools:
@@ -132,11 +135,11 @@ class ToolService:
                     connection = ConnectionService.select_connection(db, user_id, toolkit.name)
                     if not connection:
                         tool_status = "unavailable"
-                
+
                 tool_spec = ToolSpecOut(
                     slug=tool.slug,
                     name=tool.name,
-                    description=append_chinese_description(tool.slug, tool.description),
+                    description=tool.description,
                     requires_connection=tool.requires_connection,
                     status=tool_status,
                     toolkit_slug=toolkit.name,
@@ -144,7 +147,7 @@ class ToolService:
                     metadata=tool.metadata if hasattr(tool, 'metadata') else None
                 )
                 tool_specs.append(tool_spec)
-            
+
             toolkit_out = ToolkitOut(
                 slug=toolkit.name,  # Use name as slug since Toolkit doesn't have slug
                 name=toolkit.name,
@@ -158,9 +161,9 @@ class ToolService:
                 }
             )
             toolkit_outs.append(toolkit_out)
-        
+
         return toolkit_outs
-    
+
     @staticmethod
     async def execute_tool(db: Session, user_id: str, tool_slug: str, request: ExecuteRequestIn) -> ExecuteResponseOut:
         """Execute a tool with the given inputs."""
@@ -171,7 +174,7 @@ class ToolService:
         execution_id = str(metadata.get("execution_id") or generate_execution_id())
         runtime_metadata: Dict[str, Any] = {}
         prepared_inputs = dict(request.inputs or {})
-        
+
         try:
             # Get tool definition
             tool = get_tool(tool_slug)
@@ -180,7 +183,7 @@ class ToolService:
                     success=False,
                     error="Tool not found"
                 )
-            
+
             # Find the toolkit that contains this tool
             app_key = None
             for toolkit in list_toolkits():
@@ -192,13 +195,14 @@ class ToolService:
             runtime_metadata = prepare_runtime_context(user_id, tool_slug, execution_id=execution_id)
             metadata.update(runtime_metadata)
             execution_id = metadata["execution_id"]
+            prepared_inputs = coerce_tool_inputs(prepared_inputs, tool.parameters)
             prepared_inputs = apply_default_output_paths(
                 tool_slug,
                 prepared_inputs,
                 tool.parameters,
                 metadata,
             )
-            
+
             # Check if tool requires connection
             connection = None
             if tool.requires_connection and app_key:
@@ -208,12 +212,12 @@ class ToolService:
                         success=False,
                         error="No valid connection found for this tool"
                     )
-            
+
             # For tools that don't require connection, try to find any connection for the toolkit
             # to check tool override settings
             if not connection and app_key:
                 connection = ConnectionService.select_connection(db, user_id, app_key)
-            
+
             # Check if tool is enabled (if any connection exists for the toolkit)
             if connection:
                 # Get effective tools to check if this tool is enabled
@@ -222,7 +226,7 @@ class ToolService:
                     connection_id=str(connection.id),
                     include_disabled=False  # Only get enabled tools
                 )
-                
+
                 # Check if the tool is in the enabled tools list
                 enabled_tool_keys = {tool['tool_key'] for tool in effective_tools_data['tools']}
                 if tool_slug not in enabled_tool_keys:
@@ -230,7 +234,7 @@ class ToolService:
                         success=False,
                         error="Tool is disabled for this connection"
                     )
-            
+
             # Get tool handler
             handler = get_handler(tool_slug)
             if not handler:
@@ -238,22 +242,22 @@ class ToolService:
                     success=False,
                     error="No handler registered for tool"
                 )
-            
+
             # Prepare context for handler
             context = {
                 "user_id": user_id,
                 "connection_id": str(connection.id) if connection else None
             }
-            
+
             # Merge metadata into context if provided
             if metadata:
                 context.update(metadata)
-            
+
             # Execute the tool (supports async handlers)
             # Check handler signature to determine if it accepts connection parameter
             sig = inspect.signature(handler)
             accepts_connection = len(sig.parameters) >= 3
-            
+
             if inspect.iscoroutinefunction(handler):
                 if accepts_connection:
                     result_data = await handler(prepared_inputs, context, connection)
@@ -265,10 +269,12 @@ class ToolService:
                     result_data = await loop.run_in_executor(None, lambda: handler(prepared_inputs, context, connection))
                 else:
                     result_data = await loop.run_in_executor(None, lambda: handler(prepared_inputs, context))
-            
+
+            result_data = make_json_safe(result_data)
+
             # Record tool execution
             ToolService._log_tool_execution(
-                db, user_id, tool_slug, connection, execution_id, 
+                db, user_id, tool_slug, connection, execution_id,
                 prepared_inputs, result_data, True, None, app_key
             )
             manifest_path = write_manifest(
@@ -281,19 +287,19 @@ class ToolService:
                 status="success",
             )
             metadata["manifest_path"] = manifest_path
-            
+
             return ExecuteResponseOut(
                 success=True,
                 outputs=result_data,
                 execution_id=execution_id,
                 metadata=metadata,
             )
-            
+
         except Exception as e:
             import logging
             logger = logging.getLogger(__name__)
             logger.error(f"Tool execution failed: {e}")
-            
+
             # Log failed execution
             ToolService._log_tool_execution(
                 db, user_id, tool_slug, None, execution_id,
@@ -312,29 +318,29 @@ class ToolService:
                     error=str(e),
                 )
                 metadata["manifest_path"] = manifest_path
-            
+
             return ExecuteResponseOut(
                 success=False,
                 error=str(e),
                 execution_id=execution_id,
                 metadata=metadata or None,
             )
-    
+
     @staticmethod
     def _log_tool_execution(
-        db: Session, user_id: str, tool_slug: str, connection, 
-        execution_id: str, inputs, outputs, success: bool, 
+        db: Session, user_id: str, tool_slug: str, connection,
+        execution_id: str, inputs, outputs, success: bool,
         error: Optional[str] = None, app_key: Optional[str] = None
     ):
         """Log tool execution for analytics."""
         try:
             import json
             from ...db.models import ToolExecution
-            
+
             # Serialize meta data to JSON string for SQLite compatibility
             meta_data = {"app_key": app_key} if app_key else None
             meta_json = json.dumps(meta_data) if meta_data else None
-            
+
             tool_execution = ToolExecution(
                 user_id_fk=user_id,
                 tool_slug=tool_slug,

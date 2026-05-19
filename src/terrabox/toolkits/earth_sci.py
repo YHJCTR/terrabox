@@ -13,6 +13,7 @@ Key features:
 """
 
 import os
+import ast
 import logging
 from typing import Any, Dict, List, Optional, Union
 from ..core.registry import ToolSpec
@@ -418,12 +419,100 @@ def microwave_ddm_handler(arguments: Dict[str, Any], context: Any, account: Any)
     _save_raster(output_path, out_stack, profile, count=2)
     return {"output_path": output_path}
 
+def _normalize_diff_pairs(raw_pairs: Any) -> List[List[int]]:
+    """Normalize diff_pairs from API JSON or frontend textarea inputs."""
+    if isinstance(raw_pairs, str):
+        raw_pairs = raw_pairs.strip()
+        if not raw_pairs:
+            return []
+        raw_pairs = ast.literal_eval(raw_pairs)
+
+    if not isinstance(raw_pairs, list):
+        raise ValueError("diff_pairs must be a list of index pairs")
+
+    pairs: List[List[int]] = []
+    for item in raw_pairs:
+        if isinstance(item, str):
+            text = item.strip()
+            try:
+                item = ast.literal_eval(text)
+            except (ValueError, SyntaxError):
+                item = [part.strip() for part in text.replace(",", " ").split() if part.strip()]
+
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            raise ValueError(f"Invalid diff pair: {item!r}. Expected [idx1, idx2].")
+
+        try:
+            idx1, idx2 = int(item[0]), int(item[1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid diff pair indices: {item!r}") from exc
+        pairs.append([idx1, idx2])
+
+    return pairs
+
+
+def _metadata_list(value: Any) -> List[str]:
+    """Parse metadata lists passed by the GUI upload endpoint."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            parsed = [part.strip() for part in text.split(",")]
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed if str(item)]
+    return []
+
+
+def _normalize_named_paths(
+    raw_paths: Any,
+    required_keys: List[str],
+    context: Any,
+    root_name: str,
+    fallback_order: List[str],
+) -> Dict[str, str]:
+    """Normalize object-style raster path inputs from dicts or frontend file lists."""
+    if isinstance(raw_paths, dict):
+        return {key: str(raw_paths[key]) for key in required_keys}
+
+    if not isinstance(raw_paths, (list, tuple)):
+        raise ValueError(f"{root_name} must be an object or a list of file paths")
+
+    paths = [str(path) for path in raw_paths]
+    mapped: Dict[str, str] = {}
+    metadata = context if isinstance(context, dict) else {}
+    param_names = _metadata_list(metadata.get("file_param_names"))
+    relevant_names = [name for name in param_names if name.startswith(f"{root_name}.")]
+
+    for param_name, path in zip(relevant_names, paths):
+        key = param_name.split(".", 1)[1]
+        if key in required_keys:
+            mapped[key] = path
+
+    if all(key in mapped for key in required_keys):
+        return mapped
+
+    if len(paths) == len(fallback_order):
+        return {key: path for key, path in zip(fallback_order, paths)}
+
+    raise ValueError(
+        f"{root_name} requires paths for {', '.join(required_keys)}; "
+        "provide named fields or matching file_param_names metadata."
+    )
+
+
 def microwave_multi_freq_bt_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """Multi-frequency Brightness Temperature Method."""
     rasterio, np = _lazy_imports()
 
     paths = arguments["bt_paths"]
-    pairs = arguments["diff_pairs"] # List[List[int]] e.g. [[0,1], [1,2]]
+    pairs = _normalize_diff_pairs(arguments["diff_pairs"]) # List[List[int]] e.g. [[0,1], [1,2]]
     param_type = arguments.get("parameter", "SM")
     output_path = arguments["output_path"]
 
@@ -456,7 +545,13 @@ def microwave_prm_handler(arguments: Dict[str, Any], context: Any, account: Any)
     """Dual-Polarization Ratio Method (PRM) for VWC or SM."""
     rasterio, np = _lazy_imports()
 
-    paths = arguments["bt_paths"] # dict with 'V' and 'H'
+    paths = _normalize_named_paths(
+        arguments["bt_paths"],
+        required_keys=["V", "H"],
+        context=context,
+        root_name="bt_paths",
+        fallback_order=["H", "V"],
+    )
     param_type = arguments.get("parameter", "VWC")
     output_path = arguments["output_path"]
 
@@ -482,7 +577,13 @@ def calculate_sea_ice_handler(arguments: Dict[str, Any], context: Any, account: 
     """NASA Team Sea Ice Concentration."""
     rasterio, np = _lazy_imports()
 
-    paths = arguments["bt_paths"] # dict 19V, 19H, 37V, 37H
+    paths = _normalize_named_paths(
+        arguments["bt_paths"],
+        required_keys=["19V", "19H", "37V", "37H"],
+        context=context,
+        root_name="bt_paths",
+        fallback_order=["19H", "19V", "37H", "37V"],
+    )
     output_path = arguments["output_path"]
 
     # Read ref

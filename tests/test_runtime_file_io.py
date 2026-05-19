@@ -40,6 +40,20 @@ def test_map_uploaded_files_to_nested_file_parameters():
     assert "image" not in mapped
 
 
+def test_nested_file_parameters_replace_empty_root_placeholder():
+    from terrabox.routers.tools import _map_uploaded_files_to_inputs
+
+    saved_paths = ["/tmp/runtime/uploads/h.tif", "/tmp/runtime/uploads/v.tif"]
+    metadata = {"file_param_names": ["bt_paths.H", "bt_paths.V"]}
+
+    mapped = _map_uploaded_files_to_inputs({"bt_paths": []}, saved_paths, metadata)
+
+    assert mapped["bt_paths"] == {
+        "H": "/tmp/runtime/uploads/h.tif",
+        "V": "/tmp/runtime/uploads/v.tif",
+    }
+
+
 def test_single_upload_without_mapping_keeps_image_compatibility():
     from terrabox.routers.tools import _map_uploaded_files_to_inputs
 

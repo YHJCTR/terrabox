@@ -69,6 +69,16 @@ pip install -e ".[dev]"
 python -c "import terrabox; print('Installation successful!')"
 ```
 
+The geospatial toolkits use optional scientific/GIS packages that may not be
+installed by the platform base dependencies alone:
+
+```bash
+pip install rasterio geopandas shapely osmnx networkx scipy pandas statsmodels ruptures opencv-python-headless scikit-image
+```
+
+The AI perception tools additionally require Docker with NVIDIA GPU support and
+local model weights. See "Optional: AI Perception Models" below.
+
 ### Step 4: Environment Configuration
 
 1. **Copy Configuration Template**:
@@ -164,6 +174,68 @@ curl -X POST "http://localhost:8000/v1/register" \
   }'
 ```
 
+### Optional: AI Perception Models
+
+The `geo_perception` toolkit contains two kinds of tools:
+
+- Lightweight image/geometry utilities such as bounding-box math, drawing, text
+  annotation, and OCR.
+- Model-backed tools that start Docker services on demand:
+  `geo_perception.vlm_analyze`, `geo_perception.sam2_segment`,
+  `geo_perception.remoteclip_analysis`, `geo_perception.strip_rcnn_detect`,
+  `geo_perception.remotesam`, and `geo_perception.instructsam`.
+
+Prepare the configuration template:
+
+```bash
+cp agent_config.example.yaml agent_config.yaml
+```
+
+Download perception model weights:
+
+```bash
+# Download all perception weights into ./models/
+./scripts/download_weights.sh
+
+# China mirror example
+HF_ENDPOINT=https://hf-mirror.com ./scripts/download_weights.sh
+
+# InstructSAM-only helper, useful when debugging that service separately
+./scripts/download_instructsam_models.py --dest ./models/instructsam --skip-qwen
+```
+
+Build the Docker images used by model-backed perception tools:
+
+```bash
+bash docker/sam2/build.sh
+docker build -f docker/remoteclip/Dockerfile -t terrabox/remoteclip:latest docker/remoteclip
+bash docker/remotesam/build.sh
+bash docker/strip_rcnn/build.sh
+bash docker/instructsam/build.sh
+docker build -t terrabox/vllm:latest docker/vllm
+```
+
+Then edit `agent_config.yaml` so the host-side paths match your machine:
+
+| Service | Tool(s) | Host config key | Expected contents |
+| --- | --- | --- | --- |
+| vLLM VLM | `geo_perception.vlm_analyze`, `geo_perception.instructsam` counting step | `vlm_model_path` | HuggingFace VLM model directory, mounted as `/model` |
+| SAM2 | `geo_perception.sam2_segment` | `sam2_checkpoint_host`, `sam2_config_host` | `sam2.1_hiera_large.pt` and SAM2 config directory |
+| RemoteCLIP | `geo_perception.remoteclip_analysis` | `remoteclip_ckpt_host` | RemoteCLIP checkpoint directory |
+| RemoteSAM | `geo_perception.remotesam` | `remotesam_checkpoint_host` | `swin_base_patch4_window12_384_22k.pth` |
+| Strip R-CNN | `geo_perception.strip_rcnn_detect` | `strip_rcnn_ckpt_host`, `strip_rcnn_config_host` | `stripnet_s.pth` and Strip R-CNN configs |
+| InstructSAM | `geo_perception.instructsam` | `instructsam_models_host` | `sam2_hiera_large.pt` and `GeoRSCLIP-ViT-L-14.pt` |
+
+The same settings can be supplied with environment variables:
+`VLM_MODEL_PATH`, `SAM2_CHECKPOINT_HOST`, `SAM2_CONFIG_HOST`,
+`REMOTECLIP_CKPT_HOST`, `REMOTESAM_CHECKPOINT_HOST`,
+`STRIP_RCNN_CKPT_HOST`, `STRIP_RCNN_CONFIG_HOST`,
+`INSTRUCTSAM_MODELS_HOST`, and `DATA_MOUNT_HOST`.
+
+Input files for model-backed tools must be under `DATA_MOUNT_HOST` /
+`docker_data_mount_host` so the Docker containers can read the same absolute
+paths as the backend.
+
 ## User Guide
 
 ### Basic Usage Flow
@@ -217,6 +289,26 @@ curl -X GET "http://localhost:8000/v1/tools" \
 
 ### Tool Usage
 
+#### Built-in Geospatial Toolkits
+
+This branch extends the base Terrabox tool registry with geospatial and
+remote-sensing toolkits:
+
+| Toolkit | Scope |
+| --- | --- |
+| `geo_raster` | Raster indices, masks, thresholding, raster statistics, fire/snow/cloud helpers |
+| `earth_sci` | LST, PWV, ATI, turbidity, microwave and sea-ice retrieval utilities |
+| `geo_statistics` | Batch raster statistics, distribution metrics, scalar and threshold statistics |
+| `geoanalysis` | Time-series trend/change analysis and spatial hotspot analysis |
+| `disaster_response` | Slope, flow direction, zonal stats, exposure, route, accessibility, damage, fire spread |
+| `osm_gis` | OSM boundary, POI, route-distance, and raster bbox helpers |
+| `geo_perception` | Optional model-backed remote-sensing perception plus image/box utilities |
+| `raster_viewer` | GeoTIFF inspection for generated raster outputs |
+
+Most non-model geospatial tools are pure Python/GIS utilities and can be tested
+with the sample files under `tmp/frontend_tool_test_realdata/`. Model-backed
+`geo_perception` tools require the optional Docker/model setup above.
+
 #### Get Available Tools List
 ```bash
 curl -X GET "http://localhost:8000/v1/tools" \
@@ -235,6 +327,21 @@ curl -X POST "http://localhost:8000/v1/tools/github/use" \
     }
   }'
 ```
+
+### Runtime Files
+
+Each tool execution gets an `execution_id`. Uploaded files, generated outputs,
+large artifacts, and manifests are grouped by that ID:
+
+| Type | Default location |
+| --- | --- |
+| Uploads | `tmp/terrabox_runtime/uploads/{user_id}/{execution_id}/` |
+| Outputs | `tmp/terrabox_runtime/outputs/{user_id}/{execution_id}/{toolkit}/` |
+| Artifacts | `tmp/terrabox_runtime/artifacts/{user_id}/{execution_id}/{toolkit}/` |
+| Manifest | `tmp/terrabox_runtime/manifests/{execution_id}.json` |
+
+Frontends should normally present downloadable result links instead of exposing
+backend absolute paths to end users.
 
 ## API Documentation
 
@@ -301,7 +408,7 @@ class TerraboxClient:
         self.session = requests.Session()
         if api_key:
             self.session.headers.update({"X-API-Key": api_key})
-    
+
     def register(self, email, password):
         """Register new user"""
         response = self.session.post(
@@ -309,7 +416,7 @@ class TerraboxClient:
             json={"email": email, "password": password}
         )
         return response.json()
-    
+
     def login(self, email, password):
         """User login"""
         response = self.session.post(
@@ -317,26 +424,26 @@ class TerraboxClient:
             json={"email": email, "password": password}
         )
         return response.json()
-    
+
     def create_api_key(self, jwt_token, label, prefix=None):
         """Create API Key"""
         headers = {"Authorization": f"Bearer {jwt_token}"}
         data = {"label": label}
         if prefix:
             data["prefix"] = prefix
-        
+
         response = self.session.post(
             f"{self.base_url}/v1/gui/api-keys",
             json=data,
             headers=headers
         )
         return response.json()
-    
+
     def list_tools(self):
         """Get tool list"""
         response = self.session.get(f"{self.base_url}/v1/sdk/tools")
         return response.json()
-    
+
     def execute_tool(self, tool_slug, inputs, metadata=None):
         """Execute tool"""
         response = self.session.post(
@@ -344,14 +451,14 @@ class TerraboxClient:
             json={"inputs": inputs, "metadata": metadata or {}}
         )
         return response.json()
-    
+
     def list_toolkit_connections(self, toolkit):
         """Get connection list for specified toolkit"""
         response = self.session.get(
             f"{self.base_url}/v1/sdk/toolkits/{toolkit}/connections"
         )
         return response.json()
-    
+
     def create_connection(self, toolkit, name, auth_method="oauth2"):
         """Create new connection"""
         data = {
@@ -365,7 +472,7 @@ class TerraboxClient:
             json=data
         )
         return response.json()
-    
+
     def get_connection_status(self, connection_id):
         """Get connection status"""
         response = self.session.get(
@@ -397,7 +504,7 @@ print("Available Tools:", tools)
 
 # Execute GitHub Tool
 github_result = api_client.execute_tool(
-    "github-list-repos", 
+    "github-list-repos",
     {"owner": "octocat"},
     {"connection_id": 1}  # If specific connection is needed
 )
@@ -409,7 +516,7 @@ print("GitHub Connections:", github_connections)
 
 # Create New GitHub Connection
 new_connection = api_client.create_connection(
-    "github", 
+    "github",
     "My GitHub Connection"
 )
 print("New Connection:", new_connection)
@@ -683,10 +790,20 @@ If the above methods cannot solve the problem, please:
 3. Submit changes
 4. Create Pull Request
 
+## Acknowledgements
+
+Several geospatial analysis tool interfaces and workflows in this branch were
+adapted from EarthAgent/OpenEarthAgent-style remote-sensing task pipelines and
+integrated into the Terrabox toolkit registry/runtime. The optional AI
+perception services build on external research projects including SAM2,
+RemoteCLIP, RemoteSAM, Strip R-CNN, and InstructSAM. When redistributing or
+deploying model weights, follow the licenses and terms of the upstream projects
+and model providers.
+
 ## Contact
 
 - Email: xiongzhitong@gmail.com
 
 ---
 
-**Version**: 0.1.0  
+**Version**: 0.1.0

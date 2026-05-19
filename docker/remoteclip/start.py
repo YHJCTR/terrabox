@@ -17,13 +17,34 @@ model, _, preprocess = open_clip.create_model_and_transforms(model_name)
 tokenizer = open_clip.get_tokenizer(model_name)
 
 CKPT_DIR = os.environ.get("REMOTECLIP_CKPT_DIR", "/checkpoints")
-ckpt_path = os.path.join(
-    CKPT_DIR,
-    "models--chendelong--RemoteCLIP",
-    "snapshots",
-    "bf1d8a3ccf2ddbf7c875705e46373bfe542bce38",
-    f"RemoteCLIP-{model_name}.pt"
-)
+
+
+def _find_checkpoint(ckpt_dir):
+    candidates = [
+        os.path.join(ckpt_dir, f"RemoteCLIP-{model_name}.pt"),
+        os.path.join(ckpt_dir, "RemoteCLIP-ViT-L-14.pt"),
+        os.path.join(
+            ckpt_dir,
+            "models--chendelong--RemoteCLIP",
+            "snapshots",
+            "bf1d8a3ccf2ddbf7c875705e46373bfe542bce38",
+            f"RemoteCLIP-{model_name}.pt",
+        ),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    for root, _, files in os.walk(ckpt_dir):
+        for filename in files:
+            if filename in {f"RemoteCLIP-{model_name}.pt", "RemoteCLIP-ViT-L-14.pt"}:
+                return os.path.join(root, filename)
+    raise FileNotFoundError(
+        f"RemoteCLIP checkpoint not found under {ckpt_dir}. "
+        "Expected RemoteCLIP-ViT-L-14.pt or a HuggingFace snapshot cache."
+    )
+
+
+ckpt_path = _find_checkpoint(CKPT_DIR)
 ckpt = torch.load(ckpt_path, map_location="cpu")
 model.load_state_dict(ckpt)
 model = model.cuda().eval()
