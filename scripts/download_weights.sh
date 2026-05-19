@@ -35,7 +35,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── Model IDs ────────────────────────────────────────────────────────────────
-VLM_HF_REPO="${VLM_HF_REPO:-NightPro/qwen3vl-8b-4bit-disasterM3}"
+VLM_HF_REPO="${VLM_HF_REPO:-Qwen/Qwen3-VL-8B-Instruct}"
 
 # ── Destination directories ───────────────────────────────────────────────────
 VLM_DIR="${VLM_DIR:-$PROJECT_ROOT/models/vlm}"

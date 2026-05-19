@@ -289,25 +289,6 @@ curl -X GET "http://localhost:8000/v1/tools" \
 
 ### Tool Usage
 
-#### Built-in Geospatial Toolkits
-
-This branch extends the base Terrabox tool registry with geospatial and
-remote-sensing toolkits:
-
-| Toolkit | Scope |
-| --- | --- |
-| `geo_raster` | Raster indices, masks, thresholding, raster statistics, fire/snow/cloud helpers |
-| `earth_sci` | LST, PWV, ATI, turbidity, microwave and sea-ice retrieval utilities |
-| `geo_statistics` | Batch raster statistics, distribution metrics, scalar and threshold statistics |
-| `geoanalysis` | Time-series trend/change analysis and spatial hotspot analysis |
-| `disaster_response` | Slope, flow direction, zonal stats, exposure, route, accessibility, damage, fire spread |
-| `osm_gis` | OSM boundary, POI, route-distance, and raster bbox helpers |
-| `geo_perception` | Optional model-backed remote-sensing perception plus image/box utilities |
-| `raster_viewer` | GeoTIFF inspection for generated raster outputs |
-
-Most non-model geospatial tools are pure Python/GIS utilities and can be tested
-with the sample files under `tmp/frontend_tool_test_realdata/`. Model-backed
-`geo_perception` tools require the optional Docker/model setup above.
 
 #### Get Available Tools List
 ```bash
