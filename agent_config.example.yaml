@@ -1,64 +1,66 @@
 # ============================================================
 # Terrabox Tool Configuration — EXAMPLE
 # ============================================================
-# Copy this file to agent_config.yaml and fill in local model paths.
-#   cp agent_config.example.yaml agent_config.yaml
-#
-# agent_config.yaml is git-ignored so local model paths are not committed.
-# Docker mode is the supported path for geo_perception tools in this branch.
+# Docker mode is the default for this branch.
+use_docker: true
+
+# ============================================================
+# Perception Service Paths — Optional subprocess mode (use_docker: false)
 # ============================================================
 
-# Host-side data directory mounted into model containers. Uploaded/input images
-# must be under this tree so containers can read the same absolute paths.
-docker_data_mount_host: /data1
-
-# ── VLM image analysis: geo_perception.vlm_analyze ──────────────────────────
-# Download default weights with:
-#   ./scripts/download_weights.sh --skip-sam2 --skip-remoteclip --skip-remotesam --skip-strip-rcnn --skip-instructsam
-vlm_model_path: /path/to/terrabox/models/vlm
+# ── vLLM vision model (port 9000) ────────────────────────────────────────────
+# Default: Qwen/Qwen3-VL-8B-Instruct
+vlm_model_path: /path/to/your/vlm_model/
+vlm_python_exec: /path/to/conda/envs/YOUR_ENV/bin/python
 vlm_port: 9000
 vlm_gpu_devices: "0"
 vlm_tensor_parallel: 1
-vlm_max_model_len: 16384
-vlm_gpu_memory_utilization: 0.8
+vlm_max_model_len: 4096
+vlm_gpu_memory_utilization: 0.9
 
-# ── SAM2 segmentation: geo_perception.sam2_segment ──────────────────────────
-# Host directory must contain sam2.1_hiera_large.pt.
-sam2_checkpoint_host: /path/to/terrabox/models/sam2_checkpoints
-# Host directory must expose sam2.1/sam2.1_hiera_l.yaml inside the container.
-# When using the official SAM2 source checkout this is usually:
-#   /path/to/sam2/sam2/configs
-sam2_config_host: /path/to/sam2/sam2/configs
+# ── SAM2 (port 9002) ─────────────────────────────────────────────────────────
+sam2_python_exec: /path/to/conda/envs/sam2/bin/python
+sam2_server_script: /path/to/sam2/sam2_server2.py
+sam2_work_dir: /path/to/sam2
 sam2_port: 9002
 sam2_gpu_devices: "0"
 
-# ── RemoteCLIP retrieval/classification: geo_perception.remoteclip_analysis ─
-# Host directory should be the HuggingFace local-dir produced by
-# scripts/download_weights.sh. The Docker server accepts either a flat
-# RemoteCLIP-ViT-L-14.pt file or a HuggingFace snapshot cache layout.
-remoteclip_ckpt_host: /path/to/terrabox/models/remoteclip
+# ── RemoteCLIP (port 9003) ───────────────────────────────────────────────────
+remoteclip_python_exec: /path/to/conda/envs/RemoteCLIP/bin/python
+remoteclip_server_script: /path/to/RemoteCLIP/start2.py
+remoteclip_work_dir: /path/to/RemoteCLIP
 remoteclip_port: 9003
 remoteclip_gpu_devices: "0"
 
-# ── RemoteSAM tasks: geo_perception.remotesam ───────────────────────────────
-# Host directory must contain swin_base_patch4_window12_384_22k.pth.
-remotesam_checkpoint_host: /path/to/terrabox/models/remotesam
+# ── RemoteSAM (port 9004) ────────────────────────────────────────────────────
+remotesam_python_exec: /path/to/conda/envs/RemoteSAM/bin/python
+remotesam_server_script: /path/to/RemoteSAM/start.py
+remotesam_work_dir: /path/to/RemoteSAM
 remotesam_port: 9004
 remotesam_gpu_devices: "0"
 
-# ── Strip R-CNN detection: geo_perception.strip_rcnn_detect ─────────────────
-# Host checkpoint directory must contain stripnet_s.pth.
-strip_rcnn_ckpt_host: /path/to/terrabox/models/strip_rcnn
-# Host config directory should contain strip_rcnn/orig/strip_rcnn_s_fpn_1x_dota_le90.py.
-strip_rcnn_config_host: /path/to/Strip-RCNN/configs
+# ── Strip-RCNN (port 9005) ───────────────────────────────────────────────────
+strip_rcnn_python_exec: /path/to/conda/envs/strip/bin/python
+strip_rcnn_server_script: /path/to/Strip-RCNN/start.py
+strip_rcnn_work_dir: /path/to/Strip-RCNN
 strip_rcnn_port: 9005
 strip_rcnn_gpu_devices: "0"
+strip_rcnn_config_path: /path/to/Strip-RCNN/configs/strip_rcnn/orig/strip_rcnn_s_fpn_1x_dota_le90.py
+strip_rcnn_checkpoint_path: /path/to/Strip-RCNN/ckpt/stripnet_s.pth
 
-# ── InstructSAM counting/segmentation: geo_perception.instructsam ───────────
-# Host model directory must contain:
-#   sam2_hiera_large.pt
-#   GeoRSCLIP-ViT-L-14.pt
-# It uses the host vLLM service for the counting step.
-instructsam_models_host: /path/to/terrabox/models/instructsam
+# ── InstructSAM (port 9006, manual start only in subprocess mode) ─────────────
 instructsam_port: 9006
-instructsam_gpu_devices: "0"
+
+# ============================================================
+# Perception Service Paths — Docker mode (default)
+# ============================================================
+
+# Host-side volume paths (mounted read-only into each container)
+sam2_checkpoint_host: /path/to/sam2/checkpoints
+sam2_config_host: /path/to/sam2/configs
+remoteclip_ckpt_host: /path/to/RemoteCLIP/checkpoints
+remotesam_checkpoint_host: /path/to/RemoteSAM/pretrained_weights
+strip_rcnn_ckpt_host: /path/to/Strip-RCNN/ckpt
+strip_rcnn_config_host: /path/to/Strip-RCNN/configs
+instructsam_models_host: /path/to/instructsam/models
+docker_data_mount_host: /data1

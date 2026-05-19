@@ -185,56 +185,12 @@ The `geo_perception` toolkit contains two kinds of tools:
   `geo_perception.remoteclip_analysis`, `geo_perception.strip_rcnn_detect`,
   `geo_perception.remotesam`, and `geo_perception.instructsam`.
 
-Prepare the configuration template:
-
-```bash
-cp agent_config.example.yaml agent_config.yaml
-```
-
-Download perception model weights:
-
-```bash
-# Download all perception weights into ./models/
-./scripts/download_weights.sh
-
-# China mirror example
-HF_ENDPOINT=https://hf-mirror.com ./scripts/download_weights.sh
-
-# InstructSAM-only helper, useful when debugging that service separately
-./scripts/download_instructsam_models.py --dest ./models/instructsam --skip-qwen
-```
-
-Build the Docker images used by model-backed perception tools:
-
-```bash
-bash docker/sam2/build.sh
-docker build -f docker/remoteclip/Dockerfile -t terrabox/remoteclip:latest docker/remoteclip
-bash docker/remotesam/build.sh
-bash docker/strip_rcnn/build.sh
-bash docker/instructsam/build.sh
-docker build -t terrabox/vllm:latest docker/vllm
-```
-
-Then edit `agent_config.yaml` so the host-side paths match your machine:
-
-| Service | Tool(s) | Host config key | Expected contents |
-| --- | --- | --- | --- |
-| vLLM VLM | `geo_perception.vlm_analyze`, `geo_perception.instructsam` counting step | `vlm_model_path` | HuggingFace VLM model directory, mounted as `/model` |
-| SAM2 | `geo_perception.sam2_segment` | `sam2_checkpoint_host`, `sam2_config_host` | `sam2.1_hiera_large.pt` and SAM2 config directory |
-| RemoteCLIP | `geo_perception.remoteclip_analysis` | `remoteclip_ckpt_host` | RemoteCLIP checkpoint directory |
-| RemoteSAM | `geo_perception.remotesam` | `remotesam_checkpoint_host` | `swin_base_patch4_window12_384_22k.pth` |
-| Strip R-CNN | `geo_perception.strip_rcnn_detect` | `strip_rcnn_ckpt_host`, `strip_rcnn_config_host` | `stripnet_s.pth` and Strip R-CNN configs |
-| InstructSAM | `geo_perception.instructsam` | `instructsam_models_host` | `sam2_hiera_large.pt` and `GeoRSCLIP-ViT-L-14.pt` |
-
-The same settings can be supplied with environment variables:
-`VLM_MODEL_PATH`, `SAM2_CHECKPOINT_HOST`, `SAM2_CONFIG_HOST`,
-`REMOTECLIP_CKPT_HOST`, `REMOTESAM_CHECKPOINT_HOST`,
-`STRIP_RCNN_CKPT_HOST`, `STRIP_RCNN_CONFIG_HOST`,
-`INSTRUCTSAM_MODELS_HOST`, and `DATA_MOUNT_HOST`.
-
-Input files for model-backed tools must be under `DATA_MOUNT_HOST` /
-`docker_data_mount_host` so the Docker containers can read the same absolute
-paths as the backend.
+For AI perception model installation (weights, Docker images, configuration),
+see **[INSTALLATION.md](INSTALLATION.md)**. It covers:
+- Model weight download
+- Docker image building (supports automatic git cloning or local source)
+- Host-side path configuration
+- Agent LLM setup (optional)
 
 ## User Guide
 

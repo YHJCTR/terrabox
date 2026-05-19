@@ -12,7 +12,7 @@
 #
 # HuggingFace model IDs (set to your preferred model):
 #   VLM_HF_REPO         HuggingFace repo for the vision LLM
-#                       (default: NightPro/qwen3vl-8b-4bit-disasterM3)
+#                       (default: Qwen/Qwen3-VL-8B-Instruct)
 #
 # Destination directories (override via environment variables):
 #   VLM_DIR         default: <project_root>/models/vlm
