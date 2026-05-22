@@ -24,6 +24,8 @@ from ..core.services.agent_run_service import AgentRunService
 from ..core.services.connection_service import ConnectionService
 from ..core.services.tool_override_service import ToolOverrideService
 from ..core.services.tool_service import ToolService
+from ..core.utils.runtime_paths import apply_default_output_paths, prepare_runtime_context, write_manifest
+from ..core.utils.tool_output_serialization import make_json_safe
 from .harness import create_approval, current_context, emit_event, record_artifact, record_step, update_step
 from .runtime import get_runtime
 
@@ -505,17 +507,28 @@ class AgentToolExecutor:
             return f"Tool execution error: Tool not found: {slug}"
         timeout_seconds = _timeout_for_tool(slug)
         started = time.time()
+        trace_id = str(uuid.uuid4())
+        user_id = getattr(user, "user_id", getattr(user, "id", None))
+        runtime_metadata = prepare_runtime_context(str(user_id or "anonymous"), slug, execution_id=trace_id)
         context = _make_tool_context(
             slug,
             timeout_seconds,
             {
-                "user_id": getattr(user, "user_id", getattr(user, "id", None)),
+                "user_id": user_id,
                 "connection_id": None,
-                "trace_id": str(uuid.uuid4()),
+                "trace_id": trace_id,
                 "run_id": None,
+                **runtime_metadata,
             },
         )
         try:
+            spec = get_tool(slug)
+            arguments = apply_default_output_paths(
+                slug,
+                arguments,
+                spec.parameters if spec else {},
+                runtime_metadata,
+            )
             arguments, path_resolutions = _prepare_artifact_paths(slug, arguments)
             arguments = _inject_gpkg(slug, arguments)
             sig = inspect.signature(handler)
@@ -530,15 +543,45 @@ class AgentToolExecutor:
                 timeout_seconds,
                 started,
             )
+            result = make_json_safe(result)
             result = _annotate_path_resolution(result, path_resolutions)
             _capture_gpkg(result)
             _record_result_artifacts(slug, result)
+            write_manifest(
+                execution_id=trace_id,
+                user_id=str(user_id or "anonymous"),
+                tool_slug=slug,
+                runtime=runtime_metadata,
+                inputs=arguments,
+                outputs=result if isinstance(result, dict) else {"result": result},
+                status="success",
+            )
             return _display_text(result)
         except ToolExecutionTimeout as exc:
             logger.warning("Tool execution timeout: %s", exc)
+            write_manifest(
+                execution_id=trace_id,
+                user_id=str(user_id or "anonymous"),
+                tool_slug=slug,
+                runtime=runtime_metadata,
+                inputs=arguments,
+                outputs=None,
+                status="error",
+                error=_format_tool_timeout(exc),
+            )
             return _format_tool_timeout(exc)
         except Exception as exc:
             logger.warning("Tool execution error: %s", exc)
+            write_manifest(
+                execution_id=trace_id,
+                user_id=str(user_id or "anonymous"),
+                tool_slug=slug,
+                runtime=runtime_metadata,
+                inputs=arguments,
+                outputs=None,
+                status="error",
+                error=str(exc),
+            )
             return f"Tool execution error: {exc}"
 
     @staticmethod
@@ -553,6 +596,8 @@ class AgentToolExecutor:
         bucket = _bucket_for(slug)
         toolkit_name = _toolkit_for_slug(slug)
         runtime = get_runtime()
+        user_id = getattr(user, "user_id", user.id)
+        runtime_metadata = prepare_runtime_context(str(user_id), slug, execution_id=trace_id)
 
         ok, runtime_reason = runtime.start_tool(bucket)
         if not ok:
@@ -578,6 +623,13 @@ class AgentToolExecutor:
             )
             return f"Tool execution error: Tool blocked by runtime guard: {runtime_reason}"
 
+        spec = get_tool(slug)
+        arguments = apply_default_output_paths(
+            slug,
+            arguments,
+            spec.parameters if spec else {},
+            runtime_metadata,
+        )
         arguments, path_resolutions = _prepare_artifact_paths(slug, arguments)
 
         step = record_step(
@@ -635,10 +687,11 @@ class AgentToolExecutor:
                 raise RuntimeError(f"No handler registered for tool: {slug}")
 
             context = {
-                "user_id": getattr(user, "user_id", user.id),
+                "user_id": user_id,
                 "connection_id": str(connection.id) if connection else None,
                 "trace_id": trace_id,
                 "run_id": ctx.run_id,
+                **runtime_metadata,
             }
             timeout_seconds = _timeout_for_tool(slug, config)
             context = _make_tool_context(slug, timeout_seconds, context)
@@ -656,9 +709,19 @@ class AgentToolExecutor:
                 started,
             )
 
+            result = make_json_safe(result)
             result = _annotate_path_resolution(result, path_resolutions)
             _capture_gpkg(result)
             _record_result_artifacts(slug, result)
+            write_manifest(
+                execution_id=trace_id,
+                user_id=str(user_id),
+                tool_slug=slug,
+                runtime=runtime_metadata,
+                inputs=arguments,
+                outputs=result if isinstance(result, dict) else {"result": result},
+                status="success",
+            )
             duration_ms = int((time.time() - started) * 1000)
             display_text = _display_text(result)
             artifact_paths = _artifact_paths(result)
@@ -723,6 +786,16 @@ class AgentToolExecutor:
                 error_type=error_type,
                 message=error_message,
             )
+            write_manifest(
+                execution_id=trace_id,
+                user_id=str(user_id),
+                tool_slug=slug,
+                runtime=runtime_metadata,
+                inputs=arguments,
+                outputs=None,
+                status="error",
+                error=error_message,
+            )
             ToolService._log_tool_execution(
                 db,
                 user.id,
@@ -761,6 +834,16 @@ class AgentToolExecutor:
                 duration_ms=duration_ms,
                 error_type=error_type,
                 message=error_message,
+            )
+            write_manifest(
+                execution_id=trace_id,
+                user_id=str(user_id),
+                tool_slug=slug,
+                runtime=runtime_metadata,
+                inputs=arguments,
+                outputs=None,
+                status="error",
+                error=error_message,
             )
             ToolService._log_tool_execution(
                 db,

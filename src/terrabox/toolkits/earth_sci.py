@@ -13,6 +13,7 @@ Key features:
 """
 
 import os
+import ast
 import logging
 from typing import Any, Dict, List, Optional, Union
 from ..core.registry import ToolSpec
@@ -418,12 +419,44 @@ def microwave_ddm_handler(arguments: Dict[str, Any], context: Any, account: Any)
     _save_raster(output_path, out_stack, profile, count=2)
     return {"output_path": output_path}
 
+def _normalize_diff_pairs(raw_pairs: Any) -> List[List[int]]:
+    """Normalize diff_pairs from API JSON or frontend textarea inputs."""
+    if isinstance(raw_pairs, str):
+        raw_pairs = raw_pairs.strip()
+        if not raw_pairs:
+            return []
+        raw_pairs = ast.literal_eval(raw_pairs)
+
+    if not isinstance(raw_pairs, list):
+        raise ValueError("diff_pairs must be a list of index pairs")
+
+    pairs: List[List[int]] = []
+    for item in raw_pairs:
+        if isinstance(item, str):
+            text = item.strip()
+            try:
+                item = ast.literal_eval(text)
+            except (ValueError, SyntaxError):
+                item = [part.strip() for part in text.replace(",", " ").split() if part.strip()]
+
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            raise ValueError(f"Invalid diff pair: {item!r}. Expected [idx1, idx2].")
+
+        try:
+            idx1, idx2 = int(item[0]), int(item[1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid diff pair indices: {item!r}") from exc
+        pairs.append([idx1, idx2])
+
+    return pairs
+
+
 def microwave_multi_freq_bt_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """Multi-frequency Brightness Temperature Method."""
     rasterio, np = _lazy_imports()
 
     paths = arguments["bt_paths"]
-    pairs = arguments["diff_pairs"] # List[List[int]] e.g. [[0,1], [1,2]]
+    pairs = _normalize_diff_pairs(arguments["diff_pairs"]) # List[List[int]] e.g. [[0,1], [1,2]]
     param_type = arguments.get("parameter", "SM")
     output_path = arguments["output_path"]
 

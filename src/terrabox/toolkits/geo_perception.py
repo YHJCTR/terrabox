@@ -87,9 +87,13 @@ def _call_service(manager, url: str, payload: dict, timeout: int = 120) -> dict:
         return {"status": "error", "message": f"Connection failed: {e}"}
 
 
-def _write_tool_artifact(tool_name: str, payload: dict) -> str:
+def _write_tool_artifact(tool_name: str, payload: dict, context: Any | None = None) -> str:
     """Persist large tool payloads and return a repo-local artifact path."""
-    root = os.environ.get("TERRABOX_TOOL_ARTIFACT_DIR", "tmp/tool_artifacts")
+    root = (
+        context.get("artifact_dir")
+        if isinstance(context, dict) and context.get("artifact_dir")
+        else os.environ.get("TERRABOX_TOOL_ARTIFACT_DIR", "tmp/tool_artifacts")
+    )
     tool_slug = tool_name.lower().replace(".", "_").replace("-", "_")
     out_dir = os.path.abspath(os.path.join(root, tool_slug))
     os.makedirs(out_dir, exist_ok=True)
@@ -390,7 +394,7 @@ def remotesam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> 
     )
     if result.get("status") == "error":
         return result
-    artifact_path = _write_tool_artifact("geo_perception.remotesam", result)
+    artifact_path = _write_tool_artifact("geo_perception.remotesam", result, context)
     result_summary = _summarize_remotesam_result(result)
     return {
         "status": "success",

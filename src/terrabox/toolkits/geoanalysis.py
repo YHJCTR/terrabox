@@ -396,10 +396,10 @@ def analyze_hotspot_direction_handler(arguments: Dict[str, Any], context: Any, a
     ns_mask = np.abs(dy) > np.abs(dx)
     ew_mask = ~ns_mask
 
-    counts['north'] = np.sum((dy > 0) & ns_mask)
-    counts['south'] = np.sum((dy < 0) & ns_mask)
-    counts['east'] = np.sum((dx > 0) & ew_mask)
-    counts['west'] = np.sum((dx < 0) & ew_mask)
+    counts['north'] = int(np.sum((dy > 0) & ns_mask))
+    counts['south'] = int(np.sum((dy < 0) & ns_mask))
+    counts['east'] = int(np.sum((dx > 0) & ew_mask))
+    counts['west'] = int(np.sum((dx < 0) & ew_mask))
 
     dominant = max(counts, key=counts.get)
 

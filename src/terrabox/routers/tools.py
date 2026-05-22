@@ -13,9 +13,9 @@ from ..core.schemas import (
 )
 from ..core.services import ToolService
 from ..core.utils.uploads import save_upload_files
+from ..core.utils.runtime_paths import prepare_runtime_context
 
 import json
-from pathlib import Path
 
 
 # Business logic helpers (shared between SDK/GUI)
@@ -199,7 +199,15 @@ def make_tools_router(config: RouterConfig) -> APIRouter:
             except Exception:
                 metadata_dict = {}
 
-        saved_paths = await save_upload_files(files)
+        real_slug = _resolve_slug(slug, db, current_user.user_id)
+        runtime_metadata = prepare_runtime_context(
+            current_user.user_id,
+            real_slug,
+            execution_id=metadata_dict.get("execution_id"),
+        )
+        metadata_dict.update(runtime_metadata)
+
+        saved_paths = await save_upload_files(files, upload_dir=runtime_metadata["upload_dir"])
 
         # Write back to image/images; also populate legacy image_path/image_paths keys
         if len(saved_paths) > 1:
@@ -212,7 +220,6 @@ def make_tools_router(config: RouterConfig) -> APIRouter:
             inputs_dict.setdefault("image_paths", saved_paths)
 
         request_in = ExecuteRequestIn(inputs=inputs_dict, metadata=metadata_dict or None)
-        real_slug = _resolve_slug(slug, db, current_user.user_id)
         return await _execute_tool(db, current_user.user_id, real_slug, request_in)
 
     return router

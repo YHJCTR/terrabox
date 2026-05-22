@@ -11,16 +11,19 @@ from typing import Any, List
 
 from fastapi import UploadFile
 
-UPLOAD_DIR = Path(os.getenv("TERRABOX_UPLOAD_DIR", "./terrabox_uploads"))
+def _upload_dir(default_dir: str | os.PathLike[str] | None = None) -> Path:
+    """Return the upload directory, keeping TERRABOX_UPLOAD_DIR as an override."""
+    return Path(os.getenv("TERRABOX_UPLOAD_DIR") or default_dir or "./terrabox_uploads")
 
 
-async def save_upload_files(files: List[UploadFile]) -> List[str]:
-    """Save a list of UploadFile objects to UPLOAD_DIR; return their absolute paths."""
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+async def save_upload_files(files: List[UploadFile], upload_dir: str | os.PathLike[str] | None = None) -> List[str]:
+    """Save UploadFile objects and return their paths."""
+    target_dir = _upload_dir(upload_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
     saved: List[str] = []
     for f in files:
         suffix = Path(f.filename or "upload").suffix or ".bin"
-        dest = UPLOAD_DIR / f"{uuid.uuid4().hex}{suffix}"
+        dest = target_dir / f"{uuid.uuid4().hex}{suffix}"
         dest.write_bytes(await f.read())
         saved.append(str(dest))
     return saved

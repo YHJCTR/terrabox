@@ -11,6 +11,7 @@ import shutil
 import tempfile
 import sys
 import math
+import json
 import numpy as np
 
 # Import the toolkit setup
@@ -206,6 +207,7 @@ def main():
             "hotspot_map_path": hs_path
         })
         assert res["direction"] == "north"
+        json.dumps(res)
         print(f"PASS: analyze_hotspot_direction (dir={res['direction']})")
 
         # ==========================================

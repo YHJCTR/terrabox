@@ -27,7 +27,7 @@ class MockRegistrar:
     def __init__(self):
         self.handlers = {}
 
-    def toolkit(self, *args):
+    def toolkit(self, *args, **kwargs):
         pass
 
     def tool(self, spec, handler):
@@ -255,6 +255,14 @@ def main():
             "output_path": out_mf
         })
         assert os.path.exists(out_mf)
+
+        out_mf_frontend = os.path.join(temp_dir, "mw_mf_frontend.tif")
+        reg.call("earth_sci.microwave_multi_freq", {
+            "bt_paths": mw_paths,
+            "diff_pairs": ["[0, 1]", "[1, 2]"],
+            "output_path": out_mf_frontend
+        })
+        assert os.path.exists(out_mf_frontend)
         print("PASS")
 
         print("[Test 5.4] Microwave PRM...")
