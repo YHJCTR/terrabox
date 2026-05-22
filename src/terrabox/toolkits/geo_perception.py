@@ -85,6 +85,18 @@ def _call_service(manager, url: str, payload: dict, timeout: int = 120) -> dict:
         return {"status": "error", "message": f"API error {resp.status_code}: {resp.text}"}
     except Exception as e:
         return {"status": "error", "message": f"Connection failed: {e}"}
+    finally:
+        _stop_tool_service_after_call(manager)
+
+
+def _stop_tool_service_after_call(manager) -> None:
+    scope = os.environ.get("TERRABOX_TOOL_SERVICE_SCOPE", "").strip().lower()
+    if scope not in {"call", "per-call", "tool-call"}:
+        return
+    try:
+        manager.stop_service()
+    except Exception as exc:
+        logger.warning("Failed to stop call-scoped tool service %s: %s", manager, exc)
 
 
 def _write_tool_artifact(tool_name: str, payload: dict, context: Any | None = None) -> str:
@@ -204,32 +216,32 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
     except Exception as e:
         return {"status": "error", "message": f"Failed to start AI Service: {str(e)}"}
 
-    message_content = [{"type": "text", "text": prompt}]
-    
     try:
-        for idx, path in enumerate(image_paths):
-            clean_path = str(path).strip()
-            if not os.path.exists(clean_path):
-                logger.error(f"File not found: {clean_path}")
-                return {"status": "error", "message": f"File not found on server: {clean_path}"}
-                
-            b64_str = _encode_image_to_base64(clean_path)
-            message_content.append({
-                "type": "image_url", 
-                "image_url": {"url": b64_str}
-            })
-    except Exception as e:
-        return {"status": "error", "message": f"Image error: {str(e)}"}
+        try:
+            message_content = [{"type": "text", "text": prompt}]
 
-    api_url = f"{vllm_manager.API_BASE}/chat/completions"
-    payload = {
-        "model": getattr(vllm_manager, "MODEL_NAME", vllm_manager.MODEL_PATH),
-        "messages": [{"role": "user", "content": message_content}],
-        "max_tokens": max_tokens,
-        "temperature": 0.1
-    }
+            for idx, path in enumerate(image_paths):
+                clean_path = str(path).strip()
+                if not os.path.exists(clean_path):
+                    logger.error(f"File not found: {clean_path}")
+                    return {"status": "error", "message": f"File not found on server: {clean_path}"}
 
-    try:
+                b64_str = _encode_image_to_base64(clean_path)
+                message_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": b64_str}
+                })
+        except Exception as e:
+            return {"status": "error", "message": f"Image error: {str(e)}"}
+
+        api_url = f"{vllm_manager.API_BASE}/chat/completions"
+        payload = {
+            "model": getattr(vllm_manager, "MODEL_NAME", vllm_manager.MODEL_PATH),
+            "messages": [{"role": "user", "content": message_content}],
+            "max_tokens": max_tokens,
+            "temperature": 0.1
+        }
+
         response = None
         for attempt in range(2):
             response = requests.post(
@@ -278,7 +290,9 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
         }
     except Exception as e:
         return {"status": "error", "message": f"Connection failed: {str(e)}"}
-        
+    finally:
+        _stop_tool_service_after_call(vllm_manager)
+
 
 
 

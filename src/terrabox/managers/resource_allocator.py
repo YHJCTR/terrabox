@@ -16,6 +16,8 @@ from .gpu_allocator import allocate_gpu, allocate_gpus
 
 logger = logging.getLogger(__name__)
 
+AGENT_SERVICE_NAMES = {"agent-llm"}
+
 
 @dataclass(frozen=True)
 class ResourceLease:
@@ -38,6 +40,40 @@ def _boolish(value: str | None, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _split_gpu_devices(value: str) -> list[str]:
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def tool_gpu_override_for_service(service: str, gpu_count: int) -> str | None:
+    """Return experiment-scoped tool GPUs, or None when normal allocation applies.
+
+    The override is intentionally opt-in via TERRABOX_TOOL_GPU_DEVICES so normal
+    application/tool behavior is unchanged outside long-running experiments.
+    """
+    if service in AGENT_SERVICE_NAMES:
+        return None
+
+    pool = _split_gpu_devices(os.environ.get("TERRABOX_TOOL_GPU_DEVICES", ""))
+    if not pool:
+        return None
+
+    max_gpus_raw = os.environ.get("TERRABOX_TOOL_MAX_GPUS", "").strip()
+    if max_gpus_raw:
+        max_gpus = int(max_gpus_raw)
+        if int(gpu_count) > max_gpus:
+            raise RuntimeError(
+                f"{service} requires {gpu_count} GPU(s), but TERRABOX_TOOL_MAX_GPUS={max_gpus}."
+            )
+
+    if int(gpu_count) > len(pool):
+        raise RuntimeError(
+            f"{service} requires {gpu_count} GPU(s), but TERRABOX_TOOL_GPU_DEVICES "
+            f"only provides {len(pool)} device(s): {','.join(pool)}."
+        )
+
+    return ",".join(pool[: int(gpu_count)])
 
 
 def current_run_id() -> str:
@@ -236,13 +272,23 @@ def find_reusable_managed_lease(
 
 
 def labels_for_lease(lease: ResourceLease) -> list[str]:
-    return [
+    role = "agent" if lease.service in AGENT_SERVICE_NAMES else "tool"
+    labels = [
         "--label", "terrabox.managed=true",
         "--label", f"terrabox.service={lease.service}",
+        "--label", f"terrabox.role={role}",
         "--label", f"terrabox.run_id={current_run_id()}",
         "--label", f"terrabox.port={lease.port}",
         "--label", f"terrabox.gpu_devices={lease.gpu_devices}",
     ]
+    if role == "tool":
+        scope = os.environ.get("TERRABOX_TOOL_SERVICE_SCOPE", "").strip()
+        pool = os.environ.get("TERRABOX_TOOL_GPU_DEVICES", "").strip()
+        if scope:
+            labels.extend(["--label", f"terrabox.service_scope={scope}"])
+        if pool:
+            labels.extend(["--label", f"terrabox.tool_gpu_pool={pool}"])
+    return labels
 
 
 def lease_to_dict(lease: ResourceLease) -> dict:
@@ -350,6 +396,7 @@ def acquire_docker_lease(
 
     port = allocate_port(base_port, host=host, max_tries=port_max_tries)
     gpu_devices = _allocate_gpu_devices(
+        service=service,
         gpu_count=gpu_count,
         min_free_mib=min_free_mib,
         fallback_gpu_devices=fallback_gpu_devices,
@@ -366,6 +413,7 @@ def acquire_docker_lease(
         except Exception as exc:
             logger.info("LRU service eviction did not free GPU for %s: %s", service, exc)
         gpu_devices = _allocate_gpu_devices(
+            service=service,
             gpu_count=gpu_count,
             min_free_mib=min_free_mib,
             fallback_gpu_devices=fallback_gpu_devices,
@@ -387,12 +435,17 @@ def acquire_docker_lease(
 
 def _allocate_gpu_devices(
     *,
+    service: str,
     gpu_count: int,
     min_free_mib: int,
     fallback_gpu_devices: str,
     gpu_env_var: str | None,
     raise_on_failure: bool = False,
 ) -> str | None:
+    tool_override = tool_gpu_override_for_service(service, gpu_count)
+    if tool_override:
+        return tool_override
+
     if gpu_count <= 1:
         allocator = allocate_gpu
         kwargs = {}

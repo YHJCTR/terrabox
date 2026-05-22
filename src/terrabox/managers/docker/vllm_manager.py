@@ -54,6 +54,14 @@ class VLLMDockerManager(BaseServiceManager):
     MIN_IMAGE_MODEL_LEN = int(os.environ.get("VLM_MIN_IMAGE_MODEL_LEN", "16384"))
     MAX_MODEL_LEN = MIN_IMAGE_MODEL_LEN
     GPU_MEMORY_UTILIZATION = 0.8
+    LIMIT_MM_PER_PROMPT = os.environ.get("VLM_LIMIT_MM_PER_PROMPT", "")
+    SKIP_MM_PROFILING = os.environ.get("VLM_SKIP_MM_PROFILING", "").strip().lower() in {"1", "true", "yes", "on"}
+    MAX_NUM_SEQS = int(os.environ["VLM_MAX_NUM_SEQS"]) if os.environ.get("VLM_MAX_NUM_SEQS") else None
+    MAX_NUM_BATCHED_TOKENS = (
+        int(os.environ["VLM_MAX_NUM_BATCHED_TOKENS"])
+        if os.environ.get("VLM_MAX_NUM_BATCHED_TOKENS")
+        else None
+    )
     _lease = None
 
     def __new__(cls):
@@ -94,6 +102,49 @@ class VLLMDockerManager(BaseServiceManager):
                 cls.MIN_IMAGE_MODEL_LEN,
             )
             cls.MAX_MODEL_LEN = int(cls.MIN_IMAGE_MODEL_LEN)
+
+    @classmethod
+    def _apply_env_overrides(cls):
+        if os.environ.get("VLM_MODEL_PATH"):
+            cls.MODEL_PATH = os.environ["VLM_MODEL_PATH"]
+        if os.environ.get("VLM_MODEL_NAME"):
+            cls.MODEL_NAME = os.environ["VLM_MODEL_NAME"]
+        if os.environ.get("VLM_PORT"):
+            cls.PORT = int(os.environ["VLM_PORT"])
+            cls.API_BASE = f"http://{cls.HOST}:{cls.PORT}/v1"
+        if os.environ.get("VLM_GPU_DEVICES"):
+            cls.GPU_DEVICES = os.environ["VLM_GPU_DEVICES"]
+        if os.environ.get("VLM_TENSOR_PARALLEL_SIZE"):
+            cls.TENSOR_PARALLEL_SIZE = str(int(os.environ["VLM_TENSOR_PARALLEL_SIZE"]))
+        if os.environ.get("VLM_MIN_IMAGE_MODEL_LEN"):
+            cls.MIN_IMAGE_MODEL_LEN = int(os.environ["VLM_MIN_IMAGE_MODEL_LEN"])
+        if os.environ.get("VLM_MAX_MODEL_LEN"):
+            cls.MAX_MODEL_LEN = int(os.environ["VLM_MAX_MODEL_LEN"])
+        if os.environ.get("VLM_GPU_MEMORY_UTILIZATION"):
+            cls.GPU_MEMORY_UTILIZATION = float(os.environ["VLM_GPU_MEMORY_UTILIZATION"])
+        if os.environ.get("VLM_LIMIT_MM_PER_PROMPT"):
+            cls.LIMIT_MM_PER_PROMPT = os.environ["VLM_LIMIT_MM_PER_PROMPT"]
+        if os.environ.get("VLM_SKIP_MM_PROFILING"):
+            cls.SKIP_MM_PROFILING = os.environ["VLM_SKIP_MM_PROFILING"].strip().lower() in {"1", "true", "yes", "on"}
+        if os.environ.get("VLM_MAX_NUM_SEQS"):
+            cls.MAX_NUM_SEQS = int(os.environ["VLM_MAX_NUM_SEQS"])
+        if os.environ.get("VLM_MAX_NUM_BATCHED_TOKENS"):
+            cls.MAX_NUM_BATCHED_TOKENS = int(os.environ["VLM_MAX_NUM_BATCHED_TOKENS"])
+        if os.environ.get("DATA_MOUNT_HOST"):
+            cls.DATA_MOUNT_HOST = os.environ["DATA_MOUNT_HOST"]
+
+    @classmethod
+    def _extra_engine_args(cls):
+        args = []
+        if cls.LIMIT_MM_PER_PROMPT:
+            args.extend(["--limit-mm-per-prompt", cls.LIMIT_MM_PER_PROMPT])
+        if cls.SKIP_MM_PROFILING:
+            args.append("--skip-mm-profiling")
+        if cls.MAX_NUM_SEQS is not None:
+            args.extend(["--max-num-seqs", str(cls.MAX_NUM_SEQS)])
+        if cls.MAX_NUM_BATCHED_TOKENS is not None:
+            args.extend(["--max-num-batched-tokens", str(cls.MAX_NUM_BATCHED_TOKENS)])
+        return args
 
     @classmethod
     def _running_container_model_len(cls):
@@ -157,6 +208,7 @@ class VLLMDockerManager(BaseServiceManager):
             "--tensor-parallel-size", cls.TENSOR_PARALLEL_SIZE,
             "--max-model-len", str(cls.MAX_MODEL_LEN),
             "--gpu-memory-utilization", str(cls.GPU_MEMORY_UTILIZATION),
+            *cls._extra_engine_args(),
             "--enforce-eager",
             "--allowed-local-media-path", cls.DATA_MOUNT_HOST,
         ]
@@ -194,6 +246,7 @@ class VLLMDockerManager(BaseServiceManager):
         except Exception:
             pass
 
+        cls._apply_env_overrides()
         cls._ensure_image_context_len()
 
         if cls.is_running():
