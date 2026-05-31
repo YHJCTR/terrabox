@@ -35,6 +35,18 @@ _PATH_KEYS = {"artifact_path", "output_path", "result_path", "path", "image_path
 _OUTPUT_PATH_KEYS = {"artifact_path", "output_path", "result_path", "preview_path"}
 _INPUT_PATH_KEYS = _PATH_KEYS - _OUTPUT_PATH_KEYS
 _ARTIFACT_INDEX_LOCK = threading.Lock()
+_PATH_SUFFIXES = (
+    ".tif",
+    ".tiff",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".json",
+    ".geojson",
+    ".gpkg",
+    ".csv",
+    ".npy",
+)
 
 
 class ToolExecutionTimeout(TimeoutError):
@@ -343,7 +355,6 @@ def _resolve_input_artifact_alias(slug: str, key: str, value: str) -> tuple[str,
     if (
         not value
         or _is_url_or_placeholder(value)
-        or os.path.isabs(value)
         or os.path.exists(value)
     ):
         return value, None
@@ -358,6 +369,92 @@ def _resolve_input_artifact_alias(slug: str, key: str, value: str) -> tuple[str,
     }
 
 
+def _load_task_data_files() -> list[str]:
+    raw = os.environ.get("TERRABOX_TASK_DATA_FILES", "").strip()
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed if isinstance(item, str) and item]
+
+
+def _task_data_candidates(value: str) -> list[tuple[str, str]]:
+    candidates: list[tuple[str, str]] = []
+    normalized = os.path.normpath(value)
+    if "/question_data/question_data/" in normalized:
+        candidates.append((
+            normalized.replace("/question_data/question_data/", "/question_data/", 1),
+            "path_normalization",
+        ))
+
+    data_files = _load_task_data_files()
+    basename = os.path.basename(normalized)
+    for path in data_files:
+        path_norm = os.path.normpath(path)
+        if os.path.basename(path_norm) == basename:
+            candidates.append((path_norm, "task_data_file_resolution"))
+        elif path_norm.endswith(normalized.lstrip(os.sep)):
+            candidates.append((path_norm, "task_data_file_resolution"))
+
+    data_dir = os.environ.get("TERRABOX_TASK_DATA_DIR", "").strip()
+    if data_dir:
+        safe_rel = _safe_relative_path(value)
+        candidates.append((os.path.join(data_dir, safe_rel), "task_data_dir_resolution"))
+        if basename:
+            candidates.append((os.path.join(data_dir, basename), "task_data_dir_resolution"))
+
+    seen: set[str] = set()
+    unique: list[tuple[str, str]] = []
+    for path, kind in candidates:
+        path_abs = path if os.path.isabs(path) else os.path.abspath(path)
+        if path_abs in seen:
+            continue
+        seen.add(path_abs)
+        unique.append((path_abs, kind))
+    return unique
+
+
+def _resolve_task_data_path(slug: str, key: str, value: str) -> tuple[str, dict[str, Any] | None]:
+    if not value or _is_url_or_placeholder(value) or os.path.exists(value):
+        return value, None
+    for candidate, kind in _task_data_candidates(value):
+        if os.path.exists(candidate):
+            _record_artifact_alias(
+                requested=value,
+                resolved=candidate,
+                key=key,
+                source=kind,
+                slug=slug,
+            )
+            return candidate, {
+                "param": key,
+                "requested": value,
+                "resolved": candidate,
+                "kind": kind,
+            }
+    return value, None
+
+
+def _is_input_path_like(key: str, value: str) -> bool:
+    lowered_key = key.lower()
+    lowered_value = value.lower()
+    if lowered_key in _INPUT_PATH_KEYS:
+        return True
+    if lowered_key.endswith(("_path", "_paths", "_file", "_files")):
+        return True
+    if any(token in lowered_key for token in ("path", "file", "image", "raster", "gpkg")):
+        return True
+    if lowered_key.startswith("band") or (
+        len(lowered_key) == 3 and lowered_key[0] == "b" and lowered_key[1:].isdigit()
+    ):
+        return True
+    return lowered_value.endswith(_PATH_SUFFIXES) or "/" in value or "\\" in value
+
+
 def _prepare_artifact_paths(slug: str, arguments: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Redirect output paths and resolve known artifact aliases for tool calls.
 
@@ -368,21 +465,30 @@ def _prepare_artifact_paths(slug: str, arguments: dict[str, Any]) -> tuple[dict[
     """
     if not isinstance(arguments, dict):
         return arguments, []
-    prepared = dict(arguments)
     resolutions: list[dict[str, Any]] = []
-    for key, value in list(prepared.items()):
+
+    def prepare_value(key: str, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {child_key: prepare_value(child_key, child_value) for child_key, child_value in value.items()}
+        if isinstance(value, list):
+            return [prepare_value(f"{key}[{idx}]", item) for idx, item in enumerate(value)]
         if not isinstance(value, str):
-            continue
+            return value
+
         lowered = key.lower()
         if lowered in _OUTPUT_PATH_KEYS:
             new_value, resolution = _redirect_relative_output_path(slug, key, value)
-        elif lowered in _INPUT_PATH_KEYS:
+        elif _is_input_path_like(key, value):
             new_value, resolution = _resolve_input_artifact_alias(slug, key, value)
+            if not resolution:
+                new_value, resolution = _resolve_task_data_path(slug, key, value)
         else:
-            continue
-        prepared[key] = new_value
+            return value
         if resolution:
             resolutions.append(resolution)
+        return new_value
+
+    prepared = {key: prepare_value(key, value) for key, value in arguments.items()}
     return prepared, resolutions
 
 

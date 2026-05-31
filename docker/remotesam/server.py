@@ -58,6 +58,19 @@ def _read_image(image_path):
     return Image.fromarray(rgb)
 
 
+def _json_safe(value):
+    """Convert numpy values returned by RemoteSAM into Flask-jsonifiable data."""
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 @app.get("/health")
 def health_check():
     return jsonify({"status": "ok"}), 200
@@ -75,7 +88,7 @@ def referring_seg():
 
     try:
         mask = model.referring_seg(image=image, sentence=sentence)
-        return jsonify({"mask": mask.tolist()}), 200
+        return jsonify(_json_safe({"mask": mask})), 200
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -93,8 +106,8 @@ def semantic_seg():
 
     try:
         result = model.semantic_seg(image=image, classnames=classnames)
-        masks = {cn: result[cn].tolist() for cn in classnames}
-        return jsonify(masks), 200
+        masks = {cn: result[cn] for cn in classnames}
+        return jsonify(_json_safe(masks)), 200
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -117,7 +130,7 @@ def detection():
             cn: [list(b) for b in result[cn]] if result[cn] else []
             for cn in classnames
         }
-        return jsonify(boxes), 200
+        return jsonify(_json_safe(boxes)), 200
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -136,7 +149,7 @@ def visual_grounding():
     try:
         box = model.visual_grounding(image=image, sentence=sentence)
         # box is None or [xmin, ymin, xmax, ymax] (Python list of numpy floats)
-        return jsonify({"box": [float(v) for v in box] if box is not None else None}), 200
+        return jsonify(_json_safe({"box": box if box is not None else None})), 200
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -154,7 +167,7 @@ def multi_label_cls():
 
     try:
         result = model.multi_label_cls(image=image, classnames=classnames)
-        return jsonify(result), 200
+        return jsonify(_json_safe(result)), 200
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -172,7 +185,7 @@ def multi_class_cls():
 
     try:
         result = model.multi_class_cls(image=image, classnames=classnames)
-        return jsonify(result), 200
+        return jsonify(_json_safe(result)), 200
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -191,7 +204,7 @@ def captioning():
 
     try:
         result = model.captioning(image=image, classnames=classnames, region_split=region_split)
-        return jsonify(result), 200
+        return jsonify(_json_safe(result)), 200
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -210,7 +223,7 @@ def counting():
     try:
         result = model.counting(image=image, classnames=classnames)
         counts = {cn: result[cn] for cn in classnames}
-        return jsonify(counts), 200
+        return jsonify(_json_safe(counts)), 200
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """
+[DEPRECATED] 请使用 run_evolution_llm_eval.py（加 --detailed-traces 如需详细输出）。
+
 增强评测脚本（v2）：基于原始 run_evolution_final_eval.py，
 加上完整的预测轨迹和详细指标的保存。
 

@@ -11,6 +11,7 @@ Key features:
 4. Scalar arithmetic and unit conversion utilities.
 """
 
+import json
 import os
 from typing import Any, Dict, List, Optional
 from ..core.registry import ToolSpec
@@ -40,6 +41,14 @@ def _lazy_scipy():
 def _read_valid_pixels(path: str, band: int = 1) -> "np.ndarray":
     """Read a single-band raster and return valid (finite, non-nodata) pixels as 1D array."""
     import rasterio, numpy as np
+    if path.lower().endswith(".json"):
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+        mask = payload.get("mask") if isinstance(payload, dict) else None
+        if mask is not None:
+            data = np.asarray(mask, dtype=np.float32)
+            flat = data.flatten()
+            return flat[np.isfinite(flat)]
     with rasterio.open(path) as src:
         data = src.read(band).astype(np.float32)
         nodata = src.nodata

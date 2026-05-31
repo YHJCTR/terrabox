@@ -11,9 +11,12 @@ import os
 import base64
 import mimetypes
 import re
+import subprocess
+import sys
 import time
 import uuid
 import requests
+from pathlib import Path
 from typing import Any, Dict, List
 from ..core.registry import ToolSpec
 
@@ -43,7 +46,138 @@ def _resolve_image_path(arguments: dict) -> str:
     path = _get_image_path(arguments)
     if not os.path.exists(path):
         raise FileNotFoundError(f"Image not found: {path}")
-    return path
+    return os.path.abspath(path)
+
+
+def _env_bool(name: str, default: bool = True) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _split_devices(value: str) -> list[str]:
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _easyocr_gpu_setting() -> bool | str:
+    """Pick the OCR device without stealing the agent LLM GPU in experiments."""
+    if not _env_bool("TERRABOX_OCR_USE_GPU", True):
+        return False
+
+    explicit = os.environ.get("TERRABOX_OCR_GPU_DEVICE", "").strip()
+    if explicit:
+        return explicit
+
+    tool_devices = _split_devices(os.environ.get("TERRABOX_TOOL_GPU_DEVICES", ""))
+    if not tool_devices:
+        return True
+
+    target = tool_devices[0]
+    visible = _split_devices(os.environ.get("CUDA_VISIBLE_DEVICES", ""))
+    if visible:
+        try:
+            return f"cuda:{visible.index(target)}"
+        except ValueError:
+            pass
+    return f"cuda:{target}"
+
+
+def _max_perception_long_side() -> int:
+    raw = os.environ.get("TERRABOX_PERCEPTION_MAX_IMAGE_LONG_SIDE", "").strip()
+    if not raw:
+        return 0
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
+
+
+def _prepare_perception_image(image_path: str, context: Any | None = None) -> tuple[str, dict[str, Any]]:
+    """Optionally resize large inputs for memory-heavy perception services."""
+    max_long_side = _max_perception_long_side()
+    metadata = {
+        "resized": False,
+        "original_path": image_path,
+        "input_path": image_path,
+        "max_long_side": max_long_side or None,
+        "scale_x": 1.0,
+        "scale_y": 1.0,
+    }
+    if max_long_side <= 0:
+        return image_path, metadata
+
+    try:
+        from PIL import Image
+    except ImportError:
+        return image_path, metadata
+
+    with Image.open(image_path) as img:
+        width, height = img.size
+        long_side = max(width, height)
+        metadata["original_size"] = [width, height]
+        if long_side <= max_long_side:
+            metadata["resized_size"] = [width, height]
+            return image_path, metadata
+
+        scale = max_long_side / float(long_side)
+        new_width = max(1, int(round(width * scale)))
+        new_height = max(1, int(round(height * scale)))
+
+        if isinstance(context, dict) and context.get("artifact_dir"):
+            out_dir = Path(context["artifact_dir"]) / "resized_inputs"
+        else:
+            out_dir = Path("tmp") / "terrabox_runtime" / "resized_inputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        suffix = Path(image_path).suffix or ".jpg"
+        resized_path = out_dir / f"{Path(image_path).stem}_{max_long_side}_{uuid.uuid4().hex[:8]}{suffix}"
+
+        resized = img.convert("RGB") if img.mode not in {"RGB", "L"} else img.copy()
+        resized = resized.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        resized.save(resized_path)
+
+    metadata.update({
+        "resized": True,
+        "input_path": str(resized_path),
+        "resized_size": [new_width, new_height],
+        "scale_x": new_width / float(width),
+        "scale_y": new_height / float(height),
+    })
+    return str(resized_path), metadata
+
+
+def _scale_bbox_to_original(bbox: Any, preprocessing: dict[str, Any]) -> Any:
+    if not preprocessing.get("resized") or not isinstance(bbox, list) or len(bbox) < 4:
+        return bbox
+    try:
+        scale_x = float(preprocessing.get("scale_x") or 1.0)
+        scale_y = float(preprocessing.get("scale_y") or 1.0)
+        if scale_x <= 0 or scale_y <= 0:
+            return bbox
+        scaled = list(bbox)
+        scaled[0] = round(float(scaled[0]) / scale_x, 3)
+        scaled[1] = round(float(scaled[1]) / scale_y, 3)
+        scaled[2] = round(float(scaled[2]) / scale_x, 3)
+        scaled[3] = round(float(scaled[3]) / scale_y, 3)
+        return scaled
+    except Exception:
+        return bbox
+
+
+def _scale_detection_bboxes_to_original(items: Any, preprocessing: dict[str, Any]) -> Any:
+    if not preprocessing.get("resized") or not isinstance(items, list):
+        return items
+    scaled_items = []
+    for item in items:
+        if isinstance(item, dict):
+            new_item = dict(item)
+            for key in ("bbox", "box"):
+                if key in new_item:
+                    new_item[key] = _scale_bbox_to_original(new_item[key], preprocessing)
+            scaled_items.append(new_item)
+        else:
+            scaled_items.append(item)
+    return scaled_items
 
 
 def _encode_image_to_base64(image_path: str) -> str:
@@ -77,16 +211,76 @@ def _call_service(manager, url: str, payload: dict, timeout: int = 120) -> dict:
     try:
         manager.start_service()
     except Exception as e:
+        if _is_cuda_oom_text(str(e)):
+            _stop_tool_service_after_call(manager)
+            return _tool_oom_response(str(e))
         return {"status": "error", "message": f"Failed to start service: {e}"}
     try:
         resp = requests.post(url, json=payload, timeout=timeout, proxies={"http": None, "https": None})
         if resp.status_code == 200:
             return resp.json()
+        if _is_cuda_oom_text(resp.text):
+            return _tool_oom_response(f"API error {resp.status_code}: {resp.text}")
         return {"status": "error", "message": f"API error {resp.status_code}: {resp.text}"}
     except Exception as e:
+        if _is_cuda_oom_text(str(e)):
+            return _tool_oom_response(str(e))
         return {"status": "error", "message": f"Connection failed: {e}"}
     finally:
         _stop_tool_service_after_call(manager)
+
+
+def _is_cuda_oom_text(text: str) -> bool:
+    lowered = text.lower()
+    return (
+        "outofmemory" in lowered
+        or "out of memory" in lowered
+        or "cuda oom" in lowered
+        or "cuda error" in lowered and "memory" in lowered
+    )
+
+
+def _tool_oom_response(message: str) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "error_type": "tool_oom",
+        "retryable": False,
+        "message": message,
+        "recovery_suggestions": [
+            "Do not repeat the same tool call with the same arguments.",
+            "Stop tool use for this task if no smaller image or cheaper tool is available.",
+            "Explain that the current task is blocked by a system GPU memory limit, not by the user's question.",
+        ],
+    }
+
+
+def _normalize_remotesam_request(arguments: Dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    raw_task_type = str(arguments.get("task_type") or "").strip().lower()
+    raw_task_type = re.sub(r"[\s-]+", "_", raw_task_type)
+    sentence = str(arguments.get("sentence") or "").strip()
+    classnames = arguments.get("classnames") or []
+    if isinstance(classnames, str):
+        classnames = [classnames]
+    classnames = [str(name).strip() for name in classnames if str(name).strip()]
+
+    if raw_task_type in {"detect", "object_detection", "bbox", "bounding_box", "bounding_boxes"}:
+        task_type = "detection"
+    elif raw_task_type in {"segment", "segmentation", "referring_segmentation", "referring"}:
+        task_type = "referring_seg" if sentence and not classnames else "semantic_seg"
+    elif raw_task_type in {"semantic_segmentation", "semantic"}:
+        task_type = "semantic_seg"
+    elif raw_task_type in {"visual_ground", "grounding"}:
+        task_type = "visual_grounding"
+    else:
+        task_type = raw_task_type
+
+    if task_type == "detection" and not classnames and sentence:
+        classnames = [sentence]
+
+    return task_type, {
+        "sentence": sentence,
+        "classnames": classnames,
+    }
 
 
 def _stop_tool_service_after_call(manager) -> None:
@@ -133,7 +327,10 @@ def _count_positive(value: Any) -> int:
         return 0
 
 
-def _summarize_remotesam_result(result: dict) -> dict:
+def _summarize_remotesam_result(result: Any) -> dict:
+    if not isinstance(result, dict):
+        return {"value": result}
+
     summary: dict[str, Any] = {}
     payload = result.get("result", result)
     if isinstance(payload, dict):
@@ -148,6 +345,26 @@ def _summarize_remotesam_result(result: dict) -> dict:
             else:
                 summary[str(name)] = value
     return summary
+
+
+def _extract_remotesam_bboxes(result: Any) -> list[dict[str, Any]]:
+    if not isinstance(result, dict):
+        return []
+    if isinstance(result.get("bboxes"), list):
+        return result["bboxes"]
+
+    bboxes: list[dict[str, Any]] = []
+    for label, boxes in result.items():
+        if not isinstance(boxes, list):
+            continue
+        for box in boxes:
+            if not isinstance(box, list) or len(box) < 4:
+                continue
+            item = {"label": str(label), "bbox": box[:4]}
+            if len(box) > 4:
+                item["score"] = box[4]
+            bboxes.append(item)
+    return bboxes
 
 
 # --- Handlers ---
@@ -299,8 +516,9 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
 def sam2_segment_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """Handler for SAM2 Segmentation (Full Image Box Prompt)."""
     clean_path = _resolve_image_path(arguments)
+    service_path, preprocessing = _prepare_perception_image(clean_path, context)
 
-    result = _call_service(sam2_manager, f"{sam2_manager.API_URL}/segment", {"image_path": clean_path}, timeout=60)
+    result = _call_service(sam2_manager, f"{sam2_manager.API_URL}/segment", {"image_path": service_path}, timeout=60)
     if result.get("status") == "error":
         return result
 
@@ -319,9 +537,10 @@ def sam2_segment_handler(arguments: Dict[str, Any], context: Any, account: Any) 
                 xs.append(pt[0])
                 ys.append(pt[1])
         if xs and ys:
-            bboxes.append({"x1": min(xs), "y1": min(ys), "x2": max(xs), "y2": max(ys)})
+            bbox = _scale_bbox_to_original([min(xs), min(ys), max(xs), max(ys)], preprocessing)
+            bboxes.append({"x1": bbox[0], "y1": bbox[1], "x2": bbox[2], "y2": bbox[3]})
 
-    return {"status": "success", "output": md_text, "bboxes": bboxes}
+    return {"status": "success", "output": md_text, "bboxes": bboxes, "image_preprocessing": preprocessing}
         
         
 # --- Wrappers ---
@@ -400,32 +619,37 @@ def strip_rcnn_handler(arguments: Dict[str, Any], context: Any, account: Any) ->
 def remotesam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """Handler for RemoteSAM tasks."""
     clean_path = _resolve_image_path(arguments)
-    task_type = arguments.get("task_type")
+    task_type, normalized_args = _normalize_remotesam_request(arguments)
 
     result = _call_service(
         remotesam_manager, f"{remotesam_manager.API_URL}/{task_type}",
-        {"image_path": clean_path, "sentence": arguments.get("sentence", ""), "classnames": arguments.get("classnames", [])},
+        {"image_path": clean_path, **normalized_args},
+        timeout=int(os.environ.get("REMOTESAM_TOOL_TIMEOUT", "300")),
     )
-    if result.get("status") == "error":
+    if isinstance(result, dict) and result.get("status") == "error":
         return result
     artifact_path = _write_tool_artifact("geo_perception.remotesam", result, context)
     result_summary = _summarize_remotesam_result(result)
+    bboxes = _extract_remotesam_bboxes(result)
+    result_keys = sorted(result.keys()) if isinstance(result, dict) else []
     return {
         "status": "success",
         "artifact_path": artifact_path,
+        "result": result,
         "result_summary": result_summary,
-        "bboxes": result.get("bboxes", []),
-        "result_keys": sorted(result.keys()),
+        "bboxes": bboxes,
+        "result_keys": result_keys,
         "message": f"RemoteSAM {task_type} completed.",
     }
 def instructsam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """Handler for InstructSAM — instruction-based segmentation and counting."""
     clean_path = _resolve_image_path(arguments)
+    service_path, preprocessing = _prepare_perception_image(clean_path, context)
     text_prompt = arguments.get("text_prompt", "objects in the image")
 
     result = _call_service(
         instructsam_manager, f"{instructsam_manager.API_URL}/segment",
-        {"image_path": clean_path, "text_prompt": text_prompt},
+        {"image_path": service_path, "text_prompt": text_prompt},
         timeout=300,
     )
     if result.get("status") == "error":
@@ -439,8 +663,9 @@ def instructsam_handler(arguments: Dict[str, Any], context: Any, account: Any) -
     return {
         "status": "success",
         "count": count,
-        "objects": result.get("objects", []),
-        "detections": result.get("detections", []),
+        "objects": _scale_detection_bboxes_to_original(result.get("objects", []), preprocessing),
+        "detections": _scale_detection_bboxes_to_original(result.get("detections", []), preprocessing),
+        "image_preprocessing": preprocessing,
         "output": md_text,
     }
 
@@ -515,32 +740,53 @@ def add_text_handler(arguments: Dict[str, Any], context: Any, account: Any) -> D
 
 def ocr_extract_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """Extract text from an image using EasyOCR."""
-    try:
-        import easyocr
-    except ImportError:
-        raise ImportError("Missing EasyOCR. Install: pip install easyocr")
-
     image_path = _resolve_image_path(arguments)
     languages = arguments.get("languages", ["en"])
     if isinstance(languages, str):
         languages = [languages]
 
-    reader = easyocr.Reader(languages, gpu=True)
-    results = reader.readtext(image_path)
+    gpu_setting = _easyocr_gpu_setting()
+    timeout = int(os.environ.get("TERRABOX_OCR_TIMEOUT", "180"))
+    payload = {"image_path": image_path, "languages": languages, "gpu": gpu_setting}
+    env = os.environ.copy()
+    env.setdefault("PYTHONPATH", os.pathsep.join(sys.path))
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-m", "terrabox.toolkits._ocr_worker"],
+            input=json.dumps(payload, ensure_ascii=False),
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "error",
+            "error_type": "tool_timeout",
+            "message": f"OCR timed out after {timeout} seconds.",
+            "retryable": False,
+        }
 
-    texts = []
-    for (bbox_coords, text, confidence) in results:
-        texts.append({
-            "text": text,
-            "confidence": round(float(confidence), 3),
-            "bbox": [[float(p[0]), float(p[1])] for p in bbox_coords],
-        })
+    if completed.returncode != 0:
+        error_text = completed.stderr or completed.stdout
+        if _is_cuda_oom_text(error_text):
+            return _tool_oom_response(error_text)
+        return {"status": "error", "message": f"OCR subprocess failed: {error_text}"}
+
+    try:
+        worker_result = json.loads(completed.stdout)
+    except Exception as exc:
+        return {"status": "error", "message": f"OCR subprocess returned invalid JSON: {exc}"}
+
+    texts = worker_result.get("texts", [])
 
     return {
         "status": "success",
         "texts": texts,
         "count": len(texts),
         "full_text": " ".join(t["text"] for t in texts),
+        "ocr_subprocess": True,
+        "ocr_gpu": gpu_setting,
     }
 
 

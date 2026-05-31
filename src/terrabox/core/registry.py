@@ -4,7 +4,7 @@ Merges functionalities of previous runtime_registry and tool_registry.
 """
 from __future__ import annotations
 import logging
-from typing import Callable, Dict, List, Optional, Any
+from typing import Callable, Dict, List, Optional, Any, Union
 from threading import RLock
 from dataclasses import dataclass
 import json
@@ -86,7 +86,7 @@ class ToolDefinition:
 # -----------------------------------------------------------------------------
 
 # Handler type alias
-ExecuteHandler = Callable[[dict, dict, object | None], dict]
+ExecuteHandler = Callable[[dict, dict, Optional[object]], dict]
 
 class CoreRegistry:
     """

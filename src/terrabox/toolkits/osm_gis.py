@@ -19,7 +19,10 @@ import json
 import os
 import logging
 import re
+import copy
+from contextlib import contextmanager
 from datetime import datetime
+from functools import wraps
 from typing import Any, Dict, List, Optional
 
 from ..core.registry import ToolSpec
@@ -42,6 +45,50 @@ def _lazy_osmnx():
         raise ImportError(
             "Missing osmnx. Install: pip install osmnx geopandas networkx"
         )
+
+
+@contextmanager
+def _osm_proxy_context(ox):
+    """Temporarily apply proxy settings only to OSMnx external requests."""
+    settings = getattr(ox, "settings", None)
+    if settings is None or not hasattr(settings, "requests_kwargs"):
+        yield
+        return
+
+    original_kwargs = copy.deepcopy(getattr(settings, "requests_kwargs", {}) or {})
+    http_proxy = os.environ.get("TERRABOX_OSM_HTTP_PROXY", "").strip()
+    https_proxy = os.environ.get("TERRABOX_OSM_HTTPS_PROXY", "").strip()
+    no_proxy = os.environ.get("TERRABOX_OSM_NO_PROXY", "localhost,127.0.0.1,::1").strip()
+
+    if not http_proxy and not https_proxy:
+        yield
+        return
+
+    updated_kwargs = copy.deepcopy(original_kwargs)
+    proxies = dict(updated_kwargs.get("proxies") or {})
+    if http_proxy:
+        proxies["http"] = http_proxy
+    if https_proxy:
+        proxies["https"] = https_proxy
+    if no_proxy:
+        proxies["no_proxy"] = no_proxy
+    updated_kwargs["proxies"] = proxies
+
+    settings.requests_kwargs = updated_kwargs
+    try:
+        yield
+    finally:
+        settings.requests_kwargs = original_kwargs
+
+
+def _with_osm_proxy(handler):
+    @wraps(handler)
+    def wrapper(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+        ox = _lazy_osmnx()
+        with _osm_proxy_context(ox):
+            return handler(arguments, context, account)
+
+    return wrapper
 
 
 def _lazy_rasterio():
@@ -150,6 +197,7 @@ def _clean_for_gpkg(gdf):
 # Handlers
 # ------------------------------------------------------------------------------
 
+@_with_osm_proxy
 def get_area_boundary_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """
     Create a GeoPackage with the boundary of a place saved as 'area_boundary' layer.
@@ -230,6 +278,7 @@ def get_area_boundary_handler(arguments: Dict[str, Any], context: Any, account: 
     }
 
 
+@_with_osm_proxy
 def add_pois_layer_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """
     Add POIs from OSM into an existing GeoPackage, clipped to the area_boundary.
@@ -358,6 +407,7 @@ def _add_pois_legacy(arguments: Dict[str, Any], context: Any, account: Any) -> D
     }
 
 
+@_with_osm_proxy
 def compute_route_dist_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """
     Compute pairwise road-network distances between features of two layers

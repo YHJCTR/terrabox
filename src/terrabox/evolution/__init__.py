@@ -45,7 +45,7 @@ def get_prompt_augmenter(
     """Return a ready-to-use PromptAugmenter for the specified evolution method.
 
     Args:
-        method: One of "skillrl", "evoskill", "agentevolver", "memrl", "causalevo", "rewardevo", "graphskillevo", "seqgraphevo", "causaltextevo", "causalpolicyevo", "expel".
+        method: One of "skillrl", "skillrl_full", "evoskill", "agentevolver", "memrl", "memrl_full", "memrl_full_source", "causalevo", "rewardevo", "graphskillevo", "seqgraphevo", "causaltextevo", "causalpolicyevo", "expel".
         store_dir: Directory containing evolution store. Defaults to
                    "evolution_store/{method}". For memrl, pass memory_db=...
         top_k: Number of skills/memories to inject per query.
@@ -73,6 +73,15 @@ def get_prompt_augmenter(
         bank = HierarchicalSkillBank(store_dir)
         retriever = SkillRetriever(bank)
         return SkillRLPromptInjector(bank, retriever, top_k=top_k)
+
+    elif method == "skillrl_full":
+        skillbank_path = kwargs.get(
+            "skillbank_path",
+            os.path.join(store_dir or "evolution_store/skillrl_full", "skillbank", "terrabox_skills.json"),
+        )
+        from .skillrl_full.prompt_injector import SkillRLFullPromptInjector
+
+        return SkillRLFullPromptInjector(skillbank_path, top_k=top_k)
 
     elif method == "evoskill":
         if store_dir is None:
@@ -113,6 +122,22 @@ def get_prompt_augmenter(
         retriever = TwoPhaseRetriever(intent_parser)
         bellman = BellmanUpdater()
         return MemRLPromptInjector(memory, retriever, intent_parser, bellman, top_k=top_k)
+
+    elif method == "memrl_full":
+        memory_db = kwargs.get(
+            "memory_db",
+            os.path.join(store_dir or "evolution_store/memrl_full", "memory", "terrabox_memory.db"),
+        )
+        from .memrl_full.prompt_injector import MemRLFullPromptInjector
+
+        return MemRLFullPromptInjector(memory_db, top_k=top_k)
+
+    elif method == "memrl_full_source":
+        source_store_dir = kwargs.get("source_store_dir", store_dir or "evolution_store/memrl_full_source")
+        threshold = float(kwargs.get("threshold", 0.0))
+        from .memrl_full.source_prompt_injector import MemRLSourcePromptInjector
+
+        return MemRLSourcePromptInjector(source_store_dir, top_k=top_k, threshold=threshold)
 
     elif method == "causalevo":
         if store_dir is None:
@@ -206,7 +231,7 @@ def get_prompt_augmenter(
     else:
         raise ValueError(
             f"Unknown evolution method: {method!r}. "
-            f"Choose from: 'skillrl', 'evoskill', 'agentevolver', 'memrl', 'causalevo', "
+            f"Choose from: 'skillrl', 'skillrl_full', 'evoskill', 'agentevolver', 'memrl', 'memrl_full', 'memrl_full_source', 'causalevo', "
             f"'rewardevo', 'graphskillevo', 'seqgraphevo', 'causaltextevo', 'causalpolicyevo', "
             f"'expel', 'selfcritic'"
         )

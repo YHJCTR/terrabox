@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import AsyncIterator, Callable
+from typing import AsyncIterator, Callable, List, Dict
 
 
-RunModeFn = Callable[[str, str, list[str], object, object, object], str]
-StreamModeFn = Callable[[str, str, list[str], object, object, object], AsyncIterator[str]]
+RunModeFn = Callable[[str, str, List[str], object, object, object], str]
+StreamModeFn = Callable[[str, str, List[str], object, object, object], AsyncIterator[str]]
 ModeLoader = Callable[[], "AgentModeHandler"]
 
 
@@ -17,7 +17,7 @@ class AgentModeHandler:
     stream: StreamModeFn
 
 
-_MODE_LOADERS: dict[str, ModeLoader] = {}
+_MODE_LOADERS: Dict[str, ModeLoader] = {}
 _MODE_CACHE: dict[str, AgentModeHandler] = {}
 
 

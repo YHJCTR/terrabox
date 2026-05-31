@@ -8,6 +8,8 @@
 #   docker build --build-arg REMOTESAM_GIT_URL=https://mirror/RemoteSAM ...  # custom URL
 # ─────────────────────────────────────────────────────────────────────────────
 
+ARG BUILD_MODE=git
+
 # Stage 1: git clone
 FROM ubuntu:22.04 AS source_git
 ARG REMOTESAM_GIT_URL=https://github.com/xiaobdul/RemoteSAM.git
@@ -19,7 +21,6 @@ FROM ubuntu:22.04 AS source_local
 COPY RemoteSAM /app
 
 # Stage 3: select source based on BUILD_MODE
-ARG BUILD_MODE=git
 FROM source_${BUILD_MODE} AS source
 
 # Final stage

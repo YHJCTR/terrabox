@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """
+[DEPRECATED] 功能已拆分到：
+  - convert_openearth_to_evolution.py (OpenEarth → Evolution 格式)
+  - prepare_merged_dataset.py (合并 OpenEarth + EarthBench)
+  - prepare_data.py (外部数据同步)
+
 Dataset Conversion Script
 =========================
 Converts OpenEarthAgent and Earth-Bench datasets to Terrabox-compatible formats.
