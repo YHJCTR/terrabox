@@ -45,7 +45,7 @@ def get_prompt_augmenter(
     """Return a ready-to-use PromptAugmenter for the specified evolution method.
 
     Args:
-        method: One of "skillrl", "skillrl_full", "evoskill", "agentevolver", "memrl", "memrl_full", "memrl_full_source", "causalevo", "rewardevo", "graphskillevo", "seqgraphevo", "causaltextevo", "causalpolicyevo", "expel".
+        method: One of "skillrl", "skillrl_full", "evoskill", "agentevolver", "memrl", "memrl_full", "memrl_full_source", "reflection", "causalevo", "rewardevo", "graphskillevo", "seqgraphevo", "causaltextevo", "causalpolicyevo", "expel".
         store_dir: Directory containing evolution store. Defaults to
                    "evolution_store/{method}". For memrl, pass memory_db=...
         top_k: Number of skills/memories to inject per query.
@@ -138,6 +138,11 @@ def get_prompt_augmenter(
         from .memrl_full.source_prompt_injector import MemRLSourcePromptInjector
 
         return MemRLSourcePromptInjector(source_store_dir, top_k=top_k, threshold=threshold)
+
+    elif method == "reflection":
+        from .reflection.prompt_injector import ReflectionPromptInjector
+
+        return ReflectionPromptInjector(store_dir or "evolution_store/reflection", top_k=top_k)
 
     elif method == "causalevo":
         if store_dir is None:
@@ -232,7 +237,7 @@ def get_prompt_augmenter(
         raise ValueError(
             f"Unknown evolution method: {method!r}. "
             f"Choose from: 'skillrl', 'skillrl_full', 'evoskill', 'agentevolver', 'memrl', 'memrl_full', 'memrl_full_source', 'causalevo', "
-            f"'rewardevo', 'graphskillevo', 'seqgraphevo', 'causaltextevo', 'causalpolicyevo', "
+            f"'reflection', 'rewardevo', 'graphskillevo', 'seqgraphevo', 'causaltextevo', 'causalpolicyevo', "
             f"'expel', 'selfcritic'"
         )
 

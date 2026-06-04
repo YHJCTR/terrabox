@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -e
+cd /data1/yuhongjie2/terrabox
+/home/yuhongjie/miniconda3/envs/unsloth/bin/python scripts/run_trajectory_experiment.py rollout --task-file src/terrabox/evolution/reflection/exp/shuffle_seed42_train400_test200_fulltools/tasks_all_shuffled_seed42.json --experiment shuffle_seed42_train400_test200_fulltools_train --mode standard --output-dir /data1/yuhongjie2/terrabox/src/terrabox/evolution/reflection/exp/shuffle_seed42_train400_test200_fulltools/train --port 9102 --max-iterations 15 --use-docker --resume --start-index 200 --limit 400 2>&1 | tee /data1/yuhongjie2/terrabox/src/terrabox/evolution/reflection/exp/shuffle_seed42_train400_test200_fulltools/logs/train.log

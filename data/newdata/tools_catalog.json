@@ -1,0 +1,1361 @@
+[
+  {
+    "slug": "bash.execute",
+    "function_name": "bash__execute",
+    "description": "Execute bash commands in a secure, persistent shell session with file operations restricted to temporary directories",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "commands": {
+          "type": "string",
+          "description": "Bash commands to execute (can be a single command or multiple commands separated by newlines)"
+        },
+        "timeout": {
+          "type": "integer",
+          "description": "Timeout in seconds for command execution (default: 60)"
+        }
+      },
+      "required": [
+        "commands"
+      ]
+    }
+  },
+  {
+    "slug": "earth_sci.calculate_ati",
+    "function_name": "earth_sci__calculate_ati",
+    "description": "Apparent Thermal Inertia.",
+    "parameters": {
+      "type": "object",
+      "required": [
+        "day_temp_path",
+        "night_temp_path",
+        "albedo_path",
+        "output_path"
+      ],
+      "properties": {
+        "day_temp_path": {
+          "type": "string",
+          "description": "Path to daytime surface temperature raster (in Kelvin)"
+        },
+        "night_temp_path": {
+          "type": "string",
+          "description": "Path to nighttime surface temperature raster (in Kelvin)"
+        },
+        "albedo_path": {
+          "type": "string",
+          "description": "Path to surface albedo raster (dimensionless, range 0–1)"
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Output raster file path for Apparent Thermal Inertia values"
+        }
+      }
+    }
+  },
+  {
+    "slug": "earth_sci.calculate_lst_mc",
+    "function_name": "earth_sci__calculate_lst_mc",
+    "description": "LST using Multi-Channel (Split-Window) empirical method.",
+    "parameters": {
+      "type": "object",
+      "required": [
+        "band31_path",
+        "band32_path",
+        "output_path"
+      ],
+      "properties": {
+        "band31_path": {
+          "type": "string",
+          "description": "Path to MODIS Band 31 (TIR, 11.03μm) raster file"
+        },
+        "band32_path": {
+          "type": "string",
+          "description": "Path to MODIS Band 32 (TIR, 12.02μm) raster file"
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Output raster file path for LST result (in Kelvin)"
+        }
+      }
+    }
+  },
+  {
+    "slug": "earth_sci.calculate_lst_sc",
+    "function_name": "earth_sci__calculate_lst_sc",
+    "description": "LST using Single-Channel method.",
+    "parameters": {
+      "type": "object",
+      "required": [
+        "bt_path",
+        "red_path",
+        "nir_path",
+        "output_path"
+      ],
+      "properties": {
+        "bt_path": {
+          "type": "string",
+          "description": "Path to brightness temperature raster (e.g. Landsat 8 Band 10, in Kelvin)"
+        },
+        "red_path": {
+          "type": "string",
+          "description": "Path to red band raster for NDVI-based emissivity calculation"
+        },
+        "nir_path": {
+          "type": "string",
+          "description": "Path to near-infrared band raster for NDVI-based emissivity calculation"
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Output raster file path for LST result (in Kelvin)"
+        }
+      }
+    }
+  },
+  {
+    "slug": "earth_sci.calculate_modis_day_night",
+    "function_name": "earth_sci__calculate_modis_day_night",
+    "description": "LST from MODIS Day/Night pairs.",
+    "parameters": {
+      "type": "object",
+      "required": [
+        "bt_day",
+        "bt_night",
+        "emis_day",
+        "emis_night",
+        "output_path"
+      ],
+      "properties": {
+        "bt_day": {
+          "type": "string",
+          "description": "Path to daytime MODIS brightness temperature raster (in Kelvin)"
+        },
+        "bt_night": {
+          "type": "string",
+          "description": "Path to nighttime MODIS brightness temperature raster (in Kelvin)"
+        },
+        "emis_day": {
+          "type": "string",
+          "description": "Path to daytime emissivity raster (raw integer, scaled: value * 0.002 + 0.49)"
+        },
+        "emis_night": {
+          "type": "string",
+          "description": "Path to nighttime emissivity raster (raw integer, scaled: value * 0.002 + 0.49)"
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Output raster file path (6-band: LST_day, LST_night, BT_day, BT_night, emis_day, emis_night)"
+        }
+      }
+    }
+  },
+  {
+    "slug": "earth_sci.calculate_pwv",
+    "function_name": "earth_sci__calculate_pwv",
+    "description": "Precipitable Water Vapor from MODIS bands.",
+    "parameters": {
+      "type": "object",
+      "required": [
+        "b02",
+        "b05",
+        "b17",
+        "b18",
+        "b19",
+        "output_path"
+      ],
+      "properties": {
+        "b02": {
+          "type": "string",
+          "description": "Path to MODIS Band 2 (Red, 858nm) raster file"
+        },
+        "b05": {
+          "type": "string",
+          "description": "Path to MODIS Band 5 (NIR, 1240nm) raster file"
+        },
+        "b17": {
+          "type": "string",
+          "description": "Path to MODIS Band 17 (water vapor, 905nm) raster file"
+        },
+        "b18": {
+          "type": "string",
+          "description": "Path to MODIS Band 18 (water vapor, 936nm) raster file"
+        },
+        "b19": {
+          "type": "string",
+          "description": "Path to MODIS Band 19 (water vapor, 940nm) raster file"
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Output raster file path (4-band: PWV, T17, T18, T19)"
+        }
+      }
+    }
+  },
+  {
+    "slug": "earth_sci.calculate_split_window",
+    "function_name": "earth_sci__calculate_split_window",
+    "description": "Physical Split-Window for LST or PWV.",
+    "parameters": {
+      "type": "object",
+      "required": [
+        "band31_path",
+        "band32_path",
+        "emissivity31_path",
+        "emissivity32_path",
+        "output_path"
+      ],
+      "properties": {
+        "band31_path": {
+          "type": "string",
+          "description": "Path to MODIS Band 31 (TIR, 11.03μm) raster file"
+        },
+        "band32_path": {
+          "type": "string",
+          "description": "Path to MODIS Band 32 (TIR, 12.02μm) raster file"
+        },
+        "emissivity31_path": {
+          "type": "string",
+          "description": "Path to Band 31 emissivity raster (raw integer, scaled: value * 0.002 + 0.49)"
+        },
+        "emissivity32_path": {
+          "type": "string",
+          "description": "Path to Band 32 emissivity raster (raw integer, scaled: value * 0.002 + 0.49)"
+        },
+        "parameter": {
+          "type": "string",
+          "default": "LST",
+          "description": "Output parameter type: 'LST' (land surface temperature) or 'PWV' (precipitable water vapor)"
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Output raster file path"
+        }
+      }
+    }
+  },
+  {
+    "slug": "earth_sci.calculate_tes",
+    "function_name": "earth_sci__calculate_tes",
+    "description": "Temperature Emissivity Separation.",
+    "parameters": {
+      "type": "object",
+      "required": [
+        "tir_band_paths",
+        "output_path"
+      ],
+      "properties": {
+        "tir_band_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of paths to thermal infrared band rasters (at least 2 bands required)"
+        },
+        "representative_band_index": {
+          "type": "integer",
+          "default": 0,
+          "description": "Index (0-based) of the reference band used for final LST calculation"
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Output raster file path (3-band: LST, emissivity, delta_eps)"
+        }
+      }
+    }
+  },
+  {
+    "slug": "earth_sci.calculate_ttm",
+    "function_name": "earth_sci__calculate_ttm",
+    "description": "Three-Temperature Method.",
+    "parameters": {
+      "type": "object",
+      "required": [
+        "tir_band_paths",
+        "output_path"
+      ],
+      "properties": {
+        "tir_band_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of paths to 3 thermal infrared band rasters for the Three-Temperature Method"
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Output raster file path (3-band: LST, emissivity_band1, emissivity_band2)"
+        }
+      }
+    }
+  },
+  {
+    "slug": "earth_sci.calculate_turbidity",
+    "function_name": "earth_sci__calculate_turbidity",
+    "description": "Turbidity (NTU) from Red Band.",
+    "parameters": {
+      "type": "object",
+      "required": [
+        "input_red_path",
+        "output_path"
+      ],
+      "properties": {
+        "input_red_path": {
+          "type": "string",
+          "description": "Path to red band reflectance raster for turbidity estimation"
+        },
+        "method": {
+          "type": "string",
+          "default": "linear",
+          "description": "Regression method: 'linear' (NTU = a*R + b), 'power' (NTU = a*R^n + b), or 'log' (NTU = a*ln(R) + b)"
+        },
+        "a": {
+          "type": "number",
+          "default": 1.0,
+          "description": "Regression coefficient 'a' (default: 1.0)"
+        },
+        "b": {
+          "type": "number",
+          "default": 0.0,
+          "description": "Regression offset 'b' (default: 0.0)"
+        },
+        "n": {
+          "type": "number",
+          "default": 1.0,
+          "description": "Exponent for power-law regression (only used when method='power', default: 1.0)"
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Output raster file path for turbidity in NTU"
+        }
+      }
+    }
+  },
+  {
+    "slug": "earth_sci.stats_lst_ndvi",
+    "function_name": "earth_sci__stats_lst_ndvi",
+    "description": "Mean/Max LST for specific NDVI ranges.",
+    "parameters": {
+      "type": "object",
+      "required": [
+        "red_path",
+        "nir_path",
+        "lst_path"
+      ],
+      "properties": {
+        "red_path": {
+          "type": "string",
+          "description": "Path to red band raster for NDVI calculation"
+        },
+        "nir_path": {
+          "type": "string",
+          "description": "Path to near-infrared band raster for NDVI calculation"
+        },
+        "lst_path": {
+          "type": "string",
+          "description": "Path to Land Surface Temperature raster (in Kelvin)"
+        },
+        "threshold": {
+          "type": "number",
+          "default": 0.3,
+          "description": "NDVI threshold value for pixel selection (default: 0.3)"
+        },
+        "mode": {
+          "type": "string",
+          "default": "above",
+          "description": "Selection mode: 'above' to select pixels with NDVI >= threshold, 'below' for NDVI < threshold"
+        },
+        "stat": {
+          "type": "string",
+          "default": "mean",
+          "description": "Statistic to compute: 'mean' or 'max'"
+        }
+      }
+    }
+  },
+  {
+    "slug": "geo_perception.add_text",
+    "function_name": "geo_perception__add_text",
+    "description": "Add text annotations to an image at specified positions. Useful for labeling analysis results.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "string",
+          "description": "Path to the input image."
+        },
+        "annotations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "x": {
+                "type": "number",
+                "description": "X position (pixels from left)."
+              },
+              "y": {
+                "type": "number",
+                "description": "Y position (pixels from top)."
+              },
+              "color": {
+                "type": "string",
+                "default": "white"
+              },
+              "font_size": {
+                "type": "integer",
+                "default": 16
+              }
+            },
+            "required": [
+              "text",
+              "x",
+              "y"
+            ]
+          },
+          "description": "List of text annotations with position and style."
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Path to save the annotated image."
+        }
+      },
+      "required": [
+        "image",
+        "annotations",
+        "output_path"
+      ]
+    }
+  },
+  {
+    "slug": "geo_perception.bbox_to_centroid",
+    "function_name": "geo_perception__bbox_to_centroid",
+    "description": "Convert a list of bounding boxes to their centroid coordinates.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "bboxes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "x1": {
+                "type": "number"
+              },
+              "y1": {
+                "type": "number"
+              },
+              "x2": {
+                "type": "number"
+              },
+              "y2": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "x1",
+              "y1",
+              "x2",
+              "y2"
+            ]
+          },
+          "description": "List of bounding boxes."
+        }
+      },
+      "required": [
+        "bboxes"
+      ]
+    }
+  },
+  {
+    "slug": "geo_perception.draw_bboxes",
+    "function_name": "geo_perception__draw_bboxes",
+    "description": "Draw labeled bounding boxes on an image and save the result. Useful for visualizing detection results.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "string",
+          "description": "Path to the input image."
+        },
+        "bboxes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "x1": {
+                "type": "number"
+              },
+              "y1": {
+                "type": "number"
+              },
+              "x2": {
+                "type": "number"
+              },
+              "y2": {
+                "type": "number"
+              },
+              "label": {
+                "type": "string"
+              },
+              "color": {
+                "type": "string",
+                "default": "red"
+              }
+            },
+            "required": [
+              "x1",
+              "y1",
+              "x2",
+              "y2"
+            ]
+          },
+          "description": "List of bounding boxes with coordinates and optional label/color."
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Path to save the annotated image."
+        },
+        "line_width": {
+          "type": "integer",
+          "default": 2,
+          "description": "Width of the bounding box lines."
+        }
+      },
+      "required": [
+        "image",
+        "bboxes",
+        "output_path"
+      ]
+    }
+  },
+  {
+    "slug": "geo_perception.instructsam",
+    "function_name": "geo_perception__instructsam",
+    "description": "Instruction-based segmentation and counting of objects.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "string",
+          "description": "Image to analyze. Frontend uploads the image; backend resolves the local file path."
+        },
+        "text_prompt": {
+          "type": "string",
+          "description": "Instruction prompt (e.g., 'Count all the red cars')."
+        }
+      },
+      "required": [
+        "image",
+        "text_prompt"
+      ]
+    }
+  },
+  {
+    "slug": "geo_perception.ocr_extract",
+    "function_name": "geo_perception__ocr_extract",
+    "description": "Extract text from an image using EasyOCR. Supports Chinese and English text. Useful for reading labels, legends, or text in satellite imagery.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "string",
+          "description": "Path to the input image."
+        },
+        "languages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "en"
+          ],
+          "description": "List of language codes to recognize (e.g., ['en', 'ch_sim'] for English + Simplified Chinese)."
+        }
+      },
+      "required": [
+        "image"
+      ]
+    }
+  },
+  {
+    "slug": "geo_perception.remotesam",
+    "function_name": "geo_perception__remotesam",
+    "description": "Perform various tasks using RemoteSAM such as referring segmentation, semantic segmentation, detection, etc.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "string",
+          "description": "Image to analyze. Frontend uploads the image; backend resolves the local file path."
+        },
+        "task_type": {
+          "type": "string",
+          "enum": [
+            "referring_seg",
+            "semantic_seg",
+            "detection",
+            "visual_grounding",
+            "multi_label_cls",
+            "multi_class_cls",
+            "captioning",
+            "counting"
+          ],
+          "description": "Type of task to perform."
+        },
+        "sentence": {
+          "type": "string",
+          "description": "Sentence for referring segmentation or visual grounding (optional)."
+        },
+        "classnames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of class names for segmentation, detection, classification, etc. (optional)."
+        }
+      },
+      "required": [
+        "image",
+        "task_type"
+      ]
+    }
+  },
+  {
+    "slug": "geo_perception.sam2_segment",
+    "function_name": "geo_perception__sam2_segment",
+    "description": "Segment the primary object or full scene in a satellite image using SAM2 (Full Box Prompt).",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "string",
+          "description": "Image to segment. Frontend uploads the image; backend resolves the local file path."
+        }
+      },
+      "required": [
+        "image"
+      ]
+    }
+  },
+  {
+    "slug": "geo_perception.strip_rcnn_detect",
+    "function_name": "geo_perception__strip_rcnn_detect",
+    "description": "Specialized object detection for elongated objects (ships, roads, bridges) in satellite images using Strip R-CNN.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "string",
+          "description": "Image to analyze. Frontend uploads the image; backend resolves the local file path."
+        },
+        "score_threshold": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "default": 0.1,
+          "description": "Confidence threshold for detection results (default: 0.3)."
+        }
+      },
+      "required": [
+        "image"
+      ]
+    }
+  },
+  {
+    "slug": "geo_raster.apply_cloud_mask",
+    "function_name": "geo_raster__apply_cloud_mask",
+    "description": "Mask cloud and cloud-shadow pixels in a surface reflectance band using a Landsat QA_PIXEL band (bit3=cloud, bit4=shadow) or Sentinel-2 SCL band (values 3/8/9/10). Masked pixels are set to nodata.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "sr_path": {
+          "type": "string",
+          "description": "Path to input surface reflectance band."
+        },
+        "qa_path": {
+          "type": "string",
+          "description": "Path to QA pixel / SCL band raster."
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Output masked GeoTIFF path."
+        },
+        "sensor": {
+          "type": "string",
+          "enum": [
+            "landsat",
+            "sentinel2"
+          ],
+          "default": "landsat",
+          "description": "Sensor type controlling QA interpretation. Default: 'landsat'."
+        }
+      },
+      "required": [
+        "sr_path",
+        "qa_path",
+        "output_path"
+      ]
+    }
+  },
+  {
+    "slug": "geo_raster.calculate_index",
+    "function_name": "geo_raster__calculate_index",
+    "description": "Calculate generic normalized difference indices like NDVI, NDWI, NDBI, NBR, NDTI, NDSI.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "band_a_path": {
+          "type": "string",
+          "description": "Path to the first band (e.g., NIR for NDVI)."
+        },
+        "band_b_path": {
+          "type": "string",
+          "description": "Path to the second band (e.g., Red for NDVI)."
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Output GeoTIFF path."
+        },
+        "index_name": {
+          "type": "string",
+          "description": "Name of index for logging (default: INDEX)."
+        },
+        "scale_factor": {
+          "type": "number",
+          "description": "Optional scaling factor (default: 1.0)."
+        }
+      },
+      "required": [
+        "band_a_path",
+        "band_b_path",
+        "output_path"
+      ]
+    }
+  },
+  {
+    "slug": "geo_raster.compute_tvdi",
+    "function_name": "geo_raster__compute_tvdi",
+    "description": "Compute Temperature Vegetation Dryness Index (TVDI) from NDVI and LST.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "ndvi_path": {
+          "type": "string",
+          "description": "Path to NDVI raster."
+        },
+        "lst_path": {
+          "type": "string",
+          "description": "Path to LST raster."
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Output GeoTIFF path."
+        }
+      },
+      "required": [
+        "ndvi_path",
+        "lst_path",
+        "output_path"
+      ]
+    }
+  },
+  {
+    "slug": "geo_raster.count_above_threshold",
+    "function_name": "geo_raster__count_above_threshold",
+    "description": "Count the number of pixels in a single-band raster whose values exceed a given threshold.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_path": {
+          "type": "string",
+          "description": "Path to input raster (GeoTIFF or raster format)."
+        },
+        "threshold": {
+          "type": "number",
+          "description": "Threshold value; pixels strictly greater than this are counted."
+        }
+      },
+      "required": [
+        "input_path",
+        "threshold"
+      ]
+    }
+  },
+  {
+    "slug": "geo_raster.count_fire_pixels",
+    "function_name": "geo_raster__count_fire_pixels",
+    "description": "Count the number of fire pixels (FRP > threshold) in one or multiple rasters. Returns per-image counts and aggregate total.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of FRP raster file paths to analyze."
+        },
+        "input_path": {
+          "type": "string",
+          "description": "Single FRP raster path (use instead of input_paths for one file)."
+        },
+        "threshold": {
+          "type": "number",
+          "default": 0,
+          "description": "FRP threshold above which a pixel is counted as fire (default: 0)."
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "slug": "geo_raster.create_fire_increase_map",
+    "function_name": "geo_raster__create_fire_increase_map",
+    "description": "Detect pixels where fire appeared between two time steps (pre and post binary fire masks). Output is a binary GeoTIFF (255=new fire, 0=no new fire).",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "pre_path": {
+          "type": "string",
+          "description": "Path to pre-event binary fire mask (1=fire or 255=fire)."
+        },
+        "post_path": {
+          "type": "string",
+          "description": "Path to post-event binary fire mask (1=fire or 255=fire)."
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Output path for fire increase map GeoTIFF."
+        },
+        "threshold": {
+          "type": "number",
+          "default": 127,
+          "description": "Pixel value threshold to classify as 'fire' in input masks (default: 127)."
+        }
+      },
+      "required": [
+        "pre_path",
+        "post_path",
+        "output_path"
+      ]
+    }
+  },
+  {
+    "slug": "geo_raster.hotspot_percentage",
+    "function_name": "geo_raster__hotspot_percentage",
+    "description": "Compute the fraction of valid pixels (non-NaN, non-nodata) exceeding a threshold. Returns ratio in [0.0, 1.0]. Useful for fire hotspot area estimation, flood extent ratio, etc.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_path": {
+          "type": "string",
+          "description": "Path to input raster."
+        },
+        "threshold": {
+          "type": "number",
+          "description": "Pixels strictly greater than this value are counted as hotspots."
+        }
+      },
+      "required": [
+        "input_path",
+        "threshold"
+      ]
+    }
+  },
+  {
+    "slug": "geo_raster.identify_fire_prone_areas",
+    "function_name": "geo_raster__identify_fire_prone_areas",
+    "description": "Identify high fire-risk areas as pixels in the top N percentile of FRP values across a time series. Returns a binary mask (255=fire-prone area).",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Time series of FRP raster file paths."
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Output path for fire-prone area mask GeoTIFF."
+        },
+        "percentile": {
+          "type": "number",
+          "default": 90,
+          "description": "Percentile threshold for fire-prone classification (default: 90 = top 10% of values)."
+        }
+      },
+      "required": [
+        "input_paths",
+        "output_path"
+      ]
+    }
+  },
+  {
+    "slug": "geo_raster.raster_average",
+    "function_name": "geo_raster__raster_average",
+    "description": "Compute the pixel-wise mean of multiple co-registered single-band rasters and save as a GeoTIFF.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of input raster file paths (must be co-registered, same extent/resolution)."
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Output GeoTIFF path."
+        }
+      },
+      "required": [
+        "input_paths",
+        "output_path"
+      ]
+    }
+  },
+  {
+    "slug": "geo_statistics.batch_raster_stats",
+    "function_name": "geo_statistics__batch_raster_stats",
+    "description": "Compute per-image and aggregate statistics (mean, std, median, min, max, sum) for a list of single-band rasters.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of raster file paths to analyze."
+        },
+        "stat": {
+          "type": "string",
+          "enum": [
+            "mean",
+            "std",
+            "median",
+            "min",
+            "max",
+            "sum"
+          ],
+          "description": "Optional: return only this statistic for each image. Omit to return all."
+        }
+      },
+      "required": [
+        "input_paths"
+      ]
+    }
+  },
+  {
+    "slug": "geo_statistics.calc_cv",
+    "function_name": "geo_statistics__calc_cv",
+    "description": "Compute CV = std / mean for a single-band raster. Useful for assessing spatial variability.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_path": {
+          "type": "string",
+          "description": "Path to input raster."
+        }
+      },
+      "required": [
+        "input_path"
+      ]
+    }
+  },
+  {
+    "slug": "geo_statistics.calc_kurtosis",
+    "function_name": "geo_statistics__calc_kurtosis",
+    "description": "Compute excess kurtosis (Fisher) of pixel distribution in a single-band raster.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_path": {
+          "type": "string",
+          "description": "Path to input raster."
+        }
+      },
+      "required": [
+        "input_path"
+      ]
+    }
+  },
+  {
+    "slug": "geo_statistics.calc_percentile",
+    "function_name": "geo_statistics__calc_percentile",
+    "description": "Return the pixel value at a specified percentile (0–100) in a raster, ignoring nodata and NaN.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_path": {
+          "type": "string",
+          "description": "Path to input raster."
+        },
+        "percentile": {
+          "type": "number",
+          "description": "Percentile in [0, 100], e.g. 95 for the 95th percentile."
+        }
+      },
+      "required": [
+        "input_path",
+        "percentile"
+      ]
+    }
+  },
+  {
+    "slug": "geo_statistics.calc_skewness",
+    "function_name": "geo_statistics__calc_skewness",
+    "description": "Compute Fisher-Pearson skewness of pixel distribution in a single-band raster.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_path": {
+          "type": "string",
+          "description": "Path to input raster."
+        }
+      },
+      "required": [
+        "input_path"
+      ]
+    }
+  },
+  {
+    "slug": "geo_statistics.count_images_exceeding",
+    "function_name": "geo_statistics__count_images_exceeding",
+    "description": "Count how many images in a time series have a pixel-above-threshold ratio >= ratio_threshold.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of raster file paths."
+        },
+        "pixel_threshold": {
+          "type": "number",
+          "description": "Per-pixel value threshold."
+        },
+        "ratio_threshold": {
+          "type": "number",
+          "default": 0.1,
+          "description": "Minimum ratio of exceeding pixels for an image to be counted (default: 0.1)."
+        }
+      },
+      "required": [
+        "input_paths",
+        "pixel_threshold"
+      ]
+    }
+  },
+  {
+    "slug": "geo_statistics.count_pixels_condition",
+    "function_name": "geo_statistics__count_pixels_condition",
+    "description": "Count pixels satisfying lower <= value <= upper. Either bound may be omitted.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_path": {
+          "type": "string",
+          "description": "Path to input raster."
+        },
+        "lower": {
+          "type": "number",
+          "description": "Lower bound (inclusive). Omit for open lower bound."
+        },
+        "upper": {
+          "type": "number",
+          "description": "Upper bound (inclusive). Omit for open upper bound."
+        }
+      },
+      "required": [
+        "input_path"
+      ]
+    }
+  },
+  {
+    "slug": "geo_statistics.kelvin_to_celsius",
+    "function_name": "geo_statistics__kelvin_to_celsius",
+    "description": "Convert a temperature value from Kelvin to Celsius (°C = K - 273.15).",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "number",
+          "description": "Temperature in Kelvin."
+        }
+      },
+      "required": [
+        "value"
+      ]
+    }
+  },
+  {
+    "slug": "geo_statistics.mean_of_means",
+    "function_name": "geo_statistics__mean_of_means",
+    "description": "Compute the mean of per-image mean values across a time series of rasters. Useful for temporal averaging.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Ordered list of raster file paths (e.g., monthly composites)."
+        }
+      },
+      "required": [
+        "input_paths"
+      ]
+    }
+  },
+  {
+    "slug": "geo_statistics.multi_band_threshold",
+    "function_name": "geo_statistics__multi_band_threshold",
+    "description": "Count pixels where all specified rasters simultaneously exceed their respective thresholds.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "band_thresholds": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Raster file path."
+              },
+              "threshold": {
+                "type": "number",
+                "description": "Threshold value for this band."
+              }
+            },
+            "required": [
+              "path",
+              "threshold"
+            ]
+          },
+          "description": "List of {path, threshold} pairs (at least 2)."
+        }
+      },
+      "required": [
+        "band_thresholds"
+      ]
+    }
+  },
+  {
+    "slug": "geo_statistics.percentage_change",
+    "function_name": "geo_statistics__percentage_change",
+    "description": "Compute percentage change from scalar a to b: (b - a) / |a| * 100.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "a": {
+          "type": "number",
+          "description": "Initial value (baseline)."
+        },
+        "b": {
+          "type": "number",
+          "description": "Final value."
+        }
+      },
+      "required": [
+        "a",
+        "b"
+      ]
+    }
+  },
+  {
+    "slug": "geo_statistics.scalar_arithmetic",
+    "function_name": "geo_statistics__scalar_arithmetic",
+    "description": "Perform basic arithmetic (add, subtract, multiply, divide) on two scalar values.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "a": {
+          "type": "number",
+          "description": "First operand."
+        },
+        "b": {
+          "type": "number",
+          "description": "Second operand."
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "add",
+            "subtract",
+            "multiply",
+            "divide"
+          ],
+          "default": "add",
+          "description": "Arithmetic operation to perform."
+        }
+      },
+      "required": [
+        "a",
+        "b"
+      ]
+    }
+  },
+  {
+    "slug": "geo_statistics.threshold_ratio",
+    "function_name": "geo_statistics__threshold_ratio",
+    "description": "Compute the fraction of valid pixels above (or below) a threshold in a single-band raster.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_path": {
+          "type": "string",
+          "description": "Path to input raster."
+        },
+        "threshold": {
+          "type": "number",
+          "description": "Threshold value."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "above",
+            "below"
+          ],
+          "default": "above",
+          "description": "'above': count pixels > threshold; 'below': count pixels < threshold."
+        }
+      },
+      "required": [
+        "input_path",
+        "threshold"
+      ]
+    }
+  },
+  {
+    "slug": "geoanalysis.analyze_hotspot_direction",
+    "function_name": "geoanalysis__analyze_hotspot_direction",
+    "description": "Determine the cardinal direction of hotspot concentration.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "hotspot_map_path": {
+          "type": "string",
+          "description": "Binary hotspot map (1=hotspot)."
+        }
+      },
+      "required": [
+        "hotspot_map_path"
+      ]
+    }
+  },
+  {
+    "slug": "geoanalysis.compute_linear_trend",
+    "function_name": "geoanalysis__compute_linear_trend",
+    "description": "Compute slope and intercept of a time series using least squares.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "y": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "Dependent variable (time series)."
+        },
+        "x": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "Independent variable (time indices). Optional."
+        }
+      },
+      "required": [
+        "y"
+      ]
+    }
+  },
+  {
+    "slug": "geoanalysis.count_spikes",
+    "function_name": "geoanalysis__count_spikes",
+    "description": "Count number of upward spikes exceeding a threshold.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "values": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "threshold": {
+          "type": "number",
+          "default": 0.1
+        }
+      },
+      "required": [
+        "values"
+      ]
+    }
+  },
+  {
+    "slug": "geoanalysis.mann_kendall_test",
+    "function_name": "geoanalysis__mann_kendall_test",
+    "description": "Perform non-parametric Mann-Kendall trend test.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "values": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "Input time series values."
+        }
+      },
+      "required": [
+        "values"
+      ]
+    }
+  },
+  {
+    "slug": "geoanalysis.sens_slope",
+    "function_name": "geoanalysis__sens_slope",
+    "description": "Compute robust median slope of a time series.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "values": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        }
+      },
+      "required": [
+        "values"
+      ]
+    }
+  },
+  {
+    "slug": "ipython.execute",
+    "function_name": "ipython__execute",
+    "description": "Execute Python code using IPython. Supports persistent sessions, forbidden import checks, and input simulation. Code can be provided in <python> tags or ```python blocks.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "description": "Python code to execute. Can be wrapped in <python> tags or ```python blocks. Example: <python>print('Hello World')</python> or ```python\nprint('Hello World')\n```"
+        }
+      },
+      "required": [
+        "action"
+      ]
+    }
+  }
+]
