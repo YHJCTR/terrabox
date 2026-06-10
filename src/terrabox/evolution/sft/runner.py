@@ -23,7 +23,10 @@ from .verl_backend import build_verl_sft_command, write_verl_sft_parquet
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 MODULE_ROOT = Path(__file__).resolve().parent
-DEFAULT_DATA = "data/newdata/sft_train_strict.jsonl"
+# Aligned, de-collapsed strict data (44 tools) — the SAME source ReAct/Reflection
+# now evaluate on. (Pre-alignment data lived in data/newdata; use fixdata_decollapse
+# so the SFT model is trained on the same canonical, executable tool schema.)
+DEFAULT_DATA = "data/fixdata_decollapse/sft_train_strict.jsonl"
 DEFAULT_MODEL_PATH = "/data1/yuhongjie2/Earth-Agent/llm/qwen/3_8B/"
 DEFAULT_UNSLOTH_PYTHON = "/home/yuhongjie/miniconda3/envs/unsloth/bin/python"
 DEFAULT_UNSLOTH_BIN = "/home/yuhongjie/miniconda3/envs/unsloth/bin"
@@ -143,8 +146,13 @@ def build_sft_train_command(
     per_device_train_batch_size: int = 1,
     gradient_accumulation_steps: int = 8,
     lora_rank: int = 16,
+    lora_alpha: int = 32,
     max_seq_length: int = 8192,
+    save_steps: int = 50,
+    save_total_limit: int = 2,
+    eval_steps: int = 50,
     save_merged_model: bool = True,
+    drop_overlength: bool = False,
     python_executable: str | None = None,
 ) -> list[str]:
     """Build the local QLoRA SFT training command."""
@@ -170,13 +178,23 @@ def build_sft_train_command(
         str(gradient_accumulation_steps),
         "--lora-rank",
         str(lora_rank),
+        "--lora-alpha",
+        str(lora_alpha),
         "--max-seq-length",
         str(max_seq_length),
+        "--save-steps",
+        str(save_steps),
+        "--save-total-limit",
+        str(save_total_limit),
+        "--eval-steps",
+        str(eval_steps),
     ]
     if max_steps is not None:
         cmd.extend(["--max-steps", str(max_steps)])
     if save_merged_model:
         cmd.append("--save-merged-model")
+    if drop_overlength:
+        cmd.append("--drop-overlength")
     return cmd
 
 
@@ -256,8 +274,13 @@ def cmd_train(args: argparse.Namespace) -> None:
         per_device_train_batch_size=args.per_device_train_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
         max_seq_length=args.max_seq_length,
+        save_steps=args.save_steps,
+        save_total_limit=args.save_total_limit,
+        eval_steps=args.eval_steps,
         save_merged_model=args.save_merged_model,
+        drop_overlength=getattr(args, "drop_overlength", False),
     )
     script = exp_dir / "run_sft_train.sh"
     script.parent.mkdir(parents=True, exist_ok=True)
@@ -319,6 +342,105 @@ def cmd_rollout(args: argparse.Namespace) -> None:
         subprocess.run(cmd, cwd=REPO_ROOT, env=env, check=True)
     else:
         print("Review the generated script before launching SFT eval rollout.")
+
+
+def _find_latest_global_step(model_dir: Path) -> Path | None:
+    """Return the newest global_step_* checkpoint dir under a veRL model dir."""
+    steps = []
+    for child in model_dir.glob("global_step_*"):
+        if child.is_dir():
+            try:
+                steps.append((int(child.name.rsplit("_", 1)[-1]), child))
+            except ValueError:
+                continue
+    if not steps:
+        return None
+    return max(steps, key=lambda item: item[0])[1]
+
+
+def build_convert_hf_command(
+    *,
+    local_dir: str | Path,
+    target_dir: str | Path,
+    verl_dir: str | Path = DEFAULT_VERL_DIR,
+    python_executable: str | None = None,
+    use_cpu_initialization: bool = True,
+) -> list[str]:
+    """veRL FSDP shard checkpoint → HuggingFace model (ReAct/vLLM-servable).
+
+    Runs offline on CPU so it never triggers the inline full-gather that OOMs the
+    server during training. Output is a standard HF dir (config.json + sharded
+    safetensors + tokenizer) — the exact format the agent LLM Docker mounts as
+    /model.
+    """
+    cmd = [
+        python_executable or DEFAULT_UNSLOTH_PYTHON,
+        "-m",
+        "verl.model_merger",
+        "merge",
+        "--backend",
+        "fsdp",
+        "--local_dir",
+        str(local_dir),
+        "--target_dir",
+        str(target_dir),
+        "--trust-remote-code",
+    ]
+    if use_cpu_initialization:
+        cmd.append("--use_cpu_initialization")
+    return cmd
+
+
+def cmd_convert_hf(args: argparse.Namespace) -> None:
+    """Convert a veRL FSDP checkpoint into a HuggingFace model for ReAct rollout."""
+    exp_dir = experiment_dir(args.experiment)
+    model_dir = Path(args.model_dir or MODULE_ROOT / "model" / f"{args.experiment}_verl")
+    # Resolve the checkpoint: explicit --global-step-dir, else newest global_step_*.
+    if args.global_step_dir:
+        step_dir = Path(args.global_step_dir)
+    else:
+        latest = _find_latest_global_step(model_dir)
+        if latest is None:
+            raise FileNotFoundError(
+                f"No global_step_* checkpoint under {model_dir}. Pass --global-step-dir explicitly."
+            )
+        step_dir = latest
+    # veRL stores actor weights under <global_step_x>/actor.
+    local_dir = step_dir / "actor" if (step_dir / "actor").exists() else step_dir
+    target_dir = Path(args.target_dir or model_dir / f"{step_dir.name}_hf")
+    cmd = build_convert_hf_command(
+        local_dir=local_dir,
+        target_dir=target_dir,
+        verl_dir=args.verl_dir,
+        use_cpu_initialization=not args.no_cpu_init,
+    )
+    script = exp_dir / "run_convert_hf.sh"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(
+        "#!/usr/bin/env bash\nset -e\n"
+        f"cd {REPO_ROOT}\n"
+        f"export PYTHONPATH={args.verl_dir}:{REPO_ROOT / 'src'}:$PYTHONPATH\n"
+        # CPU-only conversion: keep GPUs out of it so a running rollout is unaffected.
+        "export CUDA_VISIBLE_DEVICES=\n"
+        + " ".join(shlex.quote(str(part)) for part in cmd)
+        + f" 2>&1 | tee {shlex.quote(str(exp_dir / 'convert_hf.log'))}\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    print(json.dumps({
+        "checkpoint": str(step_dir),
+        "local_dir": str(local_dir),
+        "target_dir": str(target_dir),
+        "script": str(script),
+        "serve_hint": f"rollout --experiment {args.experiment} --model-path {target_dir}",
+    }, ensure_ascii=False, indent=2))
+    if args.launch:
+        env = os.environ.copy()
+        env["PYTHONPATH"] = f"{args.verl_dir}:{REPO_ROOT / 'src'}:{env.get('PYTHONPATH', '')}"
+        env["CUDA_VISIBLE_DEVICES"] = ""
+        subprocess.run(["bash", str(script)], cwd=REPO_ROOT, env=env, check=True)
+    else:
+        print("Review the generated script before launching the HF conversion.")
 
 
 def cmd_prepare_verl_data(args: argparse.Namespace) -> None:
@@ -459,9 +581,16 @@ def main() -> None:
     p_train.add_argument("--per-device-train-batch-size", type=int, default=1)
     p_train.add_argument("--gradient-accumulation-steps", type=int, default=8)
     p_train.add_argument("--lora-rank", type=int, default=16)
+    p_train.add_argument("--lora-alpha", type=int, default=32)
     p_train.add_argument("--max-seq-length", type=int, default=8192)
+    p_train.add_argument("--save-steps", type=int, default=50,
+                         help="每 N 步保存一次 checkpoint(便于少量数据跑通+中途存档验证)")
+    p_train.add_argument("--save-total-limit", type=int, default=2)
+    p_train.add_argument("--eval-steps", type=int, default=50)
     p_train.add_argument("--save-merged-model", action="store_true", default=True)
     p_train.add_argument("--no-save-merged-model", dest="save_merged_model", action="store_false")
+    p_train.add_argument("--drop-overlength", action="store_true",
+                         help="超长行丢弃而非报错(verbatim 保留其余,与 rollout 对齐,不做有损截断)")
     p_train.add_argument("--launch", action="store_true")
     p_train.set_defaults(func=cmd_train)
 
@@ -493,8 +622,11 @@ def main() -> None:
     p_verl_train.add_argument("--verl-dir", default=DEFAULT_VERL_DIR)
     p_verl_train.add_argument("--model-path", default=DEFAULT_MODEL_PATH)
     p_verl_train.add_argument("--output-model-dir")
-    p_verl_train.add_argument("--cuda-visible-devices", default="0,1,2,3")
-    p_verl_train.add_argument("--nproc-per-node", type=int, default=4)
+    # 3 GPUs by default: 4-GPU FSDP tripped the breaker; 2-GPU FSDP OOMs at init
+    # for an 8B model. 3 cards is the stable middle ground. (3090-safe preset sets
+    # sequence_parallel_size = nproc_per_node, so SP becomes 3 too.)
+    p_verl_train.add_argument("--cuda-visible-devices", default="0,1,2")
+    p_verl_train.add_argument("--nproc-per-node", type=int, default=3)
     p_verl_train.add_argument("--max-length", type=int, default=13312)
     p_verl_train.add_argument("--max-token-len-per-gpu", type=int, default=13312)
     p_verl_train.add_argument("--micro-batch-size-per-gpu", type=int, default=1)
@@ -520,6 +652,20 @@ def main() -> None:
     p_verl_train.add_argument("--no-save-hf-model", dest="save_hf_model", action="store_false")
     p_verl_train.add_argument("--launch", action="store_true")
     p_verl_train.set_defaults(func=cmd_train_verl)
+
+    p_convert = sub.add_parser(
+        "convert-hf",
+        help="Convert a veRL FSDP shard checkpoint into a ReAct-servable HuggingFace model (offline, CPU)",
+    )
+    p_convert.add_argument("--experiment", required=True)
+    p_convert.add_argument("--model-dir", help="veRL model dir holding global_step_* (default: model/<exp>_verl)")
+    p_convert.add_argument("--global-step-dir", help="Specific global_step_* dir (default: newest)")
+    p_convert.add_argument("--target-dir", help="Output HF model dir (default: <model-dir>/<step>_hf)")
+    p_convert.add_argument("--verl-dir", default=DEFAULT_VERL_DIR)
+    p_convert.add_argument("--no-cpu-init", action="store_true",
+                           help="Disable --use_cpu_initialization (faster but may OOM for 8B)")
+    p_convert.add_argument("--launch", action="store_true")
+    p_convert.set_defaults(func=cmd_convert_hf)
 
     args = parser.parse_args()
     args.func(args)

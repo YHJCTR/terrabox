@@ -23,20 +23,30 @@ def experiment_dir(experiment: str) -> Path:
     return MODULE_ROOT / "exp" / experiment
 
 
-def build_rollout_env(agent_gpu: int | str, tool_gpu: int | str) -> dict[str, str]:
+def build_rollout_env(
+    agent_gpu: int | str,
+    tool_gpu: int | str,
+    vlm_gpus: str | None = None,
+    vlm_max_model_len: int | None = None,
+) -> dict[str, str]:
     env = os.environ.copy()
     existing_pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = "src" if not existing_pythonpath else f"src:{existing_pythonpath}"
     env.setdefault("no_proxy", "localhost,127.0.0.1")
     env.setdefault("NO_PROXY", "localhost,127.0.0.1")
+    # Redirect relative tool output paths (e.g. output_path="ndti.tif",
+    # "question141/...") into a gitignored tmp dir instead of the repo root.
+    # tool_executor._redirect_relative_output_path only activates when set.
+    env.setdefault("TERRABOX_ARTIFACT_OUTPUT_DIR", str(REPO_ROOT / "tmp" / "artifacts"))
     env["AGENT_LLM_GPU_DEVICES"] = str(agent_gpu)
-    env["TERRABOX_TOOL_GPU_DEVICES"] = str(tool_gpu)
-    env["CUDA_VISIBLE_DEVICES"] = f"{agent_gpu},{tool_gpu}"
     env.setdefault("TERRABOX_USE_DOCKER", "true")
-    env.setdefault("TERRABOX_TOOL_MAX_GPUS", "1")
     env.setdefault("TERRABOX_TOOL_SERVICE_SCOPE", "call")
+    # fixdata + VLM-backed instructsam require aliases OFF (otherwise the old
+    # Calculator/Solver/Plot→ipython aliases re-enter and shadow compute.*).
+    # Default to off; callers can still override by exporting the env var.
+    env.setdefault("TERRABOX_ENABLE_SOURCE_SCHEMA_TOOL_ALIASES", "false")
+    # Perception tool containers share the tool GPU.
     for key in (
-        "VLM_GPU_DEVICES",
         "SAM2_GPU_DEVICES",
         "REMOTESAM_GPU_DEVICES",
         "STRIP_RCNN_GPU_DEVICES",
@@ -44,6 +54,49 @@ def build_rollout_env(agent_gpu: int | str, tool_gpu: int | str) -> dict[str, st
         "REMOTECLIP_GPU_DEVICES",
     ):
         env[key] = str(tool_gpu)
+
+    if vlm_gpus:
+        # Dedicate the VLM (Qwen3-VL, instructsam backend) to its own GPU set,
+        # tensor-parallel across them. The bf16 model (~17GB) needs >1×24GB GPU
+        # at the default 16384 context; pass a SINGLE GPU here to switch to the
+        # light profile below (short context fits one card → fewer concurrent
+        # GPUs → lower peak power, avoids breaker trips).
+        # Per-service GPU env vars hard-pin each service (allocate_gpu(s) returns
+        # the env value as-is), so we do NOT set TERRABOX_TOOL_GPU_DEVICES (its
+        # static pool-prefix would mis-assign the VLM and bypass per-service pins).
+        vlm_list = [g.strip() for g in str(vlm_gpus).split(",") if g.strip()]
+        env["VLM_GPU_DEVICES"] = ",".join(vlm_list)
+        env["VLM_TENSOR_PARALLEL_SIZE"] = str(len(vlm_list))
+        env.pop("TERRABOX_TOOL_GPU_DEVICES", None)
+        env.pop("TERRABOX_TOOL_MAX_GPUS", None)
+        # Keep the slow VLM container warm across calls; lighter perception tools
+        # on the tool GPU still cycle per call (scope=call) so they don't pile up.
+        env["TERRABOX_KEEP_VLM_WARM"] = "1"
+        # First instructsam call cold-starts the ~17GB Qwen3-VL container
+        # (~2 min); give it headroom so the tool call doesn't time out.
+        env.setdefault("TERRABOX_TOOL_TIMEOUT_GEO_PERCEPTION_INSTRUCTSAM", "600")
+        if len(vlm_list) == 1:
+            # Single-GPU light profile. 17GB bf16 weights leave ~5GB for KV on a
+            # 24GB card, so cap the context: instructsam counting feeds 1 image +
+            # short prompt/output, which fits 4096 (DIOR-class 800px images ≈ 1k
+            # vision tokens). MUST also lower VLM_MIN_IMAGE_MODEL_LEN, else the
+            # manager's image-context guard bumps max-model-len back to 16384.
+            # These env vars only affect THIS rollout subprocess; global/normal
+            # VLM use (e.g. vlm_analyze at 2-GPU 16384) is untouched.
+            mlen = str(int(vlm_max_model_len) if vlm_max_model_len else 4096)
+            env["VLM_MAX_MODEL_LEN"] = mlen
+            env["VLM_MIN_IMAGE_MODEL_LEN"] = mlen
+            env.setdefault("VLM_GPU_MEMORY_UTILIZATION", "0.92")
+        all_gpus = []
+        for g in [str(agent_gpu), str(tool_gpu), *vlm_list]:
+            if g not in all_gpus:
+                all_gpus.append(g)
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(all_gpus)
+    else:
+        env["TERRABOX_TOOL_GPU_DEVICES"] = str(tool_gpu)
+        env["VLM_GPU_DEVICES"] = str(tool_gpu)
+        env.setdefault("TERRABOX_TOOL_MAX_GPUS", "1")
+        env["CUDA_VISIBLE_DEVICES"] = f"{agent_gpu},{tool_gpu}"
     return env
 
 
@@ -65,6 +118,7 @@ def build_rollout_command(
     include_mock: bool = False,
     include_vlm: bool = False,
     include_changeos: bool = False,
+    exclude_tools: str | None = None,
     python_executable: str | None = None,
 ) -> list[str]:
     cmd = [
@@ -105,7 +159,33 @@ def build_rollout_command(
         cmd.append("--no-skip-vlm")
     if include_changeos:
         cmd.append("--no-skip-changeos")
+    if exclude_tools:
+        cmd.extend(["--exclude-tools", exclude_tools])
     return cmd
+
+
+def stop_managed_services() -> None:
+    """Stop all terrabox-managed docker service containers (VLM, agent-llm,
+    perception tools) started for an experiment. Filters by the
+    ``terrabox.managed=true`` label so unrelated containers are never touched.
+    Called after a rollout so experiments don't leave GPUs occupied."""
+    try:
+        out = subprocess.run(
+            ["docker", "ps", "-q", "--filter", "label=terrabox.managed=true"],
+            capture_output=True, text=True,
+        )
+        ids = [x for x in out.stdout.split() if x]
+        if not ids:
+            print("[teardown] no terrabox-managed containers running.")
+            return
+        names = subprocess.run(
+            ["docker", "ps", "--filter", "label=terrabox.managed=true",
+             "--format", "{{.Names}}"], capture_output=True, text=True,
+        ).stdout.split()
+        subprocess.run(["docker", "stop", *ids], capture_output=True, text=True)
+        print(f"[teardown] stopped {len(ids)} terrabox-managed container(s): {', '.join(names)}")
+    except Exception as exc:  # noqa: BLE001 - teardown must never crash the run
+        print(f"[teardown] warning: failed to stop managed containers: {exc}")
 
 
 def prepare_tasks(args: argparse.Namespace) -> Path:
@@ -148,9 +228,22 @@ def cmd_rollout(args: argparse.Namespace) -> None:
         include_mock=args.include_mock,
         include_vlm=args.include_vlm,
         include_changeos=args.include_changeos,
+        exclude_tools=getattr(args, "exclude_tools", None),
     )
     print("Running:", " ".join(cmd))
-    subprocess.run(cmd, cwd=REPO_ROOT, env=build_rollout_env(args.agent_gpu, args.tool_gpu), check=True)
+    try:
+        subprocess.run(
+            cmd,
+            cwd=REPO_ROOT,
+            env=build_rollout_env(args.agent_gpu, args.tool_gpu, getattr(args, "vlm_gpus", None),
+                                  getattr(args, "vlm_max_model_len", None)),
+            check=True,
+        )
+    finally:
+        # Stop experiment-started docker services unless explicitly kept warm
+        # (e.g. chaining train→eval). Default: tear down so GPUs are freed.
+        if not getattr(args, "keep_services", False):
+            stop_managed_services()
     metrics = write_metrics(out_dir, out_dir / "metrics" / "metrics.json")
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
 
@@ -194,6 +287,15 @@ def main() -> None:
     p_rollout.add_argument("--include-mock", action="store_true")
     p_rollout.add_argument("--include-vlm", action="store_true")
     p_rollout.add_argument("--include-changeos", action="store_true")
+    p_rollout.add_argument("--exclude-tools", default=None,
+                           help="逗号分隔的工具 slug，从 allowed 中额外剔除（如 ipython.execute）")
+    p_rollout.add_argument("--vlm-gpus", default=None,
+                           help="给 VLM(instructsam后端)独立 GPU,逗号分隔(如 '2,3');tensor-parallel=卡数。"
+                                "传单卡(如 '2')自动启用单卡轻量档(短上下文),只用3张卡降功率避免跳闸")
+    p_rollout.add_argument("--vlm-max-model-len", type=int, default=None,
+                           help="单卡轻量档的 VLM 上下文长度(默认 4096,仅 --vlm-gpus 为单卡时生效)")
+    p_rollout.add_argument("--keep-services", action="store_true",
+                           help="跑完不停 docker 服务(默认跑完自动停掉所有 terrabox 托管容器)")
     p_rollout.set_defaults(func=cmd_rollout)
 
     p_smoke = sub.add_parser("smoke", help="Run a small ReAct rollout")
@@ -216,6 +318,14 @@ def main() -> None:
     p_smoke.add_argument("--include-mock", action="store_true")
     p_smoke.add_argument("--include-vlm", action="store_true")
     p_smoke.add_argument("--include-changeos", action="store_true")
+    p_smoke.add_argument("--exclude-tools", default=None,
+                         help="逗号分隔的工具 slug，从 allowed 中额外剔除（如 ipython.execute）")
+    p_smoke.add_argument("--vlm-gpus", default=None,
+                         help="给 VLM(instructsam后端)独立 GPU,逗号分隔(如 '2,3');传单卡启用单卡轻量档")
+    p_smoke.add_argument("--vlm-max-model-len", type=int, default=None,
+                         help="单卡轻量档的 VLM 上下文长度(默认 4096)")
+    p_smoke.add_argument("--keep-services", action="store_true",
+                         help="跑完不停 docker 服务(默认跑完自动停掉所有 terrabox 托管容器)")
     p_smoke.set_defaults(func=cmd_rollout)
 
     p_stats = sub.add_parser("stats", help="Aggregate metrics from an experiment directory")

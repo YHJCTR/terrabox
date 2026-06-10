@@ -17,6 +17,7 @@ import ast
 import logging
 from typing import Any, Dict, List, Optional, Union
 from ..core.registry import ToolSpec
+from ._batch_util import auto_batch
 
 # Ensure logger
 logger = logging.getLogger(__name__)
@@ -581,7 +582,7 @@ def setup(registrar):
         ToolSpec(
             slug="earth_sci.calculate_pwv",
             name="Calculate PWV",
-            description="Precipitable Water Vapor from MODIS bands.",
+            description="Precipitable Water Vapor from MODIS bands. Returns {output_path, bands:['PWV','T17','T18','T19']} (4-band GeoTIFF). Path arguments also accept a parallel list for batch processing (returns {output_paths, results}).",
             parameters={
                 "type": "object",
                 "required": ["b02", "b05", "b17", "b18", "b19", "output_path"],
@@ -596,7 +597,7 @@ def setup(registrar):
             },
             requires_connection=False
         ),
-        calculate_pwv_band_ratio_handler
+        auto_batch(calculate_pwv_band_ratio_handler)
     )
 
     # 2. LST
@@ -604,7 +605,7 @@ def setup(registrar):
         ToolSpec(
             slug="earth_sci.calculate_lst_sc",
             name="LST Single Channel",
-            description="LST using Single-Channel method.",
+            description="LST using Single-Channel method. Returns {output_path} (single-band LST GeoTIFF, Kelvin). Path arguments also accept a parallel list for batch processing (returns {output_paths, results}).",
             parameters={
                 "type": "object",
                 "required": ["bt_path", "red_path", "nir_path", "output_path"],
@@ -617,14 +618,14 @@ def setup(registrar):
             },
             requires_connection=False
         ),
-        calculate_lst_single_channel_handler
+        auto_batch(calculate_lst_single_channel_handler)
     )
 
     registrar.tool(
         ToolSpec(
             slug="earth_sci.calculate_lst_mc",
             name="LST Multi Channel",
-            description="LST using Multi-Channel (Split-Window) empirical method.",
+            description="LST using Multi-Channel (Split-Window) empirical method. Returns {output_path} (single-band LST GeoTIFF, Kelvin). Path arguments also accept a parallel list for batch processing (returns {output_paths, results}).",
             parameters={
                 "type": "object",
                 "required": ["band31_path", "band32_path", "output_path"],
@@ -636,14 +637,14 @@ def setup(registrar):
             },
             requires_connection=False
         ),
-        calculate_lst_multi_channel_handler
+        auto_batch(calculate_lst_multi_channel_handler)
     )
 
     registrar.tool(
         ToolSpec(
             slug="earth_sci.calculate_split_window",
             name="Split Window LST/PWV",
-            description="Physical Split-Window for LST or PWV.",
+            description="Physical Split-Window for LST or PWV. Returns {output_path} (single-band GeoTIFF). Path arguments also accept a parallel list for batch processing (returns {output_paths, results}).",
             parameters={
                 "type": "object",
                 "required": ["band31_path", "band32_path", "emissivity31_path", "emissivity32_path", "output_path"],
@@ -658,14 +659,14 @@ def setup(registrar):
             },
             requires_connection=False
         ),
-        calculate_split_window_handler
+        auto_batch(calculate_split_window_handler)
     )
 
     registrar.tool(
         ToolSpec(
             slug="earth_sci.calculate_tes",
             name="LST TES",
-            description="Temperature Emissivity Separation.",
+            description="Temperature Emissivity Separation. Returns {output_path} (3-band GeoTIFF: LST, emissivity, delta_eps). Path arguments also accept a parallel list for batch processing (returns {output_paths, results}).",
             parameters={
                 "type": "object",
                 "required": ["tir_band_paths", "output_path"],
@@ -681,14 +682,14 @@ def setup(registrar):
             },
             requires_connection=False
         ),
-        calculate_tes_handler
+        auto_batch(calculate_tes_handler)
     )
 
     registrar.tool(
         ToolSpec(
             slug="earth_sci.calculate_modis_day_night",
             name="LST Day/Night",
-            description="LST from MODIS Day/Night pairs.",
+            description="LST from MODIS Day/Night pairs. Returns {output_path} (6-band GeoTIFF: LST_day, LST_night, BT_day, BT_night, emis_day, emis_night). Path arguments also accept a parallel list for batch processing (returns {output_paths, results}).",
             parameters={
                 "type": "object",
                 "required": ["bt_day", "bt_night", "emis_day", "emis_night", "output_path"],
@@ -702,14 +703,14 @@ def setup(registrar):
             },
             requires_connection=False
         ),
-        calculate_modis_day_night_lst_handler
+        auto_batch(calculate_modis_day_night_lst_handler)
     )
 
     registrar.tool(
         ToolSpec(
             slug="earth_sci.calculate_ttm",
             name="LST TTM",
-            description="Three-Temperature Method.",
+            description="Three-Temperature Method. Path arguments also accept a parallel list for batch processing (returns {output_paths, results}).",
             parameters={
                 "type": "object",
                 "required": ["tir_band_paths", "output_path"],
@@ -724,7 +725,7 @@ def setup(registrar):
             },
             requires_connection=False
         ),
-        calculate_ttm_lst_handler
+        auto_batch(calculate_ttm_lst_handler)
     )
 
     # 3. Stats
@@ -732,7 +733,7 @@ def setup(registrar):
         ToolSpec(
             slug="earth_sci.stats_lst_ndvi",
             name="LST Stats by NDVI",
-            description="Mean/Max LST for specific NDVI ranges.",
+            description="Mean/Max LST for specific NDVI ranges. Returns {result: LST value (float, Kelvin; null if no valid pixels), pixel_count}.",
             parameters={
                 "type": "object",
                 "required": ["red_path", "nir_path", "lst_path"],
@@ -755,7 +756,7 @@ def setup(registrar):
         ToolSpec(
             slug="earth_sci.calculate_ati",
             name="Thermal Inertia",
-            description="Apparent Thermal Inertia.",
+            description="Apparent Thermal Inertia. Returns {output_path} (single-band ATI GeoTIFF). Path arguments also accept a parallel list for batch processing (returns {output_paths, results}).",
             parameters={
                 "type": "object",
                 "required": ["day_temp_path", "night_temp_path", "albedo_path", "output_path"],
@@ -768,7 +769,7 @@ def setup(registrar):
             },
             requires_connection=False
         ),
-        calculate_ati_handler
+        auto_batch(calculate_ati_handler)
     )
 
     # 5. Microwave
@@ -907,7 +908,7 @@ def setup(registrar):
         ToolSpec(
             slug="earth_sci.calculate_turbidity",
             name="Water Turbidity",
-            description="Turbidity (NTU) from Red Band.",
+            description="Turbidity (NTU) from Red Band. Returns {output_path} (single-band turbidity GeoTIFF).",
             parameters={
                 "type": "object",
                 "required": ["input_red_path", "output_path"],

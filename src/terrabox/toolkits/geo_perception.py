@@ -287,6 +287,16 @@ def _stop_tool_service_after_call(manager) -> None:
     scope = os.environ.get("TERRABOX_TOOL_SERVICE_SCOPE", "").strip().lower()
     if scope not in {"call", "per-call", "tool-call"}:
         return
+    # Keep the heavy VLM (Qwen3-VL) container warm when requested: it is slow to
+    # load (~minutes) and reused by many instructsam/vlm_analyze calls. Other,
+    # lighter tools still stop after each call so they don't pile up on the
+    # shared tool GPU. The VLM has its own dedicated GPU(s), so it does not
+    # contend with the cycling perception tools.
+    if (
+        manager is vllm_manager
+        and os.environ.get("TERRABOX_KEEP_VLM_WARM", "").strip().lower() in {"1", "true", "yes", "on"}
+    ):
+        return
     try:
         manager.stop_service()
     except Exception as exc:
@@ -589,6 +599,42 @@ def remoteclip_analysis_handler(arguments: Dict[str, Any], context: Any, account
 
 
 
+def _flatten_strip_rcnn_detections(raw: Any) -> list[dict[str, Any]]:
+    """Flatten Strip R-CNN's {class: [[cx,cy,w,h,angle,score],...]} into a list of
+    per-object dicts, adding an axis-aligned enclosing bbox [x1,y1,x2,y2] for the
+    rotated box so downstream tools (draw_bboxes/bbox_to_centroid/bbox_area) work.
+    The original rotated geometry is preserved under cx/cy/w/h/angle."""
+    import math
+    objects: list[dict[str, Any]] = []
+    if not isinstance(raw, dict):
+        return objects
+    for label, boxes in raw.items():
+        if not isinstance(boxes, (list, tuple)):
+            continue
+        for box in boxes:
+            if not isinstance(box, (list, tuple)) or len(box) < 5:
+                continue
+            cx, cy, w, h, angle = (float(box[0]), float(box[1]), float(box[2]),
+                                   float(box[3]), float(box[4]))
+            score = float(box[5]) if len(box) > 5 else None
+            # Axis-aligned half-extents of the rotated rectangle.
+            c, s = abs(math.cos(angle)), abs(math.sin(angle))
+            dx = (w / 2.0) * c + (h / 2.0) * s
+            dy = (w / 2.0) * s + (h / 2.0) * c
+            x1, y1, x2, y2 = round(cx - dx, 2), round(cy - dy, 2), round(cx + dx, 2), round(cy + dy, 2)
+            item: dict[str, Any] = {
+                "label": str(label),
+                "bbox": [x1, y1, x2, y2],
+                "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                "cx": round(cx, 2), "cy": round(cy, 2),
+                "w": round(w, 2), "h": round(h, 2), "angle": round(angle, 4),
+            }
+            if score is not None:
+                item["score"] = round(score, 4)
+            objects.append(item)
+    return objects
+
+
 def strip_rcnn_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """
     Handler for Strip R-CNN Detection.
@@ -603,15 +649,29 @@ def strip_rcnn_handler(arguments: Dict[str, Any], context: Any, account: Any) ->
     if result.get("status") == "error":
         return result
     if result.get("success"):
-        detections = result.get("detections") or []
-        detections_bboxes = [d["bbox"] for d in detections if isinstance(d, dict) and "bbox" in d]
+        raw = result.get("detections") or {}
+        # Strip R-CNN returns ROTATED boxes grouped by class:
+        #   {class_name: [[cx, cy, w, h, angle_rad, score], ...]}.
+        # Flatten into a per-object list and add an axis-aligned enclosing bbox
+        # so the result is consumable by draw_bboxes / bbox_to_centroid /
+        # bbox_area, mirroring the InstructSAM detection schema.
+        objects = _flatten_strip_rcnn_detections(raw)
+        detections_bboxes = [o["bbox"] for o in objects]
+        num = result.get("num_detections")
+        if num is None:
+            num = len(objects)
         return {
             "status": "success",
-            "detections": detections,
+            # `count`/`objects` mirror the InstructSAM schema so the agent sees a
+            # single, consistent detection contract across both detectors.
+            "count": num,
+            "objects": objects,
+            # Backward-compatible raw rotated output (grouped by class).
+            "detections": raw,
             "detections_bboxes": detections_bboxes,
             "image_size": result.get("image_size"),
-            "num_detections": result.get("num_detections"),
-            "message": f"Strip R-CNN detection completed. Found {result.get('num_detections')} objects.",
+            "num_detections": num,
+            "message": f"Strip R-CNN detection completed. Found {num} objects.",
         }
     return {"status": "error", "message": f"Detection failed: {result.get('error')}"}
 
@@ -641,8 +701,157 @@ def remotesam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> 
         "result_keys": result_keys,
         "message": f"RemoteSAM {task_type} completed.",
     }
+# ---------------------------------------------------------------------------
+# DEPRECATED 2026-06-05: original InstructSAM-service implementation.
+# The InstructSAM detection service returned 0 objects on ~100% of OpenEarth
+# rollouts (broken/misconfigured service). It is kept here for reference only.
+# The active `instructsam_handler` below preserves the exact same input/output
+# contract but performs grounding via the VLM (vllm_manager) backend.
+# ---------------------------------------------------------------------------
+# def instructsam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+#     """Handler for InstructSAM — instruction-based segmentation and counting."""
+#     clean_path = _resolve_image_path(arguments)
+#     service_path, preprocessing = _prepare_perception_image(clean_path, context)
+#     text_prompt = arguments.get("text_prompt", "objects in the image")
+#
+#     result = _call_service(
+#         instructsam_manager, f"{instructsam_manager.API_URL}/segment",
+#         {"image_path": service_path, "text_prompt": text_prompt},
+#         timeout=300,
+#     )
+#     if result.get("status") == "error":
+#         return result
+#
+#     count = result.get("count", 0)
+#     vis_b64 = result.get("visualization", "")
+#     md_text = f"InstructSAM found **{count}** object(s) matching '{text_prompt}'.\n\n"
+#     if vis_b64:
+#         md_text += f"![InstructSAM Result]({vis_b64})"
+#     return {
+#         "status": "success",
+#         "count": count,
+#         "objects": _scale_detection_bboxes_to_original(result.get("objects", []), preprocessing),
+#         "detections": _scale_detection_bboxes_to_original(result.get("detections", []), preprocessing),
+#         "image_preprocessing": preprocessing,
+#         "output": md_text,
+#     }
+
+
+def _parse_vlm_grounding_bboxes(content: str) -> List[Dict[str, Any]]:
+    """Parse bbox dicts from VLM text output. Robust to fences and minor noise.
+
+    Accepts: {"bboxes": [{"label","x1","y1","x2","y2","score"}, ...]},
+    a bare JSON array of such dicts, or items carrying a 4-number "bbox" list.
+    Returns a list of normalized dicts with float x1,y1,x2,y2 (+label/score).
+    """
+    if not content:
+        return []
+    text = content.strip()
+    # Strip ```json ... ``` fences if present
+    fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+    if fence:
+        text = fence.group(1).strip()
+
+    raw_items = None
+    m = re.search(r'"bboxes"\s*:\s*(\[.*?\])', text, re.DOTALL)
+    if m:
+        try:
+            raw_items = json.loads(m.group(1))
+        except Exception:
+            raw_items = None
+    if raw_items is None:
+        m2 = re.search(r'(\[\s*\{.*?\}\s*\])', text, re.DOTALL)
+        if m2:
+            try:
+                raw_items = json.loads(m2.group(1))
+            except Exception:
+                raw_items = None
+    if raw_items is None:
+        try:
+            obj = json.loads(text)
+            raw_items = obj.get("bboxes") if isinstance(obj, dict) else obj
+        except Exception:
+            raw_items = None
+    if not isinstance(raw_items, list):
+        return []
+
+    parsed: List[Dict[str, Any]] = []
+    for it in raw_items:
+        coords = None
+        label = None
+        score = None
+        if isinstance(it, dict):
+            label = it.get("label") or it.get("name") or it.get("category")
+            score = it.get("score") or it.get("confidence")
+            if all(k in it for k in ("x1", "y1", "x2", "y2")):
+                coords = [it["x1"], it["y1"], it["x2"], it["y2"]]
+            else:
+                for key in ("bbox", "box", "bbox_2d", "coordinates"):
+                    val = it.get(key)
+                    if isinstance(val, (list, tuple)) and len(val) >= 4:
+                        coords = list(val[:4])
+                        break
+        elif isinstance(it, (list, tuple)) and len(it) >= 4:
+            coords = list(it[:4])
+        if coords is None:
+            continue
+        try:
+            x1, y1, x2, y2 = (float(coords[0]), float(coords[1]), float(coords[2]), float(coords[3]))
+        except (TypeError, ValueError):
+            continue
+        if x2 < x1:
+            x1, x2 = x2, x1
+        if y2 < y1:
+            y1, y2 = y2, y1
+        parsed.append({
+            "label": str(label) if label is not None else None,
+            "score": float(score) if isinstance(score, (int, float)) else None,
+            "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+        })
+    return parsed
+
+
+def _hide_backend(text: str) -> str:
+    """Scrub VLM/model-path wording from any text surfaced to the agent so the
+    tool appears purely as InstructSAM."""
+    if not text:
+        return text
+    out = re.sub(r"(?i)\bvlm\b", "InstructSAM", text)
+    out = out.replace("vllm", "InstructSAM").replace("vLLM", "InstructSAM")
+    # Strip the on-disk model path if it ever leaks into an error string.
+    out = re.sub(r"/data1/\S*?merged_model/?", "<model>", out)
+    return out
+
+
 def instructsam_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
-    """Handler for InstructSAM — instruction-based segmentation and counting."""
+    """Dispatch to the configured InstructSAM kernel.
+
+    Selected by env ``TERRABOX_INSTRUCTSAM_BACKEND`` (default ``service``):
+      - ``service``: original training-free pipeline = SAM2 masks + GeoRSCLIP
+        matching + VLM counting (the InstructSAM docker service). Restored.
+      - ``vlm``: single Qwen3-VL grounding call (lighter, coarser).
+    Switching kernels is an env-var change only — no experiment code edits.
+    """
+    backend = os.environ.get("TERRABOX_INSTRUCTSAM_BACKEND", "service").strip().lower()
+    if backend == "vlm":
+        return _instructsam_via_vlm(arguments, context, account)
+    return _instructsam_via_service(arguments, context, account)
+
+
+def _instructsam_via_service(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Original InstructSAM: SAM2 + GeoRSCLIP + VLM-counting docker service.
+
+    Root-cause fix vs the old code: the counting step inside the service calls
+    the host VLM (port ~9000); nobody used to start it, so counting silently
+    returned 0. We now ensure that backend is up before calling the service.
+    """
+    # Bring up the counting backend the InstructSAM service depends on.
+    try:
+        vllm_manager.start_service()
+    except Exception as e:
+        return {"status": "error",
+                "message": f"Failed to start InstructSAM counting backend: {_hide_backend(str(e))}"}
+
     clean_path = _resolve_image_path(arguments)
     service_path, preprocessing = _prepare_perception_image(clean_path, context)
     text_prompt = arguments.get("text_prompt", "objects in the image")
@@ -650,21 +859,188 @@ def instructsam_handler(arguments: Dict[str, Any], context: Any, account: Any) -
     result = _call_service(
         instructsam_manager, f"{instructsam_manager.API_URL}/segment",
         {"image_path": service_path, "text_prompt": text_prompt},
-        timeout=300,
+        timeout=int(os.environ.get("INSTRUCTSAM_TOOL_TIMEOUT", "300")),
     )
     if result.get("status") == "error":
         return result
 
     count = result.get("count", 0)
-    vis_b64 = result.get("visualization", "")
-    md_text = f"InstructSAM found **{count}** object(s) matching '{text_prompt}'.\n\n"
-    if vis_b64:
-        md_text += f"![InstructSAM Result]({vis_b64})"
+    # SAM2 returns bbox as [x, y, w, h]; convert to [x1, y1, x2, y2] (the gold /
+    # downstream convention) BEFORE scaling, clamp to the original image, and
+    # expose x1..y2. Otherwise downstream (draw_bboxes, distance/area) misreads
+    # w,h as x2,y2 → y2<y1 errors and wrong geometry.
+    try:
+        from PIL import Image
+        with Image.open(clean_path) as _oim:
+            orig_w, orig_h = _oim.size
+    except Exception:
+        orig_w, orig_h = 0, 0
+
+    def _norm(items):
+        out = []
+        for it in _scale_detection_bboxes_to_original(items or [], preprocessing):
+            if not isinstance(it, dict):
+                continue
+            bb = it.get("bbox") or it.get("box")
+            if isinstance(bb, (list, tuple)) and len(bb) >= 4:
+                x, y, w, h = float(bb[0]), float(bb[1]), float(bb[2]), float(bb[3])
+                x1, y1, x2, y2 = x, y, x + w, y + h
+                if orig_w:
+                    x1, x2 = max(0.0, min(x1, orig_w)), max(0.0, min(x2, orig_w))
+                if orig_h:
+                    y1, y2 = max(0.0, min(y1, orig_h)), max(0.0, min(y2, orig_h))
+                new = dict(it)
+                new["bbox"] = [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)]
+                new["x1"], new["y1"], new["x2"], new["y2"] = new["bbox"]
+                out.append(new)
+            else:
+                out.append(it)
+        return out
+
+    objects = _norm(result.get("objects", []))
+    detections = _norm(result.get("detections", []))
+    # The docker service populates only `detections` and leaves `objects` empty.
+    # Mirror them so the two aliases are always consistent — otherwise the agent
+    # may read the empty `objects` field and wrongly conclude "nothing detected"
+    # even though `count`>0 and `detections` is full (observed in rollouts).
+    if detections and not objects:
+        objects = detections
+    elif objects and not detections:
+        detections = objects
+    # Keep `count` consistent with the actual detection list when the service
+    # under-reports it.
+    if not count and detections:
+        count = len(detections)
+    md_text = f"InstructSAM found **{count}** object(s) matching '{text_prompt}'."
     return {
         "status": "success",
         "count": count,
-        "objects": _scale_detection_bboxes_to_original(result.get("objects", []), preprocessing),
-        "detections": _scale_detection_bboxes_to_original(result.get("detections", []), preprocessing),
+        "objects": objects,
+        "detections": detections,
+        "image_preprocessing": preprocessing,
+        "output": md_text,
+    }
+
+
+def _instructsam_via_vlm(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """InstructSAM grounding via the VLM backend (alternate kernel).
+
+    Same I/O contract as the original: input {image, text_prompt}; output
+    {status, count, objects, detections, image_preprocessing, output}. Each
+    detection carries a pixel-space ``bbox`` [x1,y1,x2,y2] (original-image
+    coordinates) plus x1/y1/x2/y2/label/score for easy downstream consumption.
+    """
+    clean_path = _resolve_image_path(arguments)
+    service_path, preprocessing = _prepare_perception_image(clean_path, context)
+    text_prompt = arguments.get("text_prompt", "objects in the image")
+
+    # Image size of the (possibly resized) service image fed to the VLM.
+    try:
+        from PIL import Image
+        with Image.open(service_path) as _im:
+            img_w, img_h = _im.size
+    except Exception:
+        img_w, img_h = 0, 0
+
+    grounding_prompt = (
+        "You are a precise object detector for remote sensing / aerial imagery.\n"
+        f"The image is {img_w} pixels wide and {img_h} pixels tall.\n"
+        f"Detect EVERY instance of this target: \"{text_prompt}\".\n"
+        "Return STRICT JSON only, no prose, in exactly this schema:\n"
+        '{"bboxes": [{"label": "<name>", "x1": <int>, "y1": <int>, "x2": <int>, "y2": <int>, "score": <float 0-1>}]}\n'
+        "Coordinates MUST be absolute pixel values within the given image size, "
+        "with 0<=x1<x2<=width and 0<=y1<y2<=height.\n"
+        'If there are no such objects, return {"bboxes": []}.'
+    )
+
+    try:
+        vllm_manager.start_service()
+    except Exception as e:
+        # Keep the backend opaque to the agent: surface as an InstructSAM error.
+        return {"status": "error", "message": f"Failed to start InstructSAM service: {_hide_backend(str(e))}"}
+
+    try:
+        try:
+            b64_str = _encode_image_to_base64(service_path)
+        except Exception as e:
+            return {"status": "error", "message": f"Image error: {e}"}
+
+        payload = {
+            "model": getattr(vllm_manager, "MODEL_NAME", vllm_manager.MODEL_PATH),
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": grounding_prompt},
+                    {"type": "image_url", "image_url": {"url": b64_str}},
+                ],
+            }],
+            "max_tokens": 2048,
+            "temperature": 0.0,
+        }
+        api_url = f"{vllm_manager.API_BASE}/chat/completions"
+        try:
+            response = requests.post(
+                api_url,
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                timeout=300,
+                proxies={"http": None, "https": None},
+            )
+        except Exception as e:
+            return {"status": "error", "message": f"InstructSAM connection failed: {_hide_backend(str(e))}"}
+        if response.status_code != 200:
+            return {"status": "error", "message": f"InstructSAM detection error {response.status_code}: {_hide_backend(response.text)}"}
+
+        content = response.json()["choices"][0]["message"]["content"]
+    finally:
+        _stop_tool_service_after_call(vllm_manager)
+
+    parsed = _parse_vlm_grounding_bboxes(content)
+
+    # The grounding model reports coordinates in the (service) image space it was
+    # shown (img_w × img_h, whatever the real size is — not hard-coded). VLM
+    # grounding can overshoot the canvas, so clamp to the shown bounds and drop
+    # degenerate boxes, then scale back to the original image and clamp again.
+    def _clip(v: float, hi: float) -> float:
+        if hi <= 0:
+            return float(v)
+        return max(0.0, min(float(v), hi))
+
+    detections: List[Dict[str, Any]] = []
+    for b in parsed:
+        x1, y1 = _clip(b["x1"], img_w), _clip(b["y1"], img_h)
+        x2, y2 = _clip(b["x2"], img_w), _clip(b["y2"], img_h)
+        if x2 <= x1 or y2 <= y1:
+            continue  # degenerate / empty box after clamping
+        detections.append({
+            "label": b.get("label") or text_prompt,
+            "score": b.get("score") if b.get("score") is not None else 0.99,
+            "bbox": [x1, y1, x2, y2],
+        })
+    detections = _scale_detection_bboxes_to_original(detections, preprocessing)
+
+    # Final clamp to the ORIGINAL image bounds (any resolution) + expose x1..y2.
+    try:
+        from PIL import Image
+        with Image.open(clean_path) as _oim:
+            orig_w, orig_h = _oim.size
+    except Exception:
+        orig_w, orig_h = 0, 0
+    for det in detections:
+        bb = det.get("bbox") or []
+        if len(bb) >= 4:
+            bb = [round(_clip(bb[0], orig_w), 2), round(_clip(bb[1], orig_h), 2),
+                  round(_clip(bb[2], orig_w), 2), round(_clip(bb[3], orig_h), 2)]
+            det["bbox"] = bb
+            det["x1"], det["y1"], det["x2"], det["y2"] = bb[0], bb[1], bb[2], bb[3]
+
+    count = len(detections)
+    md_text = f"InstructSAM found **{count}** object(s) matching '{text_prompt}'."
+    return {
+        "status": "success",
+        "count": count,
+        "objects": detections,
+        "detections": detections,
         "image_preprocessing": preprocessing,
         "output": md_text,
     }
@@ -991,7 +1367,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_perception.sam2_segment",
             name="SAM2 Segmentation",
-            description="Segment the primary object or full scene in a satellite image using SAM2 (Full Box Prompt).",
+            description="Segment the primary object or full scene in a satellite image using SAM2 (Full Box Prompt). Returns {bboxes:[{x1,y1,x2,y2}] of segments, output, image_preprocessing}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1047,7 +1423,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_perception.strip_rcnn_detect",
             name="Strip-R-CNN Detection",
-            description="Specialized object detection for elongated objects (ships, roads, bridges) in satellite images using Strip R-CNN.",
+            description="Oriented object detection (Strip R-CNN) for the DOTA-15 classes only: plane, ship, storage-tank, baseball-diamond, tennis-court, basketball-court, ground-track-field, harbor, bridge, large-vehicle, small-vehicle, helicopter, roundabout, soccer-ball-field, swimming-pool. Returns 0 for any other object — use instructsam for open-vocabulary targets. Returns {count, objects:[{label, score, bbox:[x1,y1,x2,y2], cx, cy, w, h, angle}], detections_bboxes:[[x1,y1,x2,y2]], num_detections}. `objects`/`detections_bboxes` give axis-aligned boxes ready for draw_bboxes/bbox_to_centroid/bbox_area; original rotated geometry (center,size,radians) is kept per-object in cx/cy/w/h/angle and in the raw `detections` dict.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1075,7 +1451,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_perception.remotesam",
             name="RemoteSAM Tasks",
-            description="Perform various tasks using RemoteSAM such as referring segmentation, semantic segmentation, detection, etc.",
+            description="Perform various tasks using RemoteSAM such as referring segmentation, semantic segmentation, detection, etc. Returns {result, result_summary, bboxes, artifact_path}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1119,7 +1495,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_perception.instructsam",
             name="InstructSAM Counting",
-            description="Instruction-based segmentation and counting of objects.",
+            description="Open-vocabulary, instruction-based detection and counting of objects (any class described in text). Returns {count, objects, detections:[{label, score, x1, y1, x2, y2}]} — axis-aligned boxes ready for draw_bboxes/bbox_to_centroid.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1144,7 +1520,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_perception.draw_bboxes",
             name="Draw Bounding Boxes",
-            description="Draw labeled bounding boxes on an image and save the result. Useful for visualizing detection results.",
+            description="Draw labeled bounding boxes on an image and save the result. Each bbox needs x1,y1,x2,y2 (+optional label/color). Returns {status, output_path, boxes_drawn}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1178,7 +1554,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_perception.add_text",
             name="Add Text to Image",
-            description="Add text annotations to an image at specified positions. Useful for labeling analysis results.",
+            description="Add text annotations to an image at specified positions. Each annotation needs text,x,y. Returns {status, output_path, annotations_added}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1212,7 +1588,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_perception.ocr_extract",
             name="OCR Text Extraction",
-            description="Extract text from an image using EasyOCR. Supports Chinese and English text. Useful for reading labels, legends, or text in satellite imagery.",
+            description="Extract text from an image using EasyOCR. Supports Chinese and English text. Useful for reading labels, legends, or text in satellite imagery. Returns {texts:[{text, bbox}], count, full_text}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1268,7 +1644,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_perception.bbox_to_centroid",
             name="Bounding Boxes to Centroids",
-            description="Convert a list of bounding boxes to their centroid coordinates.",
+            description="Convert a list of bounding boxes to their centroid coordinates. Each input bbox must have x1,y1,x2,y2 keys. Returns {centroids:[{x,y}], count}.",
             parameters={
                 "type": "object",
                 "properties": {

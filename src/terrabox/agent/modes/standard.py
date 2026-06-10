@@ -149,7 +149,12 @@ def _tool_name_to_slug(name: str) -> str:
 def _bucket_for_tool_slug(slug: str) -> str:
     if slug.startswith("geo_perception."):
         return "perception"
-    if slug.startswith("bash.") or slug.startswith("ipython_code.") or slug.startswith("github."):
+    if (
+        slug.startswith("bash.")
+        or slug.startswith("ipython.")
+        or slug.startswith("ipython_code.")
+        or slug.startswith("github.")
+    ):
         return "risky"
     if slug.startswith("bing_search."):
         return "network"

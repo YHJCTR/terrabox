@@ -13,6 +13,7 @@ Key features:
 import os
 from typing import Any, Dict
 from ..core.registry import ToolSpec
+from ._batch_util import auto_batch
 
 
 # ------------------------------------------------------------------------------
@@ -792,7 +793,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_raster.calculate_index",
             name="Calculate Spectral Index",
-            description="Calculate generic normalized difference indices like NDVI, NDWI, NDBI, NBR, NDTI, NDSI.",
+            description="Calculate generic normalized difference indices like NDVI, NDWI, NDBI, NBR, NDTI, NDSI. Returns {output_path} (single-band index GeoTIFF). Path arguments also accept a parallel list for batch processing (returns {output_paths, results}).",
             parameters={
                 "type": "object",
                 "properties": {
@@ -806,7 +807,7 @@ def setup(registrar):
             },
             requires_connection=False
         ),
-        calculate_normalized_difference_handler,
+        auto_batch(calculate_normalized_difference_handler),
     )
 
     # 2. EVI
@@ -814,7 +815,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_raster.calculate_evi",
             name="Calculate EVI",
-            description="Calculate Enhanced Vegetation Index (EVI). Requires NIR, Red, Blue bands.",
+            description="Calculate Enhanced Vegetation Index (EVI). Requires NIR, Red, Blue bands. Path arguments also accept a parallel list for batch processing (returns {output_paths, results}).",
             parameters={
                 "type": "object",
                 "properties": {
@@ -831,7 +832,7 @@ def setup(registrar):
             },
             requires_connection=False
         ),
-        calculate_evi_handler,
+        auto_batch(calculate_evi_handler),
     )
 
     # 3. FVC
@@ -839,7 +840,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_raster.calculate_fvc",
             name="Calculate FVC",
-            description="Calculate Fractional Vegetation Cover (FVC) from NIR and Red bands.",
+            description="Calculate Fractional Vegetation Cover (FVC) from NIR and Red bands. Path arguments also accept a parallel list for batch processing (returns {output_paths, results}).",
             parameters={
                 "type": "object",
                 "properties": {
@@ -853,7 +854,7 @@ def setup(registrar):
             },
             requires_connection=False
         ),
-        calculate_fvc_handler,
+        auto_batch(calculate_fvc_handler),
     )
 
     # 4. WRI
@@ -861,7 +862,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_raster.calculate_wri",
             name="Calculate WRI",
-            description="Calculate Water Ratio Index (WRI). Requires Green, Red, NIR, SWIR bands.",
+            description="Calculate Water Ratio Index (WRI). Requires Green, Red, NIR, SWIR bands. Path arguments also accept a parallel list for batch processing (returns {output_paths, results}).",
             parameters={
                 "type": "object",
                 "properties": {
@@ -875,7 +876,7 @@ def setup(registrar):
             },
             requires_connection=False
         ),
-        calculate_wri_handler,
+        auto_batch(calculate_wri_handler),
     )
 
     # 5. TVDI
@@ -883,7 +884,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_raster.compute_tvdi",
             name="Compute TVDI",
-            description="Compute Temperature Vegetation Dryness Index (TVDI) from NDVI and LST.",
+            description="Compute Temperature Vegetation Dryness Index (TVDI) from NDVI and LST. Returns {output_path} (single-band TVDI GeoTIFF; may include 'warning' if insufficient valid pixels). Path arguments also accept a parallel list for batch processing (returns {output_paths, results}).",
             parameters={
                 "type": "object",
                 "properties": {
@@ -895,7 +896,7 @@ def setup(registrar):
             },
             requires_connection=False
         ),
-        compute_tvdi_handler,
+        auto_batch(compute_tvdi_handler),
     )
 
     # 7. Snow Stats
@@ -903,7 +904,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_raster.calc_snow_loss_stats",
             name="Calculate Snow Loss Stats",
-            description="Calculate percentage of extreme snow loss from a binary map.",
+            description="Calculate percentage of extreme snow loss from a binary map (pixels==1). Returns {percentage, total_pixels, loss_pixels}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -941,7 +942,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_raster.count_above_threshold",
             name="Count Pixels Above Threshold",
-            description="Count the number of pixels in a single-band raster whose values exceed a given threshold.",
+            description="Count the number of pixels in a single-band raster whose values exceed a given threshold. Returns {count}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1002,7 +1003,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_raster.raster_diff",
             name="Raster Difference",
-            description="Compute element-wise difference (A - B) between two co-registered single-band rasters and save the result as a GeoTIFF.",
+            description="Compute element-wise difference (A - B) between two co-registered single-band rasters and save the result as a GeoTIFF. Path arguments also accept a parallel list for batch processing (returns {output_paths, results}).",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1014,7 +1015,7 @@ def setup(registrar):
             },
             requires_connection=False
         ),
-        raster_diff_handler,
+        auto_batch(raster_diff_handler),
     )
 
     # 13. Raster Average
@@ -1022,7 +1023,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_raster.raster_average",
             name="Raster Average",
-            description="Compute the pixel-wise mean of multiple co-registered single-band rasters and save as a GeoTIFF.",
+            description="Compute the pixel-wise mean of multiple co-registered single-band rasters and save as a GeoTIFF. Returns {output_path}. Path arguments also accept a parallel list for batch processing (returns {output_paths, results}).",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1037,7 +1038,7 @@ def setup(registrar):
             },
             requires_connection=False
         ),
-        raster_average_handler,
+        auto_batch(raster_average_handler),
     )
 
     # 14. Hotspot Percentage
@@ -1045,7 +1046,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_raster.hotspot_percentage",
             name="Hotspot Percentage",
-            description="Compute the fraction of valid pixels (non-NaN, non-nodata) exceeding a threshold. Returns ratio in [0.0, 1.0]. Useful for fire hotspot area estimation, flood extent ratio, etc.",
+            description="Compute the fraction of valid pixels (non-NaN, non-nodata) exceeding a threshold. Useful for fire hotspot area estimation, flood extent ratio, etc. Returns {percentage (0.0-1.0), count_above, total_valid}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1064,7 +1065,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_raster.apply_cloud_mask",
             name="Apply Cloud Mask",
-            description="Mask cloud and cloud-shadow pixels in a surface reflectance band using a Landsat QA_PIXEL band (bit3=cloud, bit4=shadow) or Sentinel-2 SCL band (values 3/8/9/10). Masked pixels are set to nodata.",
+            description="Mask cloud and cloud-shadow pixels in a surface reflectance band using a Landsat QA_PIXEL band (bit3=cloud, bit4=shadow) or Sentinel-2 SCL band (values 3/8/9/10). Masked pixels are set to nodata. Returns {output_path} (masked single-band GeoTIFF). Path arguments also accept a parallel list for batch processing (returns {output_paths, results}).",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1082,7 +1083,7 @@ def setup(registrar):
             },
             requires_connection=False
         ),
-        apply_cloud_mask_handler,
+        auto_batch(apply_cloud_mask_handler),
     )
 
     # 16. Get Percentile Value
@@ -1130,7 +1131,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_raster.count_fire_pixels",
             name="Count Fire Pixels",
-            description="Count the number of fire pixels (FRP > threshold) in one or multiple rasters. Returns per-image counts and aggregate total.",
+            description="Count the number of fire pixels (FRP > threshold) in one or multiple rasters. Returns {per_image, total_fire_pixels, image_count}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1175,7 +1176,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_raster.identify_fire_prone_areas",
             name="Identify Fire-Prone Areas",
-            description="Identify high fire-risk areas as pixels in the top N percentile of FRP values across a time series. Returns a binary mask (255=fire-prone area).",
+            description="Identify high fire-risk areas as pixels in the top N percentile of FRP values across a time series. Writes a binary mask GeoTIFF (255=fire-prone). Returns {output_path, frp_threshold, prone_pixels, percentile_used}.",
             parameters={
                 "type": "object",
                 "properties": {

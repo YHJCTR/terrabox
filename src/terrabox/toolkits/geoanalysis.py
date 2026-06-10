@@ -526,7 +526,7 @@ def setup(registrar):
         ToolSpec(
             slug="geoanalysis.compute_linear_trend",
             name="Compute Linear Trend",
-            description="Compute slope and intercept of a time series using least squares.",
+            description="Compute slope and intercept of a time series using least squares. Returns {slope, intercept, trend} (trend = increasing/decreasing/stable).",
             parameters={
                 "type": "object",
                 "properties": {
@@ -547,7 +547,7 @@ def setup(registrar):
         ToolSpec(
             slug="geoanalysis.mann_kendall_test",
             name="Mann-Kendall Trend Test",
-            description="Perform non-parametric Mann-Kendall trend test.",
+            description="Perform non-parametric Mann-Kendall trend test on a numeric time series. Returns {trend ('increasing'/'decreasing'/'no trend'), p_value, z_score, tau}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -565,7 +565,7 @@ def setup(registrar):
         ToolSpec(
             slug="geoanalysis.sens_slope",
             name="Sen's Slope Estimator",
-            description="Compute robust median slope of a time series.",
+            description="Compute robust median (Theil-Sen) slope of a numeric time series. Returns {slope, pairwise_slopes_count}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -685,7 +685,7 @@ def setup(registrar):
         ToolSpec(
             slug="geoanalysis.analyze_hotspot_direction",
             name="Analyze Hotspot Direction",
-            description="Determine the cardinal direction of hotspot concentration.",
+            description="Determine the cardinal direction of hotspot concentration in a binary/intensity map. Returns {direction (e.g. 'north'/'southeast'), counts (per-direction pixel counts)}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -703,7 +703,7 @@ def setup(registrar):
         ToolSpec(
             slug="geoanalysis.count_spikes",
             name="Count Spikes",
-            description="Count number of upward spikes exceeding a threshold.",
+            description="Count number of upward spikes exceeding a threshold. Returns {spike_count}.",
             parameters={
                 "type": "object",
                 "properties": {

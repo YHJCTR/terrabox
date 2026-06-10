@@ -137,6 +137,11 @@ class StripRCNNDockerManager(BaseServiceManager):
             d = load_raw_yaml()
             if "strip_rcnn_ckpt_host"     in d: cls.CKPT_HOST       = str(d["strip_rcnn_ckpt_host"])
             if "strip_rcnn_config_host"   in d: cls.CONFIG_HOST     = str(d["strip_rcnn_config_host"])
+            # Derive the in-container checkpoint from the configured host path's
+            # basename (ckpt_host is mounted at /ckpt). Keeps docker + subprocess
+            # modes pointing at the SAME weights file via one config key.
+            if "strip_rcnn_checkpoint_path" in d:
+                cls.CHECKPOINT_IN_CONTAINER = "/ckpt/" + os.path.basename(str(d["strip_rcnn_checkpoint_path"]))
             if "strip_rcnn_gpu_devices"   in d: cls.GPU_DEVICES     = str(d["strip_rcnn_gpu_devices"])
             if "docker_data_mount_host"   in d: cls.DATA_MOUNT_HOST = str(d["docker_data_mount_host"])
             if "strip_rcnn_port"          in d: cls.API_URL         = f"http://127.0.0.1:{int(d['strip_rcnn_port'])}"

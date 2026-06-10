@@ -90,6 +90,14 @@ EARTH_AGENT_TOOL_MAPPING: Dict[str, Optional[str]] = {
     "calculate_batch_frp":      "geo_raster.calculate_frp",
     "calculate_batch_ndti":     "geo_raster.calculate_index",
     "calculate_batch_ndsi":     "geo_raster.calculate_index",
+    # Single-image index variants (were missing → fell through to ipython).
+    "calculate_ndvi":           "geo_raster.calculate_index",
+    "calculate_ndwi":           "geo_raster.calculate_index",
+    "calculate_ndbi":           "geo_raster.calculate_index",
+    "calculate_nbr":            "geo_raster.calculate_index",
+    "calculate_ndti":           "geo_raster.calculate_index",
+    "calculate_ndsi":           "geo_raster.calculate_index",
+    "calc_batch_image_mean_max_min": "geo_statistics.batch_raster_stats",
     "calc_extreme_snow_loss_percentage_from_binary_map": "geo_raster.calc_snow_loss_stats",
     "compute_tvdi":             "geo_raster.compute_tvdi",
 

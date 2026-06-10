@@ -68,13 +68,23 @@ def _toolkit_for_slug(slug: str) -> str | None:
 
 
 def _is_risky(slug: str) -> bool:
-    return slug.startswith("bash.") or slug.startswith("ipython_code.") or slug.startswith("github.")
+    return (
+        slug.startswith("bash.")
+        or slug.startswith("ipython.")
+        or slug.startswith("ipython_code.")
+        or slug.startswith("github.")
+    )
 
 
 def _bucket_for(slug: str) -> str:
     if slug.startswith("geo_perception."):
         return "perception"
-    if slug.startswith("bash.") or slug.startswith("ipython_code.") or slug.startswith("github."):
+    if (
+        slug.startswith("bash.")
+        or slug.startswith("ipython.")
+        or slug.startswith("ipython_code.")
+        or slug.startswith("github.")
+    ):
         return "risky"
     if slug.startswith("bing_search."):
         return "network"

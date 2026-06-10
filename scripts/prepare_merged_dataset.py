@@ -66,6 +66,14 @@ EARTH_AGENT_TOOL_MAPPING: dict[str, Optional[str]] = {
     "calculate_batch_frp":      "geo_raster.calculate_frp",
     "calculate_batch_ndti":     "geo_raster.calculate_index",
     "calculate_batch_ndsi":     "geo_raster.calculate_index",
+    # Single-image index variants (the batch_* keys above missed these, so they
+    # used to fall through to ipython despite calculate_index handling them).
+    "calculate_ndvi":           "geo_raster.calculate_index",
+    "calculate_ndwi":           "geo_raster.calculate_index",
+    "calculate_ndbi":           "geo_raster.calculate_index",
+    "calculate_nbr":            "geo_raster.calculate_index",
+    "calculate_ndti":           "geo_raster.calculate_index",
+    "calculate_ndsi":           "geo_raster.calculate_index",
     "calc_extreme_snow_loss_percentage_from_binary_map": "geo_raster.calc_snow_loss_stats",
     "compute_tvdi":             "geo_raster.compute_tvdi",
     # Analysis Kit
@@ -152,21 +160,24 @@ EARTH_AGENT_TOOL_MAPPING: dict[str, Optional[str]] = {
     # Utility
     "get_filelist":             "bash.execute",
     "calculate_tif_average":    "geo_raster.raster_average",
-    "ceil_number":              "ipython_code.execute",
-    # Unmapped tools → fallback to ipython
-    "argmax":                   "ipython_code.execute",
+    # Pure-Python helper ops with no dedicated tool → compute.solver (general
+    # Python compute), NOT ipython. Keeps the dataset free of ipython while
+    # still being honest that "some Python" is needed.
+    "ceil_number":              "compute.solver",
+    "argmax":                   "compute.solver",
     "subtract":                 "geo_statistics.scalar_arithmetic",
-    "calculate_band_mean_by_condition": "ipython_code.execute",
+    "calculate_band_mean_by_condition": "compute.solver",
     "count_images_exceeding_mean_multiplier": "geo_statistics.count_images_exceeding",
     "calculate_tif_difference": "geo_statistics.scalar_arithmetic",
     "calc_threshold_value_mean": "geo_statistics.threshold_ratio",
     "calc_batch_image_hotspot_tif": "geo_raster.hotspot_percentage",
     "calc_batch_image_sum":     "geo_statistics.batch_raster_stats",
     "calculate_batch_image_mean_max_min": "geo_statistics.batch_raster_stats",
+    "calc_batch_image_mean_max_min": "geo_statistics.batch_raster_stats",
     "image_division_mean":      "geo_statistics.scalar_arithmetic",
-    "get_list_object_via_indexes": "ipython_code.execute",
-    "index_to_date_range":      "ipython_code.execute",
-    "calculate_area":           "ipython_code.execute",
+    "get_list_object_via_indexes": "compute.solver",
+    "index_to_date_range":      "compute.solver",
+    "calculate_area":           "compute.solver",
     "apply_cloud_mask":         "geo_raster.apply_cloud_mask",
 }
 
@@ -217,8 +228,8 @@ def normalize_tool_name(name: str) -> Optional[str]:
     for k, v in EARTH_AGENT_TOOL_MAPPING.items():
         if k.lower() == name.lower():
             return v
-    log.debug(f"Unknown tool name '{name}' → ipython_code.execute")
-    return "ipython_code.execute"
+    log.debug(f"Unknown tool name '{name}' → compute.solver")
+    return "compute.solver"
 
 
 def normalize_tool_list(tools: list[str]) -> list[str]:

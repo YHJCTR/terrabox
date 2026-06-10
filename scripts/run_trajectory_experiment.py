@@ -75,7 +75,19 @@ VLM_TOOLS = {"geo_perception.vlm_analyze"}
 
 CHANGEOS_KEYWORDS = {"change_os", "changeos", "changedetection", "change detection"}
 
-TOOL_ALIASES = {"ipython_code.execute": "ipython.execute"}
+TOOL_ALIASES = {
+    "ipython_code.execute": "ipython.execute",
+    "Calculator": "ipython.execute",
+    "Solver": "ipython.execute",
+    "Plot": "ipython.execute",
+    "TextToBbox": "geo_perception.instructsam",
+    "InstructSAM": "geo_perception.instructsam",
+    "DrawBox": "geo_perception.draw_bboxes",
+    "AddText": "geo_perception.add_text",
+    "OCR": "geo_perception.ocr_extract",
+    "ObjectDetection": "geo_perception.strip_rcnn_detect",
+    "SegmentObjectPixels": "geo_perception.sam2_segment",
+}
 
 
 def canonical_slug(slug: str) -> str:
@@ -254,7 +266,7 @@ def extract_tool_calls(messages: list) -> list[str]:
         if hasattr(msg, "tool_calls") and msg.tool_calls:
             for tc in msg.tool_calls:
                 name = tc.get("name", "")
-                calls.append(name.replace("__", "."))
+                calls.append(canonical_slug(name.replace("__", ".")))
     return calls
 
 
@@ -313,18 +325,58 @@ def classify_rollout_status(final: str, messages: list) -> dict[str, Any]:
     }
 
 
+def _lcs_len(a: list[str], b: list[str]) -> int:
+    """Length of the longest common subsequence (order-preserving)."""
+    if not a or not b:
+        return 0
+    prev = [0] * (len(b) + 1)
+    for x in a:
+        cur = [0] * (len(b) + 1)
+        for j, y in enumerate(b, 1):
+            cur[j] = prev[j - 1] + 1 if x == y else max(prev[j], cur[j - 1])
+        prev = cur
+    return prev[-1]
+
+
 def compute_tool_metrics(called: list[str], expected: list[str]) -> dict:
-    """Compute precision, recall, F1 for tool match."""
+    """Tool-match metrics at three granularities.
+
+    - set-level (default `precision/recall/f1/exact_match`): ignores repetition
+      and order. Kept as the primary fields for backward compatibility.
+    - multiset-level (`multiset_*`): counts repeated calls (e.g. solver,solver).
+      97.8% of fixdata tasks repeat tools, so set-F1 over-credits them.
+    - order-level (`ordered_exact_match`, `lcs_ratio`): order-preserving via LCS.
+    """
     called_set = set(called)
     expected_set = set(expected)
     if not expected_set:
-        return {"precision": 1.0, "recall": 1.0, "f1": 1.0, "exact_match": not called_set}
+        empty = not called
+        return {
+            "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact_match": not called_set,
+            "multiset_precision": 1.0, "multiset_recall": 1.0, "multiset_f1": 1.0,
+            "ordered_exact_match": empty, "lcs_ratio": 1.0,
+        }
+    # set-level
     tp = len(called_set & expected_set)
     precision = tp / len(called_set) if called_set else 0.0
     recall = tp / len(expected_set) if expected_set else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
     exact_match = called_set == expected_set
-    return {"precision": precision, "recall": recall, "f1": f1, "exact_match": exact_match}
+    # multiset-level (repetition-aware)
+    from collections import Counter as _C
+    inter = sum((_C(called) & _C(expected)).values())
+    m_prec = inter / len(called) if called else 0.0
+    m_rec = inter / len(expected) if expected else 0.0
+    m_f1 = 2 * m_prec * m_rec / (m_prec + m_rec) if (m_prec + m_rec) > 0 else 0.0
+    # order-level (LCS over ordered call lists with repetition)
+    lcs = _lcs_len(called, expected)
+    lcs_ratio = lcs / len(expected) if expected else 0.0
+    ordered_exact_match = called == expected
+    return {
+        "precision": precision, "recall": recall, "f1": f1, "exact_match": exact_match,
+        "multiset_precision": m_prec, "multiset_recall": m_rec, "multiset_f1": m_f1,
+        "ordered_exact_match": ordered_exact_match, "lcs_ratio": lcs_ratio,
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -558,6 +610,9 @@ def cmd_rollout(args):
             excluded |= VLM_TOOLS
         if args.skip_changeos:
             excluded |= {s for s in allowed_slugs_set if "change_os" in s}
+        if getattr(args, "exclude_tools", None):
+            manual = {canonical_slug(t.strip()) for t in args.exclude_tools.split(",") if t.strip()}
+            excluded |= manual
 
         allowed_slugs_set -= excluded
         allowed_slugs = sorted(allowed_slugs_set)
@@ -749,6 +804,176 @@ def cmd_rollout(args):
 # Stats subcommand
 # ──────────────────────────────────────────────────────────────────────────────
 
+_NUM_RE = re.compile(r"-?\d[\d,]*\.?\d*")
+
+
+def _extract_numbers(text: str) -> list[float]:
+    """Pull numeric values out of a free-text answer."""
+    out = []
+    for m in _NUM_RE.findall(text or ""):
+        s = m.replace(",", "")
+        try:
+            out.append(float(s))
+        except ValueError:
+            pass
+    return out
+
+
+def _numeric_match(gold: str, pred: str, rel_tol: float, abs_tol: float) -> bool | None:
+    """True/False if gold has numbers and a pred number matches; None if undecidable."""
+    gnums = _extract_numbers(gold)
+    if not gnums:
+        return None  # non-numeric gold → defer to LLM judge
+    pnums = _extract_numbers(pred)
+    if not pnums:
+        return False
+    for g in gnums:
+        for p in pnums:
+            tol = max(abs_tol, abs(g) * rel_tol)
+            if abs(g - p) <= tol:
+                return True
+    return False
+
+
+_JUDGE_SYSTEM = (
+    "You are a strict grader for a geospatial question-answering agent. "
+    "Decide if the model's final answer is consistent with the reference answer. "
+    "Accept small numeric rounding differences and wording differences; reject wrong "
+    "numbers, wrong objects, wrong units, or missing required values. "
+    'Respond ONLY as JSON: {"correct": true|false, "reason": "<short>"}.'
+)
+
+
+def cmd_score_answers(args):
+    """Score final-answer correctness against gold ground_truth.
+
+    Joins saved rollout results (final_answer_full) with the strict dataset's
+    `ground_truth` by task_id, scores each via numeric tolerance match (fast path)
+    and an LLM judge (authoritative for non-numeric / borderline), then writes
+    `answer_correct` back into the result rows and regenerates metrics.json.
+    """
+    import sys
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+
+    exp_dir = Path(args.results_dir)
+    if not exp_dir.is_absolute():
+        exp_dir = REPO_ROOT / exp_dir
+
+    # 1) ground_truth map by task id from the strict dataset
+    strict = Path(args.strict_data)
+    if not strict.is_absolute():
+        strict = REPO_ROOT / strict
+    gt_map: dict[str, str] = {}
+    with strict.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            j = json.loads(line)
+            tid = str(j.get("id") or j.get("task_id"))
+            gt = j.get("ground_truth")
+            if tid and gt:
+                gt_map[tid] = str(gt)
+    log.info(f"Loaded {len(gt_map)} ground_truth answers from {strict}")
+
+    # 2) locate per-task result files (authoritative, one file per task)
+    results_dir = exp_dir / "results"
+    if not results_dir.exists():
+        print(f"No results/ dir under {exp_dir}")
+        return
+    result_paths = sorted(results_dir.glob("*.json"))
+    if not result_paths:
+        print(f"No result json under {results_dir}")
+        return
+
+    # 3) optional LLM judge
+    judge = None
+    if not args.no_llm_judge:
+        try:
+            from terrabox.evolution.shared.llm_client import EvolutionLLMClient
+            judge = EvolutionLLMClient(llm_url=args.llm_url)
+        except Exception as e:
+            log.warning(f"LLM judge unavailable ({e}); numeric-only scoring")
+
+    n = correct = scored = numeric = judged = missing_gt = 0
+    answer_status: dict[str, dict] = {}
+    for p in result_paths:
+        row = json.loads(p.read_text(encoding="utf-8"))
+        tid = str(row.get("task_id"))
+        gold = gt_map.get(tid)
+        pred = row.get("final_answer_full") or row.get("final_answer") or ""
+        n += 1
+        if not gold:
+            missing_gt += 1
+            continue
+        method = None
+        verdict = _numeric_match(gold, pred, args.rel_tol, args.abs_tol)
+        if verdict is not None:
+            method = "numeric"
+            numeric += 1
+        elif judge is not None:
+            prompt = (
+                f"Question:\n{row.get('question','')}\n\n"
+                f"Reference answer:\n{gold}\n\n"
+                f"Model answer:\n{pred[:1500]}\n\n"
+                'Is the model answer correct? Respond as JSON {"correct": true|false, "reason": "..."}.'
+            )
+            res = judge.call_json(prompt, system=_JUDGE_SYSTEM, max_tokens=256)
+            if isinstance(res, dict) and "correct" in res:
+                verdict = bool(res["correct"])
+                method = "llm_judge"
+                judged += 1
+            else:
+                verdict = None
+        if verdict is None:
+            continue
+        scored += 1
+        if verdict:
+            correct += 1
+        row["answer_correct"] = bool(verdict)
+        row["answer_score_method"] = method
+        p.write_text(json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8")
+        answer_status[tid] = {"correct": bool(verdict), "method": method}
+
+    # 4) merge answer_correct into trajectories_full.jsonl (metrics.py reads it first)
+    full = exp_dir / "trajectories_full.jsonl"
+    if full.exists():
+        rows = [json.loads(l) for l in full.read_text(encoding="utf-8").splitlines() if l.strip()]
+        for r in rows:
+            st = answer_status.get(str(r.get("task_id")))
+            if st:
+                r["answer_correct"] = st["correct"]
+                r["answer_score_method"] = st["method"]
+        full.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8")
+
+    acc = correct / scored if scored else 0.0
+    summary = {
+        "total_results": n,
+        "scored": scored,
+        "correct": correct,
+        "answer_accuracy": acc,
+        "by_numeric": numeric,
+        "by_llm_judge": judged,
+        "missing_ground_truth": missing_gt,
+        "rel_tol": args.rel_tol,
+        "abs_tol": args.abs_tol,
+        "llm_judge": judge is not None,
+    }
+    out = exp_dir / "metrics" / "answer_accuracy.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # 5) regenerate metrics.json so answer_accuracy + type_breakdown pick it up
+    try:
+        from terrabox.evolution.ReAct.metrics import write_metrics
+        write_metrics(exp_dir, exp_dir / "metrics" / "metrics.json")
+    except Exception as e:
+        log.warning(f"metrics regen skipped: {e}")
+
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    print(f"  → {out}")
+
+
 def cmd_stats(args):
     """Compute statistics from saved trajectory results."""
     traj_dir = Path(args.trajectory_dir)
@@ -868,6 +1093,10 @@ def main():
     p_rollout.add_argument("--no-skip-vlm", dest="skip_vlm", action="store_false")
     p_rollout.add_argument("--skip-changeos", action="store_true", default=True)
     p_rollout.add_argument("--no-skip-changeos", dest="skip_changeos", action="store_false")
+    p_rollout.add_argument(
+        "--exclude-tools", default=None,
+        help="逗号分隔的工具 slug，从 allowed 中额外剔除（如 ipython.execute）",
+    )
 
     # Tool restriction (default: restrict to dataset tools)
     p_rollout.add_argument(
@@ -883,6 +1112,15 @@ def main():
     p_stats = subparsers.add_parser("stats", help="统计已保存轨迹")
     p_stats.add_argument("--trajectory-dir", required=True, help="轨迹目录")
 
+    # ── score-answers ──
+    p_score = subparsers.add_parser("score-answers", help="对最终答案打分（数值匹配 + LLM-judge），写回 answer_correct")
+    p_score.add_argument("--results-dir", required=True, help="实验目录（含 results/ 与 trajectories_full.jsonl）")
+    p_score.add_argument("--strict-data", default="data/fixdata/sft_train_strict.jsonl", help="提供 ground_truth 的 strict 数据集")
+    p_score.add_argument("--llm-url", default="http://localhost:9100", help="LLM-judge 的 vLLM 地址")
+    p_score.add_argument("--no-llm-judge", action="store_true", help="只用数值匹配，不用 LLM 裁判")
+    p_score.add_argument("--rel-tol", type=float, default=0.05, help="数值相对容差")
+    p_score.add_argument("--abs-tol", type=float, default=0.5, help="数值绝对容差（计数类）")
+
     args = parser.parse_args()
 
     if args.command == "rollout":
@@ -891,6 +1129,8 @@ def main():
         cmd_rollout(args)
     elif args.command == "stats":
         cmd_stats(args)
+    elif args.command == "score-answers":
+        cmd_score_answers(args)
     else:
         parser.print_help()
 

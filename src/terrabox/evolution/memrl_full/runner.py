@@ -9,7 +9,7 @@ from ..full_shared.sft_schema import load_sft_samples
 from .memory_builder import build_memory_records, populate_sqlite_memory, write_memory_jsonl
 
 
-DEFAULT_DATA = "data/newdata/sft_train_strict.jsonl"
+DEFAULT_DATA = "data/fixdata_decollapse/sft_train_strict.jsonl"
 DEFAULT_STORE = "evolution_store/memrl_full"
 
 

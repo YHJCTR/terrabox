@@ -2,6 +2,125 @@
 
 这个目录保存 Terrabox 当前 strict 数据上的 SFT baseline。目标是训练一个后续方法可复用的 Qwen3-8B 冷启动模型，让模型先学会当前 Terrabox 工具名、JSON action 格式、常见调用顺序和任务风格。
 
+> 训练的是**纯文本 Qwen3-8B**(工具调用能力),不是 VL。ReAct/Reflection 的 agent LLM(port 9100)就是这个文本 8B(vLLM 挂载 HF 目录跑 `--model /model`);感知交给工具(instructsam 等),图片不进 agent LLM。`scripts/train/train_sft.py` 与 `/data1/yuhongjie2` 下的 SFT 是**另一套 VL 训练**,与本模块无关,勿混用。
+
+## ✅ 最新实验(2026-06-09 实跑):`v2_sft` —— v2 数据 + unsloth 单卡 QLoRA
+
+主线 SFT,**用于 RL 冷启动 + SFT 后重跑 ReAct 对比**。目标:SFT 后模型在 ReAct 上比原生 Qwen3-8B 更好(原生主要败在选错工具/格式不对,SFT 教正确 slug + `{thought,actions}` 格式 + 调用顺序)。
+
+### 设计要点:verbatim + 丢弃超长,**不做有损压缩**(关键)
+- **不压缩**(去掉了 `--compact-long-context`)。原因:之前的压缩会把 **gold 工具调用的参数**(如几十文件的 `output_path` 列表)压成 `{__sft_compacted_list__}` 占位符 → 模型学到**跑不通的工具调用** → SFT 后 ReAct 反而变差。**args 必须原样保留。**
+- **与真实 rollout 对齐**:rollout 的"压缩"其实是**历史摘要**(上下文超长才总结旧轮),不是逐观测截断;单条全量进 prompt,硬上限是 vLLM `max_model_len=24576`。所以 SFT 也 **verbatim**,靠总长上限兜底 → train≈infer,不伤效果。
+- **超长行丢弃而非截断**:`--drop-overlength` 把超过 `max_seq_length` 的行**整条丢掉**(不在工具调用中间截断)。实跑丢 **85/7195(1.2%)** train + 2/200 val,都是几十波段的极端 EB 批任务(它们的根治是工具改吃目录,另说;现在丢掉不影响其余)。
+
+### 用什么数据
+- 训练:`data/fixdata_decollapse_v2/sft_train_strict.jsonl`(v2 训练池 7395)→ `prepare-data` 切 val 200 / train 7195 → 训练时 `--drop-overlength` 丢超 16384 的 85 行 → **实际 train 7110 / val 198**,**verbatim 未压缩**。
+- 测试**不在这里**:`data/fixdata_decollapse_v2/eval_openearth.json`(1647)、`eval_earthbench.json`(202),SFT 后用 ReAct rollout 评测、**分基准报**。
+
+### 产生什么模型
+文本 Qwen3-8B QLoRA,**merge 后 bf16 满精度**(无推理量化损失);产物 `src/terrabox/evolution/sft/model/v2_sft/`:`adapter/`(LoRA)+ `merged/`(完整 HF,= ReAct agent LLM 挂载格式,`AGENT_LLM_MODEL_PATH` 指它即可测)。
+
+### LoRA 参数 / 冻结层(本次实跑)
+| 项 | 值 |
+|---|---|
+| 量化 | 4-bit NF4 QLoRA,**base 全冻结** |
+| 可训练 | 仅 LoRA 适配器,~87M / 8.28B = **1.05%** |
+| **冻结** | embedding / 所有 layernorm / lm_head / 全部 base 权重 |
+| target_modules | `q,k,v,o,gate,up,down`(36 层全部注意力+MLP 线性层) |
+| rank / alpha | **32 / 64**(scaling=2);dropout 0;bias none |
+| loss | **assistant-only**(`train_on_responses_only`,Qwen3 ChatML 标记) |
+| lr / scheduler | **1e-4**(LoRA 冷启动用 1e-4~2e-4;默认 2e-5 太保守) |
+| epoch / batch | 1 epoch / 有效 batch 8(`bs1 × accum8`) |
+| max_seq / 超长 | **13312** + `--drop-overlength`(16384 实测 OOM,见下) |
+| 步数 / ETA | **一条多轮轨迹=1 样本** → 7110÷8 ≈ **889 步** / 单卡 ~24–30h |
+| checkpoint | `--save-steps 300 --save-total-limit 2`(总 ~889 步,1000 存不到;**只存 adapter+优化器,不 CPU 满载**;末尾 merge 一次 bf16) |
+| 显存 | **13312 实测安全**(最长样本 forward+backward 峰值 14.87G/24G);**16384 实测会 OOM**(长 EB 样本的 LM-head logits 151936×16384×4≈10G,叠加基底 12.4G 超 24G,在 step~50 撞到长样本即崩) |
+
+### 运行指令(本次实跑,照抄即可)
+```bash
+PY=/home/yuhongjie/miniconda3/envs/unsloth/bin/python
+EXP=v2_sft
+
+# ① 准备数据(切 train/val,verbatim 不压缩)
+PYTHONPATH=src $PY -m terrabox.evolution.sft.runner prepare-data \
+  --experiment $EXP --strict-data data/fixdata_decollapse_v2/sft_train_strict.jsonl \
+  --val-start 0 --val-limit 200 --train-start 200 --train-limit 100000
+
+# ② 训练(单卡 GPU0;assistant-only + drop 超长 + merged 默认产出)
+tmux new-session -d -s v2_sft "
+PYTHONPATH=src $PY -m terrabox.evolution.sft.runner train \
+  --experiment $EXP --model-path /data1/yuhongjie2/Earth-Agent/llm/qwen/3_8B/ \
+  --cuda-visible-devices 0 --max-seq-length 13312 --drop-overlength --lora-rank 32 --lora-alpha 64 \
+  --learning-rate 1e-4 --per-device-train-batch-size 1 --gradient-accumulation-steps 8 \
+  --num-train-epochs 1 --save-steps 300 --save-total-limit 2 --drop-overlength --launch"
+#   产物: src/terrabox/evolution/sft/model/$EXP/merged ;日志 exp/$EXP/sft_train.log
+
+# ③ SFT 后用 ReAct 评测(分基准),与原生 ReAct 对比
+PYTHONPATH=src no_proxy=localhost,127.0.0.1 $PY -m terrabox.evolution.sft.runner rollout \
+  --experiment $EXP --model-path src/terrabox/evolution/sft/model/$EXP/merged \
+  --task-file data/fixdata_decollapse_v2/eval_openearth.json --limit 300 \
+  --agent-gpu 0 --tool-gpu 1 --launch
+# 原生基线:同 task-file,--model-path 换成 /data1/yuhongjie2/Earth-Agent/llm/qwen/3_8B/
+```
+
+### 指令限制 / 注意
+- 必须 `unsloth` conda 环境;**`--cuda-visible-devices 0` 单卡**(unsloth 本就单卡,且无跳闸风险)。
+- **`--drop-overlength` 与 verbatim 配套**:不压缩 → 64 工具 catalog(8880)+ 长轨迹会有 ~1.2% 超 16384 → 必须 drop,否则预检报错(默认禁止静默截断)。
+- **不要量化真实 rollout**:rollout 保持 bf16 / 24576;推理量化(AWQ/GPTQ 4-bit)会真降工具调用精度,且救不了超长任务(那是上下文长度问题,留给"工具吃目录")。
+- 步数 ≈ 889(**多轮轨迹=1 样本**,不是按轮次展开成万步);想更充分→**先跑完 1 epoch 评测,不够再从 checkpoint 续 +1 epoch**,比一上来 2 epoch(~50h)省。
+- SFT 占 GPU0;`rollout` 评测才需 docker(runner 自动加 `--use-docker`)。
+
+## ⚠️ 2026-06-08 更新(数据对齐 / 3 卡 / HF 转换 / checkpoint 频率)
+
+配合数据集对齐和 ReAct/Reflection 流程改造,本模块同步更新:
+
+- **默认数据换成对齐后的 de-collapse 数据**:`runner.py` `DEFAULT_DATA = data/fixdata_decollapse/sft_train_strict.jsonl`(44 工具、参数可执行、与 ReAct/Reflection **同源**)。旧的 `data/newdata/` 是对齐前的,不要再用。仍可用 `--strict-data` 覆盖。
+- **veRL 默认 3 卡**:`train-verl` 默认 `--cuda-visible-devices 0,1,2 --nproc-per-node 3`(原来 4 卡会跳闸;8B FSDP 在 2 卡初始化就 OOM,3 卡是稳定甜点;`3090-safe` preset 会让 `sequence_parallel_size=nproc=3`)。
+- **新增 `convert-hf` 子命令**:把 veRL **FSDP shard checkpoint 离线转成 ReAct 可服务的 HF 模型**(标准 `config.json + safetensors 分片 + tokenizer`,即 agent LLM Docker 挂载的 `/model` 格式)。用 `--use_cpu_initialization` 在 **CPU 上离线转换**,避开训练时内联 `--save-hf-model` 触发的 126GiB full-gather 把服务器搞挂的问题。
+- **checkpoint 频率可配**:
+  - unsloth `train`:新增 `--save-steps`(默认 50)、`--save-total-limit`(默认 2)、`--eval-steps`(默认 50)。
+  - veRL `train-verl`:沿用 `--save-freq` / `--max-ckpt-to-keep`。
+  - 这样可以**用几条数据 + 小 `--save-steps`/`--max-steps` 跑通整套流程并验证中途存 ckpt**。
+- **保存格式现状**:unsloth 路径 `--save-merged-model` **默认开**,直接产出 `merged/`(HF 格式,ReAct 可服务);veRL 路径只存 FSDP shard,**必须再跑 `convert-hf`** 得到 HF 模型。
+
+### 把 SFT 模型放进 ReAct 测试(完整链路)
+
+```bash
+PY=/home/yuhongjie/miniconda3/envs/unsloth/bin/python
+EXP=<your_experiment>
+
+# 路线 A:unsloth(单卡, merged/ 直接可服务)
+PYTHONPATH=src $PY -m terrabox.evolution.sft.runner train \
+  --experiment $EXP --cuda-visible-devices 0 --save-steps 50 --launch
+#  → 产物: src/terrabox/evolution/sft/model/$EXP/merged
+
+# 路线 B:veRL(3 卡 FSDP) → 离线转 HF
+PYTHONPATH=src $PY -m terrabox.evolution.sft.runner train-verl \
+  --experiment $EXP --preset 3090-safe --save-freq 200 --launch     # 训练(3 卡)
+PYTHONPATH=src $PY -m terrabox.evolution.sft.runner convert-hf \
+  --experiment $EXP --launch                                        # 取最新 global_step_*, CPU 转 HF
+#  → 产物: src/terrabox/evolution/sft/model/${EXP}_verl/<step>_hf
+
+# 评测:rollout 会把 model-path 设成 AGENT_LLM_MODEL_PATH 喂给 ReAct standard 模式
+PYTHONPATH=src no_proxy=localhost,127.0.0.1 $PY -m terrabox.evolution.sft.runner rollout \
+  --experiment $EXP --model-path <merged 或 <step>_hf 目录> \
+  --agent-gpu 0 --tool-gpu 1 --launch
+```
+
+### 全量数据 + 与 ReAct 对齐的切片
+
+eval(val)用与 ReAct 测试集**完全相同**的 shuffle[0:216];train 用其余全部:
+
+```bash
+PYTHONPATH=src $PY -m terrabox.evolution.sft.runner prepare-data \
+  --experiment sft_full_decollapse \
+  --val-start 0 --val-limit 216 \
+  --train-start 216 --train-limit <剩余条数或不传以取到末尾>
+```
+
+> **loss 口径(已按 veRL 标准对齐)**:unsloth 路径默认 `--mask-prompt`,用 `train_on_responses_only`(Qwen3 ChatML 标记 `<|im_start|>user\n` / `<|im_start|>assistant\n`)**只对 assistant 轮算 loss**,多轮 ReAct 轨迹的每个 assistant 轮都受监督、system/user/observation 被掩码 —— 与 veRL `MultiTurnSFTDataset` 一致。需要旧的整段 loss 时用 `--no-mask-prompt`。
+
+
 ## 当前推荐路线
 
 正式训练推荐使用 **veRL FSDP SFT 后端**，不是原来的 Unsloth 单进程后端。

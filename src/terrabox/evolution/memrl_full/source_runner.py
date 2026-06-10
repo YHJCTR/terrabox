@@ -9,6 +9,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from ..ReAct.runner import build_rollout_env
 from .source_adapter import (
     MemRLSourceRecord,
     load_sft_as_memrl_records,
@@ -18,7 +19,9 @@ from .source_adapter import (
 from .source_memory_service import create_memrl_source_service
 
 
-DEFAULT_SFT = "data/newdata/sft_train_strict.jsonl"
+# Aligned, de-collapsed strict data (44 tools) — same source ReAct/Reflection use,
+# so MemRL memories and the eval set are apples-to-apples with the baselines.
+DEFAULT_SFT = "data/fixdata_decollapse/sft_train_strict.jsonl"
 DEFAULT_TASK_FILE = "data/merged/merged_train_tasks.json"
 DEFAULT_STORE = "evolution_store/memrl_full_source"
 DEFAULT_PYTHON = "/home/yuhongjie/miniconda3/envs/unsloth/bin/python"
@@ -260,16 +263,15 @@ def _rollout_command(args: argparse.Namespace) -> list[str]:
 
 
 def cmd_eval_source(args: argparse.Namespace) -> None:
-    env = os.environ.copy()
-    env.setdefault("PYTHONPATH", "src")
-    env.setdefault("no_proxy", "localhost,127.0.0.1")
-    env.setdefault("NO_PROXY", "localhost,127.0.0.1")
-    env["AGENT_LLM_GPU_DEVICES"] = str(args.agent_gpu)
-    env["TERRABOX_TOOL_GPU_DEVICES"] = str(args.tool_gpu)
-    env["CUDA_VISIBLE_DEVICES"] = f"{args.agent_gpu},{args.tool_gpu}"
+    # Reuse the exact ReAct/Reflection rollout environment so MemRL is evaluated
+    # under identical conditions (single-card VLM light profile to avoid breaker
+    # trips, instructsam service backend, artifact-output redirect, tool-GPU
+    # pinning). This is environment glue only — it does NOT touch MemRL's memory
+    # logic, which still runs through the unmodified external MemRL service.
+    env = build_rollout_env(args.agent_gpu, args.tool_gpu, getattr(args, "vlm_gpus", None))
     env.setdefault("TERRABOX_USE_DOCKER", "true")
-    env.setdefault("TERRABOX_TOOL_MAX_GPUS", "1")
-    env.setdefault("TERRABOX_TOOL_SERVICE_SCOPE", "call")
+    if getattr(args, "instructsam_backend", None):
+        env["TERRABOX_INSTRUCTSAM_BACKEND"] = args.instructsam_backend
     cmd = _rollout_command(args)
     print("Running:", " ".join(cmd))
     subprocess.run(cmd, cwd=Path(__file__).resolve().parents[4], env=env, check=True)
@@ -405,6 +407,12 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--port", type=int, default=9100)
         p.add_argument("--agent-gpu", default="0")
         p.add_argument("--tool-gpu", default="1")
+        # Match ReAct/Reflection: single-card VLM light profile (short context,
+        # one GPU) for the instructsam backend → avoids the 4-GPU breaker trip.
+        p.add_argument("--vlm-gpus", default="2",
+                       help="VLM(instructsam 后端)独立 GPU;默认单卡'2'(短上下文降功率,与 ReAct 一致);双卡长上下文用'2,3'")
+        p.add_argument("--instructsam-backend", default="service",
+                       help="instructsam 内核;默认 service(与 ReAct/Reflection 对齐),可设 vlm")
         p.add_argument("--python-bin", default=DEFAULT_PYTHON)
         p.add_argument("--max-iterations", type=int, default=15)
         p.add_argument("--resume", dest="resume", action="store_true", default=True)

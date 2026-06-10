@@ -129,17 +129,22 @@ def compact_messages_for_sft(
                 payload = json.loads(content)
             except json.JSONDecodeError:
                 payload = None
-            if isinstance(payload, dict):
-                compact_payload = _compact_value(
-                    payload,
-                    max_list_items=max_list_items,
-                    max_string_chars=max_string_chars,
-                )
-                compact_content = json.dumps(compact_payload, ensure_ascii=False, separators=(",", ":"))
-                if compact_content != content:
-                    stats["assistant_messages_compacted"] += 1
-                    content = compact_content
+            if isinstance(payload, dict) and "actions" in payload:
+                # CRITICAL for tool-use SFT: the assistant action `arguments` are
+                # the learning target — never compact them (compacting a long
+                # file-list arg into a {__sft_compacted_list__} placeholder would
+                # teach the model to emit a broken, non-executable tool call).
+                # Only shorten the free-text `thought`.
+                thought = payload.get("thought")
+                if isinstance(thought, str):
+                    new_thought = _shorten_text(thought, max_chars=max_string_chars)
+                    if new_thought != thought:
+                        payload = dict(payload)
+                        payload["thought"] = new_thought
+                        content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                        stats["assistant_messages_compacted"] += 1
             else:
+                # Final answer / non-action text → safe to shorten.
                 shortened = _shorten_text(content, max_chars=max_string_chars)
                 if shortened != content:
                     stats["assistant_messages_compacted"] += 1

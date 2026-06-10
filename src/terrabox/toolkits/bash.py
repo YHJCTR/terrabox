@@ -581,7 +581,7 @@ def setup(registrar):
     bash_execute_spec = ToolSpec(
         slug="bash.execute",
         name="Bash Execute",
-        description="Execute bash commands in a secure, persistent shell session with file operations restricted to temporary directories",
+        description="Execute bash commands in a secure, persistent shell session with file operations restricted to temporary directories. Returns {success, output: combined stdout/stderr text, commands}.",
         parameters={
             "type": "object",
             "properties": {

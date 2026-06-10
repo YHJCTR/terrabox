@@ -20,12 +20,13 @@ class ReflectionPromptInjector(PromptAugmenter):
         if not retrieved:
             return ""
         lines = [
-            "## Retrieved Reflection Memories",
-            "Use only the relevant lessons below. Ignore reflections that do not match the current task.",
+            "## Lessons from your past similar attempts",
+            "These are your own self-reflections from earlier tasks. Use only the relevant ones.",
         ]
         for index, entry in enumerate(retrieved, 1):
-            tools = entry.tools_called or entry.expected_tools
-            lines.append(f"{index}. [{entry.kind}; F1={entry.f1:.2f}; task={entry.task_type}] {entry.reflection}")
-            if tools:
-                lines.append(f"   Related tools: {' -> '.join(tools[:8])}")
+            # Only inject the self-written lesson (+ what you did last time).
+            # No gold expected_tools / F1 are shown — those are never available.
+            lines.append(f"{index}. {entry.reflection}")
+            if entry.tools_called:
+                lines.append(f"   (Last time you used: {' -> '.join(entry.tools_called[:8])})")
         return "\n".join(lines)

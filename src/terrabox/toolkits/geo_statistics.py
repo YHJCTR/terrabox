@@ -410,7 +410,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_statistics.batch_raster_stats",
             name="Batch Raster Statistics",
-            description="Compute per-image and aggregate statistics (mean, std, median, min, max, sum) for a list of single-band rasters.",
+            description="Compute per-image and aggregate statistics (mean, std, median, min, max, sum) for a list of single-band rasters. Returns {per_image:[{mean,std,median,min,max,sum}], aggregate:{mean,std,...}}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -437,7 +437,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_statistics.calc_cv",
             name="Coefficient of Variation",
-            description="Compute CV = std / mean for a single-band raster. Useful for assessing spatial variability.",
+            description="Compute CV = std / mean for a single-band raster. Useful for assessing spatial variability. Returns {cv, mean, std}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -455,7 +455,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_statistics.calc_skewness",
             name="Skewness",
-            description="Compute Fisher-Pearson skewness of pixel distribution in a single-band raster.",
+            description="Compute Fisher-Pearson skewness of pixel distribution in a single-band raster. Returns {skewness, count}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -473,7 +473,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_statistics.calc_kurtosis",
             name="Kurtosis",
-            description="Compute excess kurtosis (Fisher) of pixel distribution in a single-band raster.",
+            description="Compute excess kurtosis (Fisher) of pixel distribution in a single-band raster. Returns {kurtosis, count}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -491,7 +491,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_statistics.calc_percentile",
             name="Percentile Value",
-            description="Return the pixel value at a specified percentile (0–100) in a raster, ignoring nodata and NaN.",
+            description="Return the pixel value at a specified percentile (0–100) in a raster, ignoring nodata and NaN. Returns {percentile, value}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -510,7 +510,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_statistics.mean_of_means",
             name="Mean of Means",
-            description="Compute the mean of per-image mean values across a time series of rasters. Useful for temporal averaging.",
+            description="Compute the mean of per-image mean values across a time series of rasters. Useful for temporal averaging. Returns {mean_of_means, per_image_means:[...], count}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -532,7 +532,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_statistics.count_images_exceeding",
             name="Count Images Exceeding Threshold Ratio",
-            description="Count how many images in a time series have a pixel-above-threshold ratio >= ratio_threshold.",
+            description="Count how many images in a time series have a pixel-above-threshold ratio >= ratio_threshold. Returns {images_exceeding, total_images, per_image_ratios:[...]}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -556,7 +556,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_statistics.threshold_ratio",
             name="Threshold Ratio",
-            description="Compute the fraction of valid pixels above (or below) a threshold in a single-band raster.",
+            description="Compute the fraction of valid pixels above (or below) a threshold in a single-band raster. Returns {ratio (0-1), count, total}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -581,7 +581,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_statistics.count_pixels_condition",
             name="Count Pixels in Range",
-            description="Count pixels satisfying lower <= value <= upper. Either bound may be omitted.",
+            description="Count pixels satisfying lower <= value <= upper. Either bound may be omitted. Returns {count, total, ratio}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -601,7 +601,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_statistics.intersection_percentage",
             name="Threshold Intersection Percentage",
-            description="Fraction of pixels where raster_a > threshold_a AND raster_b > threshold_b simultaneously. Both rasters must be co-registered.",
+            description="Fraction of pixels where raster_a > threshold_a AND raster_b > threshold_b simultaneously. Both rasters must be co-registered. Returns {intersection_ratio, count, total}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -622,7 +622,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_statistics.multi_band_threshold",
             name="Multi-Band Threshold Analysis",
-            description="Count pixels where all specified rasters simultaneously exceed their respective thresholds.",
+            description="Count pixels where all specified rasters simultaneously exceed their respective thresholds. band_thresholds is a list of {path, threshold} (>=2). Returns {count, total, ratio}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -651,7 +651,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_statistics.percentage_change",
             name="Percentage Change",
-            description="Compute percentage change from scalar a to b: (b - a) / |a| * 100.",
+            description="Compute percentage change from scalar a to b: (b - a) / |a| * 100. Returns {percentage_change} (percent).",
             parameters={
                 "type": "object",
                 "properties": {
@@ -670,7 +670,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_statistics.scalar_arithmetic",
             name="Scalar Arithmetic",
-            description="Perform basic arithmetic (add, subtract, multiply, divide) on two scalar values.",
+            description="Perform basic arithmetic (add, subtract, multiply, divide) on two scalar values. Returns {result, operation, a, b}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -695,7 +695,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_statistics.kelvin_to_celsius",
             name="Kelvin to Celsius",
-            description="Convert a temperature value from Kelvin to Celsius (°C = K - 273.15).",
+            description="Convert a temperature value from Kelvin to Celsius (°C = K - 273.15). Returns {celsius, kelvin}.",
             parameters={
                 "type": "object",
                 "properties": {
