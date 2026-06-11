@@ -109,6 +109,9 @@ def run_sequential_react_loop(
     # In SFT mode serve the raw model (no bind_tools) and parse JSON-in-content.
     bound_llm = llm if sft_mode else bind_tools(llm, tools)
     tool_names = {tool.name for tool in tools}
+    original_question = next(
+        (m.content for m in messages if isinstance(m, HumanMessage)), ""
+    )
 
     for _step in range(max_steps):
         ai_msg = bound_llm.invoke(messages)
@@ -118,6 +121,23 @@ def run_sequential_react_loop(
         tool_calls = list(getattr(ai_msg, "tool_calls", []) or [])
         if sft_mode and not tool_calls:
             tool_calls = parse_sft_actions(ai_msg.content or "")
+            if not tool_calls:
+                # The SFT data trains a "Plan" turn FIRST (empty actions, no
+                # final_answer) and answers it with the question re-asked, only
+                # THEN does the model act. Replicate that: on a plan turn, re-ask
+                # and continue; only a real final_answer (or unparseable output)
+                # ends the loop.
+                obj = _extract_first_json_object(ai_msg.content or "") or {}
+                is_plan = (
+                    bool(obj)
+                    and not obj.get("actions")
+                    and "final_answer" not in obj
+                    and not obj.get("answer")
+                )
+                if is_plan and _step < max_steps - 1:
+                    messages.append(AIMessage(content=ai_msg.content))
+                    messages.append(HumanMessage(content=original_question))
+                    continue
         if not tool_calls:
             messages.append(ai_msg)
             return messages, ai_msg.content or ""
