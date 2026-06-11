@@ -63,6 +63,34 @@ PYTHONPATH=src no_proxy=localhost,127.0.0.1 $PY -m terrabox.evolution.sft.runner
 # 原生基线:同 task-file,--model-path 换成 /data1/yuhongjie2/Earth-Agent/llm/qwen/3_8B/
 ```
 
+### ④ SFT 模型怎么真正跑进 ReAct(必读:JSON-actions 适配器)
+
+> 2026-06-11:实跑发现 **SFT 模型不能直接走原生 ReAct**。原因:本仓库的 fixdata SFT 数据是 **OpenEarthAgent 风格的"文本 ReAct"**——工具调用是写在 **assistant content 里的 JSON**(`{"thought":..., "actions":[{"tool","function_name","arguments"}]}`),**不是原生 `tool_calls`**;且 OE 部分还有"**先出空 actions 的 Plan turn → user 把问题重问一遍 → 才行动**"的结构(EB 部分则直接行动)。原生 ReAct 用 vLLM `--tool-call-parser hermes` 解析 `<tool_call>` 标签,**解析不到 content 里的 JSON → tools=[]、1 步即停**。
+
+**解决:开适配器**(`TERRABOX_SFT_JSON_ACTIONS=1`,默认关,不影响原生模型)。它让 `eval_modes` 的 sequential ReAct 循环:① 不 `bind_tools`、从 content 解析 `{thought,actions}`;② 历史按训练格式(assistant 存纯 JSON、observation 存 `HumanMessage("OBSERVATION:\n...")`);③ Plan turn(空 actions 且无 `final_answer`)不当结束,补一句重新问让它继续;并配 `TERRABOX_SFT_SYSTEM_PROMPT_FILE` 用训练时的 system prompt。**这仍然是 ReAct(同一套 rollout 代码/数据),只是让循环听懂 SFT 模型的方言。**
+
+```bash
+PY=/home/yuhongjie/miniconda3/envs/unsloth/bin/python
+MERGED=$(pwd)/src/terrabox/evolution/sft/model/v2_sft/merged
+# system prompt 直接取训练数据第 0 条(catalog 恒定);若无则:
+#   $PY -c "import json;open('SP.txt','w').write(json.loads(open('.../sft_data/train.jsonl').readline())['messages'][0]['content'])"
+SP=$(pwd)/src/terrabox/evolution/sft/exp/v2_sft/sft_system_prompt.txt
+OUT=src/terrabox/evolution/sft/exp/v2_sft/react_eval_earthbench   # 指标落 SFT 目录,不进原生 ReAct
+
+AGENT_LLM_MODEL_PATH=$MERGED TERRABOX_SFT_JSON_ACTIONS=1 TERRABOX_SFT_SYSTEM_PROMPT_FILE=$SP \
+PYTHONPATH=src no_proxy=localhost,127.0.0.1 NO_PROXY=localhost,127.0.0.1 \
+$PY -m terrabox.evolution.ReAct.runner rollout \
+  --task-file data/fixdata_decollapse_v2/eval_earthbench.json \
+  --experiment v2_sft_react_eval_earthbench --output-dir $OUT \
+  --mode standard --port 9100 --agent-gpu 0 --tool-gpu 1 --vlm-gpus 2 \
+  --exclude-tools ipython.execute
+# OE(1647 条,重度依赖 instructsam/VLM):--task-file 换 eval_openearth.json,--output-dir 换 react_eval_openearth
+# 断点续跑:--resume 默认开;跳闸后重跑同命令自动跳过已完成
+# 公平对比基线(可选):AGENT_LLM_MODEL_PATH 换成 base 8B、其余不变(base 也走适配器=同协议同数据,OEA 论文比法)
+```
+
+校验适配器生效:首条结果应 **tool_calls 非空、llm_calls>1、F1 有值**;system prompt 是 `You are a Terrabox geospatial tool-use agent...`。代码见 `agent/eval_modes/common.py`(`parse_sft_actions` / plan-turn)、`agent/eval_modes/standard.py`(`_resolve_system_prompt`)、`scripts/run_trajectory_experiment.py`(`extract_tool_calls` 也解析 SFT content)。
+
 ### 指令限制 / 注意
 - 必须 `unsloth` conda 环境;**`--cuda-visible-devices 0` 单卡**(unsloth 本就单卡,且无跳闸风险)。
 - **`--drop-overlength` 与 verbatim 配套**:不压缩 → 64 工具 catalog(8880)+ 长轨迹会有 ~1.2% 超 16384 → 必须 drop,否则预检报错(默认禁止静默截断)。
