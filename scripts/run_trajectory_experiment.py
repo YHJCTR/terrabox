@@ -260,13 +260,27 @@ def build_llm(config):
 # ──────────────────────────────────────────────────────────────────────────────
 
 def extract_tool_calls(messages: list) -> list[str]:
-    """Extract tool slugs from agent messages."""
+    """Extract tool slugs from agent messages.
+
+    Native tool_calls come straight off the AIMessage. For SFT 'text ReAct'
+    models (TERRABOX_SFT_JSON_ACTIONS=1) the tool calls live as JSON in the
+    assistant content, so also parse those — otherwise metrics see zero tools
+    even though the rollout actually executed them."""
     calls = []
+    sft_parse = None
+    if os.environ.get("TERRABOX_SFT_JSON_ACTIONS", "").strip().lower() in ("1", "true", "yes"):
+        try:
+            from terrabox.agent.eval_modes.common import parse_sft_actions as sft_parse
+        except Exception:
+            sft_parse = None
     for msg in messages:
         if hasattr(msg, "tool_calls") and msg.tool_calls:
             for tc in msg.tool_calls:
                 name = tc.get("name", "")
                 calls.append(canonical_slug(name.replace("__", ".")))
+        elif sft_parse is not None and getattr(msg, "type", "") == "ai":
+            for tc in sft_parse(str(getattr(msg, "content", "") or "")):
+                calls.append(canonical_slug(tc["name"].replace("__", ".")))
     return calls
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -10,7 +11,20 @@ from langgraph.prebuilt import create_react_agent
 from ..session import _REACT_SYSTEM_PROMPT
 from ..tools import build_langchain_tools
 from .base import EvalModeContext, EvalModeResult
-from .common import run_sequential_react_loop
+from .common import run_sequential_react_loop, sft_json_actions_enabled
+
+
+def _resolve_system_prompt() -> str:
+    """SFT 'text ReAct' models need the training system prompt (tool catalog +
+    JSON-actions schema); native models use the standard ReAct prompt."""
+    if sft_json_actions_enabled():
+        path = os.environ.get("TERRABOX_SFT_SYSTEM_PROMPT_FILE", "").strip()
+        if path and os.path.isfile(path):
+            try:
+                return open(path, encoding="utf-8").read()
+            except Exception:
+                pass
+    return _REACT_SYSTEM_PROMPT
 
 
 class StandardEvalRunner:
@@ -28,7 +42,7 @@ class StandardEvalRunner:
             print(f"  Tool names: {[t.name for t in tools[:5]]}... (+{len(tools)-5} more)")
 
         messages = [
-            SystemMessage(content=_REACT_SYSTEM_PROMPT),
+            SystemMessage(content=_resolve_system_prompt()),
             HumanMessage(content=context.question),
         ]
         t0 = time.time()
