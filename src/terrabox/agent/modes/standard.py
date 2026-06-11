@@ -5,6 +5,7 @@ import asyncio
 import concurrent.futures
 import json
 import logging
+import os
 from typing import Annotated, AsyncIterator
 
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
@@ -108,11 +109,106 @@ def _record_decision_step(intent, rewritten: str, has_tools: bool, has_kbs: bool
     )
 
 
+# --- SFT JSON-actions adapter ------------------------------------------------
+# Models SFT'd on the OpenEarthAgent-style "text ReAct" format emit tool calls as
+# a JSON object in the message *content* — {"thought": ..., "actions": [{"tool",
+# "function_name", "arguments"}], "final_answer": ...} — instead of native
+# OpenAI/Hermes tool_calls. The standard graph relies on response.tool_calls, so
+# such a model produces tool_calls=[] and stops after one turn. Enabling
+# TERRABOX_SFT_JSON_ACTIONS=1 makes the agent node (a) serve the model WITHOUT
+# bind_tools (the SFT system prompt already carries the catalog) and (b) parse
+# the content JSON into tool_calls so the existing tools/observation nodes run
+# unchanged. Point TERRABOX_SFT_SYSTEM_PROMPT_FILE at the exact training system
+# prompt so the model sees the catalog it was trained on. Default off → native
+# behaviour is untouched.
+
+def _sft_json_actions_enabled() -> bool:
+    return os.environ.get("TERRABOX_SFT_JSON_ACTIONS", "").strip().lower() in ("1", "true", "yes")
+
+
+def _load_sft_system_prompt() -> str | None:
+    path = os.environ.get("TERRABOX_SFT_SYSTEM_PROMPT_FILE", "").strip()
+    if path and os.path.isfile(path):
+        try:
+            return open(path, encoding="utf-8").read()
+        except Exception:
+            return None
+    return None
+
+
+def _extract_first_json_object(text: str) -> dict | None:
+    """Return the first balanced {...} object in text parsed as JSON, or None."""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start : i + 1])
+                except Exception:
+                    return None
+    return None
+
+
+def _parse_sft_actions_to_tool_calls(content: str) -> list[dict]:
+    """Parse SFT {thought, actions:[{tool, function_name, arguments}]} into
+    LangChain tool_calls. Empty actions (final answer) → []."""
+    obj = _extract_first_json_object(content or "")
+    if not isinstance(obj, dict):
+        return []
+    actions = obj.get("actions")
+    if actions is None and (obj.get("name") or obj.get("tool")) and "arguments" in obj:
+        # Robustness: model emitted a bare {name/tool, arguments} call without the
+        # {thought, actions:[...]} wrapper. Treat the object itself as one action.
+        actions = [obj]
+    actions = actions or []
+    calls: list[dict] = []
+    for idx, act in enumerate(actions):
+        if not isinstance(act, dict):
+            continue
+        # Tool node looks up by LangChain name (toolkit__tool). Prefer the
+        # explicit function_name; fall back to a bare "name" or the dotted slug.
+        name = str(act.get("function_name") or act.get("name") or "").strip()
+        if not name:
+            name = str(act.get("tool") or "").replace(".", "__").strip()
+        else:
+            name = name.replace(".", "__")
+        if not name:
+            continue
+        args = act.get("arguments")
+        if not isinstance(args, dict):
+            args = {}
+        calls.append({"name": name, "args": args, "id": f"sftcall_{idx}", "type": "tool_call"})
+    return calls
+
+
 def _build_standard_prompt_blocks(rag_context: str = "") -> list[PromptBlock]:
+    system_content = _REACT_SYSTEM_PROMPT
+    if _sft_json_actions_enabled():
+        sft_prompt = _load_sft_system_prompt()
+        if sft_prompt:
+            system_content = sft_prompt
     blocks = [
         PromptBlock(
             name="react_system",
-            content=_REACT_SYSTEM_PROMPT,
+            content=system_content,
             source="standard",
             cache_policy="static",
             version="v1",
@@ -200,10 +296,18 @@ def _route_after_approval_gate(state: dict):
 
 
 def _make_standard_agent_node(llm, tools: list):
-    model = llm.bind_tools(tools) if tools else llm
+    sft_mode = _sft_json_actions_enabled()
+    # In SFT mode do NOT bind_tools: the SFT system prompt already carries the
+    # catalog, and binding would inject a second (Hermes) tool schema that
+    # confuses a model trained to emit JSON-in-content tool calls.
+    model = llm if sft_mode else (llm.bind_tools(tools) if tools else llm)
 
     def agent_node(state: StandardAgentState):
         response = model.invoke(state.get("messages", []))
+        if sft_mode and not (getattr(response, "tool_calls", None) or []):
+            parsed = _parse_sft_actions_to_tool_calls(getattr(response, "content", "") or "")
+            if parsed:
+                response.tool_calls = parsed
         return {"messages": [response], "approval_blocked": False}
 
     return agent_node

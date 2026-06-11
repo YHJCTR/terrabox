@@ -156,7 +156,21 @@ def main() -> None:
     parser.add_argument("--save-total-limit", type=int, default=2,
                         help="Max number of checkpoints to keep.")
     parser.add_argument("--eval-steps", type=int, default=50,
-                        help="Run validation every N steps.")
+                        help="Run validation every N steps (only if --eval-strategy steps).")
+    parser.add_argument("--eval-strategy", choices=["steps", "epoch", "no"], default="steps",
+                        help="Mid-training validation strategy. Use 'no' to disable in-loop "
+                             "eval entirely: the eval pass is an uninterrupted forward-only "
+                             "burst (194 val rows, ~12min) that ran the GPU flat-out and "
+                             "coincided with a breaker trip even though 5.5h of stop-and-go "
+                             "training at the same 220W cap was fine. With 'no', evaluate "
+                             "offline from a saved checkpoint instead.")
+    parser.add_argument("--rest-every-steps", type=int, default=0,
+                        help="Every N optimizer steps, idle the GPU for --rest-sec (deep "
+                             "cooldown) to let a marginal shared breaker's bimetal fully cool. "
+                             "0 = off. Pairs well with --save-steps so a checkpoint lands just "
+                             "before each rest.")
+    parser.add_argument("--rest-sec", type=float, default=600.0,
+                        help="Seconds to idle the GPU at each --rest-every-steps boundary.")
     parser.add_argument("--logging-steps", type=int, default=5)
     parser.add_argument("--save-merged-model", action="store_true")
     # veRL standard: compute loss only on assistant turns (mask system/user/
@@ -256,7 +270,12 @@ def main() -> None:
         return {"text": _messages_to_text(tokenizer, row.get("messages", []) or [])}
 
     train_dataset = Dataset.from_list([convert(row) for row in train_rows])
-    eval_dataset = Dataset.from_list([convert(row) for row in eval_rows])
+    # Skip building/passing the eval set entirely when in-loop eval is disabled,
+    # so no forward-only eval burst ever runs (see --eval-strategy).
+    eval_dataset = (
+        Dataset.from_list([convert(row) for row in eval_rows])
+        if args.eval_strategy != "no" else None
+    )
     train_args = SFTConfig(
         output_dir=args.output_dir,
         dataset_text_field="text",
@@ -269,7 +288,14 @@ def main() -> None:
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         eval_steps=args.eval_steps,
-        eval_strategy="steps",
+        eval_strategy=args.eval_strategy,
+        # Eval OOM guard: at max_seq_length=13312 a default eval batch keeps the
+        # full LM-head logits (151936 vocab x seq x bf16), which previously OOM'd
+        # at step-50 eval ("Tried to allocate 11.25 GiB"). batch=1 + loss-only
+        # (drop logits/labels) keeps eval within the same budget as training.
+        per_device_eval_batch_size=1,
+        prediction_loss_only=True,
+        eval_accumulation_steps=1,
         save_total_limit=args.save_total_limit,
         bf16=True,
         report_to=[],
@@ -315,7 +341,7 @@ def main() -> None:
     # to idle between steps. This lowers the duty cycle / average current (like
     # the bursty ReAct rollout that never tripped) and lets a marginal shared
     # breaker cool, avoiding the I²t trip that a continuous 100%% SFT load causes.
-    if args.cooldown_sec > 0 or args.temp_target > 0:
+    if args.cooldown_sec > 0 or args.temp_target > 0 or args.rest_every_steps > 0:
         import os as _os
         import subprocess as _sp
 
@@ -345,12 +371,22 @@ def main() -> None:
             # letting a marginal shared breaker's bimetal cool and avoiding the I²t
             # trip that a continuous 100% SFT load causes.
             def on_step_end(self, targs, state, control, **kw):
-                # Per-step telemetry (captured at step end, before the sleep, so
+                # Per-step telemetry (captured at step end, before any sleep, so
                 # GPU power is still near its active level) — gives a load trace
                 # right up to the moment of a breaker trip, to settle whether CPU
                 # or GPU power is the driver. CPU side = 1-min loadavg (cheap, no
                 # extra process); on this 56-core box loadavg>>16 would mean a CPU
                 # spike, loadavg~1-3 means the trip is GPU/electrical, not CPU.
+                # cuda.synchronize() first: PyTorch CUDA is async, so without it
+                # this callback can run while the step's kernels are still queued,
+                # making the power/temp reading (and duty-cycle estimate) wrong.
+                # Draining the queue gives an accurate end-of-step reading.
+                try:
+                    import torch as _t
+                    if _t.cuda.is_available():
+                        _t.cuda.synchronize()
+                except Exception:
+                    pass
                 pw, t = _gpu_pw_temp()
                 try:
                     la1 = _os.getloadavg()[0]
@@ -372,6 +408,16 @@ def main() -> None:
                         time.sleep(args.temp_poll_sec)
                         waited += args.temp_poll_sec
                         _, t = _gpu_pw_temp()
+                # Periodic deep rest: every N steps, idle the GPU for a long stretch
+                # so a marginal shared breaker's bimetal fully cools. A checkpoint
+                # lands just before this when rest_every_steps == save_steps multiple.
+                if args.rest_every_steps > 0 and state.global_step % args.rest_every_steps == 0:
+                    pw0, t0 = _gpu_pw_temp()
+                    print(f"[SFT] deep rest {args.rest_sec:.0f}s at step={state.global_step} "
+                          f"(gpu{_gpu_idx} {pw0}W {t0}C before rest)", flush=True)
+                    time.sleep(args.rest_sec)
+                    pw1, t1 = _gpu_pw_temp()
+                    print(f"[SFT] resumed after rest (gpu{_gpu_idx} {pw1}W {t1}C)", flush=True)
 
         trainer.add_callback(_ThrottleCallback())
         msg = []
