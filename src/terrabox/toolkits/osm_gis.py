@@ -647,12 +647,45 @@ def _compute_dist_legacy(arguments: Dict[str, Any], context: Any, account: Any) 
 
 
 def get_bbox_from_raster_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
-    """
-    Extract bounding box, CRS, resolution and basic metadata from a GeoTIFF file.
+    """Extract a bounding box (+CRS/resolution) from a GeoTIFF, OR the bounding
+    box of a GeoPackage vector layer with an optional buffer.
+
+    Two modes:
+      - raster: ``input_path`` (or ``geotiff``) → the raster's bbox/metadata.
+      - vector: ``gpkg`` + ``layer`` (+ optional ``buffer_m``) → the layer's
+        total bounds expanded by buffer_m metres (OpenEarthAgent GetBboxFromGeotiff).
     """
     rasterio = _lazy_rasterio()
-    input_path = arguments["input_path"]
+    input_path = arguments.get("input_path") or arguments.get("geotiff")
+    gpkg = arguments.get("gpkg")
+    layer = arguments.get("layer")
+    buffer_m = arguments.get("buffer_m")
 
+    # Vector-layer mode: bbox of a gpkg layer (+ buffer). `layer` here is a layer
+    # name, not a raster path; only use it when there is no real raster input.
+    if gpkg and layer and not (input_path and os.path.exists(str(input_path))):
+        gpd = _lazy_gpd()
+        if not os.path.exists(gpkg):
+            raise FileNotFoundError(f"GeoPackage not found: {gpkg}")
+        gdf = gpd.read_file(gpkg, layer=layer)
+        if gdf.empty:
+            return {"status": "error", "message": f"layer '{layer}' is empty in {gpkg}"}
+        if buffer_m:
+            # buffer in metres: project to an equal-distance CRS, buffer, reproject
+            src_crs = gdf.crs
+            metric = gdf.to_crs(3857) if (src_crs and src_crs.to_epsg() != 3857) else gdf
+            metric = metric.buffer(float(buffer_m))
+            gdf = metric.to_crs(src_crs) if src_crs else metric
+        minx, miny, maxx, maxy = gdf.total_bounds
+        return {
+            "status": "success",
+            "gpkg": gpkg, "layer": layer, "buffer_m": buffer_m,
+            "crs": gdf.crs.to_string() if getattr(gdf, "crs", None) is not None else None,
+            "bbox": {"west": float(minx), "south": float(miny), "east": float(maxx), "north": float(maxy)},
+        }
+
+    if not input_path:
+        return {"status": "error", "message": "provide a raster 'input_path'/'geotiff', or 'gpkg'+'layer'."}
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Raster file not found: {input_path}")
 
@@ -1165,6 +1198,8 @@ def setup(registrar):
                         "type": "string",
                         "description": "Layer name for saving POIs in the GeoPackage (e.g. 'fire_stations')."
                     },
+                    "area": {"type": "string", "description": "Optional area name (the boundary is normally taken from the gpkg)."},
+                    "count": {"type": "integer", "description": "Optional cap on the number of POIs to keep."},
                 },
                 "required": ["gpkg", "query", "layer_name"]
             },
@@ -1215,16 +1250,21 @@ def setup(registrar):
         ToolSpec(
             slug="osm_gis.get_bbox_from_raster",
             name="Get Bounding Box from Raster",
-            description="Extract bounding box, CRS, spatial resolution, and basic metadata from a GeoTIFF file.",
+            description=(
+                "Get a bounding box either from a GeoTIFF (its raster bbox + CRS/resolution "
+                "via 'input_path'/'geotiff'), or from a GeoPackage vector layer expanded by a "
+                "buffer (via 'gpkg' + 'layer' + optional 'buffer_m' metres)."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "input_path": {
-                        "type": "string",
-                        "description": "Path to the GeoTIFF raster file."
-                    }
+                    "input_path": {"type": "string", "description": "Path to a GeoTIFF raster file (raster mode)."},
+                    "geotiff": {"type": "string", "description": "Path to a GeoTIFF (alias of input_path)."},
+                    "gpkg": {"type": "string", "description": "Path to a GeoPackage (vector-layer mode)."},
+                    "layer": {"type": "string", "description": "Vector layer name inside the GeoPackage to bound."},
+                    "buffer_m": {"type": "number", "description": "Optional buffer in metres applied around the layer."}
                 },
-                "required": ["input_path"]
+                "required": []
             },
             requires_connection=False
         ),
@@ -1337,12 +1377,12 @@ def setup(registrar):
             slug="osm_gis.add_index_layer",
             name="Add Index Layer",
             description=(
-                "Compute a spectral index (NDVI/NDBI/NBR) and save it as a layer in a "
-                "GeoPackage, then it can be previewed (show_index_layer) or differenced "
-                "(compute_index_change). Local substitute for the Earth-Engine version: "
-                "provide the two Sentinel-2 bands for the index "
-                "(NDVI=NIR/Red, NDBI=SWIR1/NIR, NBR=NIR/SWIR2) as band_a_path/band_b_path. "
-                "Use the stac_basic tools to fetch the bands from public Sentinel-2 archives."
+                "Compute a spectral index (NDVI/NDBI/NBR) over the area in a GeoPackage for "
+                "a given year (and optional month) and save it as a layer, which can then be "
+                "previewed (show_index_layer) or differenced (compute_index_change). "
+                "Imagery for {year, month} is fetched from public Sentinel-2 archives "
+                "(stac_basic); alternatively, pass two local Sentinel-2 bands directly via "
+                "band_a_path/band_b_path (NDVI=NIR/Red, NDBI=SWIR1/NIR, NBR=NIR/SWIR2)."
             ),
             parameters={
                 "type": "object",
@@ -1350,10 +1390,12 @@ def setup(registrar):
                     "gpkg": {"type": "string", "description": "Path to the GeoPackage (from get_area_boundary)."},
                     "index_type": {"type": "string", "enum": ["NDVI", "NDBI", "NBR"], "description": "Spectral index to compute."},
                     "layer_name": {"type": "string", "description": "Output raster layer name to save into the GeoPackage."},
-                    "band_a_path": {"type": "string", "description": "First band raster (NDVI:NIR, NDBI:SWIR1, NBR:NIR)."},
-                    "band_b_path": {"type": "string", "description": "Second band raster (NDVI:Red, NDBI:NIR, NBR:SWIR2)."},
+                    "year": {"type": "integer", "description": "Year to composite imagery for (e.g. 2022)."},
+                    "month": {"type": "integer", "minimum": 1, "maximum": 12, "description": "Optional month (1-12); whole year if omitted."},
+                    "band_a_path": {"type": "string", "description": "Optional first band raster (NDVI:NIR, NDBI:SWIR1, NBR:NIR)."},
+                    "band_b_path": {"type": "string", "description": "Optional second band raster (NDVI:Red, NDBI:NIR, NBR:SWIR2)."},
                 },
-                "required": ["gpkg", "index_type", "layer_name", "band_a_path", "band_b_path"]
+                "required": ["gpkg", "index_type", "layer_name"]
             },
             requires_connection=False
         ),

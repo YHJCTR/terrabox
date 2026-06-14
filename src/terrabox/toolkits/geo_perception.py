@@ -855,7 +855,10 @@ def _instructsam_via_service(arguments: Dict[str, Any], context: Any, account: A
 
     clean_path = _resolve_image_path(arguments)
     service_path, preprocessing = _prepare_perception_image(clean_path, context)
-    text_prompt = arguments.get("text_prompt", "objects in the image")
+    # Accept the OpenEarthAgent TextToBbox arg names too (`text`, `top1`).
+    text_prompt = (arguments.get("text_prompt") or arguments.get("text")
+                   or arguments.get("object") or "objects in the image")
+    top1 = bool(arguments.get("top1", False))
 
     result = _call_service(
         instructsam_manager, f"{instructsam_manager.API_URL}/segment",
@@ -911,6 +914,12 @@ def _instructsam_via_service(arguments: Dict[str, Any], context: Any, account: A
     # Keep `count` consistent with the actual detection list when the service
     # under-reports it.
     if not count and detections:
+        count = len(detections)
+    if top1:
+        # TextToBbox top1: keep only the highest-scoring detection.
+        def _best(items):
+            return sorted(items, key=lambda d: float(d.get("score", 0) or 0), reverse=True)[:1] if items else items
+        objects, detections = _best(objects), _best(detections)
         count = len(detections)
     md_text = f"InstructSAM found **{count}** object(s) matching '{text_prompt}'."
     return {
@@ -1051,18 +1060,59 @@ def _instructsam_via_vlm(arguments: Dict[str, Any], context: Any, account: Any) 
 
 # --- Bbox / Annotation / Mock Handlers ---
 
+def _coerce_bbox(b: Any) -> dict | None:
+    """Accept a bbox as a dict {x1,y1,x2,y2}, a string '(x1, y1, x2, y2)', or a
+    4-element list/tuple, and normalise to a dict."""
+    if isinstance(b, dict):
+        if all(k in b for k in ("x1", "y1", "x2", "y2")):
+            return b
+        if "bbox" in b:
+            return _coerce_bbox(b["bbox"])
+        return None
+    if isinstance(b, str):
+        nums = re.findall(r"-?\d+\.?\d*", b)
+        if len(nums) >= 4:
+            x1, y1, x2, y2 = (float(n) for n in nums[:4])
+            return {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+        return None
+    if isinstance(b, (list, tuple)) and len(b) >= 4 and all(isinstance(v, (int, float)) for v in b[:4]):
+        return {"x1": float(b[0]), "y1": float(b[1]), "x2": float(b[2]), "y2": float(b[3])}
+    return None
+
+
+def _auto_output_path(prefix: str, ext: str = "png") -> str:
+    out_dir = os.environ.get("TERRABOX_TOOL_ARTIFACT_DIR", "tmp/tool_artifacts")
+    os.makedirs(out_dir, exist_ok=True)
+    return os.path.join(out_dir, f"{prefix}_{uuid.uuid4().hex[:8]}.{ext}")
+
+
 def draw_bboxes_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
-    """Draw labeled bounding boxes on an image using Pillow."""
+    """Draw labeled bounding boxes on an image using Pillow.
+
+    Accepts either the native ``bboxes`` list ([{x1,y1,x2,y2,label?,color?}, ...])
+    or a single OpenEarthAgent-style ``bbox`` ('(x1, y1, x2, y2)' string or list)
+    with an optional ``annotation`` label. ``output_path`` is optional (auto)."""
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError:
         raise ImportError("Missing Pillow. Install: pip install Pillow")
 
     image_path = _resolve_image_path(arguments)
-    bboxes = arguments.get("bboxes", [])
+    bboxes = arguments.get("bboxes")
+    if not bboxes and arguments.get("bbox") is not None:
+        # OpenEarthAgent DrawBox form: single bbox + annotation label.
+        one = _coerce_bbox(arguments.get("bbox"))
+        if one is None:
+            return {"status": "error", "message": f"could not parse bbox: {arguments.get('bbox')!r}"}
+        label = arguments.get("annotation") or arguments.get("label") or ""
+        if label:
+            one = {**one, "label": str(label)}
+        bboxes = [one]
+    bboxes = bboxes or []
     if not isinstance(bboxes, list):
         return {"status": "error", "message": f"bboxes must be a list, got {type(bboxes).__name__}: {bboxes!r}"}
-    output_path = arguments["output_path"]
+    bboxes = [_coerce_bbox(b) or b for b in bboxes]
+    output_path = arguments.get("output_path") or _auto_output_path("drawbox")
     line_width = int(arguments.get("line_width", 2))
 
     img = Image.open(image_path).convert("RGB")
@@ -1093,11 +1143,33 @@ def add_text_handler(arguments: Dict[str, Any], context: Any, account: Any) -> D
         raise ImportError("Missing Pillow. Install: pip install Pillow")
 
     image_path = _resolve_image_path(arguments)
-    annotations = arguments.get("annotations", [])
-    output_path = arguments["output_path"]
+    annotations = arguments.get("annotations")
+    output_path = arguments.get("output_path") or _auto_output_path("addtext")
 
     img = Image.open(image_path).convert("RGB")
     draw = ImageDraw.Draw(img)
+
+    if not annotations and arguments.get("text") is not None:
+        # OpenEarthAgent AddText form: single text + position keyword/coords.
+        W, H = img.size
+        pos = arguments.get("position", "lt")
+        pad = 8
+        pos_map = {
+            "lt": (pad, pad), "rt": (W * 0.7, pad), "lb": (pad, H * 0.9),
+            "rb": (W * 0.7, H * 0.9), "center": (W * 0.4, H * 0.5),
+            "mm": (W * 0.4, H * 0.5), "mt": (W * 0.4, pad), "mb": (W * 0.4, H * 0.9),
+            "lm": (pad, H * 0.5), "rm": (W * 0.7, H * 0.5),
+            "top": (W * 0.4, pad), "bottom": (W * 0.4, H * 0.9),
+        }
+        if isinstance(pos, (list, tuple)) and len(pos) >= 2:
+            x, y = float(pos[0]), float(pos[1])
+        elif isinstance(pos, str) and re.findall(r"-?\d+\.?\d*", pos) and len(re.findall(r"-?\d+\.?\d*", pos)) >= 2:
+            n = re.findall(r"-?\d+\.?\d*", pos)
+            x, y = float(n[0]), float(n[1])
+        else:
+            x, y = pos_map.get(str(pos).lower(), (pad, pad))
+        annotations = [{"text": str(arguments["text"]), "x": x, "y": y}]
+    annotations = annotations or []
 
     for ann in annotations:
         text = str(ann["text"])
@@ -1359,6 +1431,7 @@ def count_given_object_handler(arguments: Dict[str, Any], context: Any, account:
     obj = (
         arguments.get("object")
         or arguments.get("text_prompt")
+        or arguments.get("text")
         or arguments.get("category")
         or arguments.get("class")
         or "objects"
@@ -1421,6 +1494,10 @@ def setup(registrar):
                             "Frontend uploads image files; the backend resolves local file paths."
                         ),
                     },
+                    "image": {
+                        "type": "string",
+                        "description": "A single image to analyze/describe (alias of 'images' with one entry).",
+                    },
                     "prompt": {
                         "type": "string",
                         "description": "Question or instruction.",
@@ -1450,14 +1527,16 @@ def setup(registrar):
         ToolSpec(
             slug="geo_perception.sam2_segment",
             name="SAM2 Segmentation",
-            description="Segment the primary object or full scene in a satellite image using SAM2 (Full Box Prompt). Returns {bboxes:[{x1,y1,x2,y2}] of segments, output, image_preprocessing}.",
+            description="Segment objects / the full scene in a satellite image with SAM2 and return their pixel regions. Returns {bboxes:[{x1,y1,x2,y2}] of segments, output, image_preprocessing}. An optional 'text' hint names the object of interest.",
             parameters={
                 "type": "object",
                 "properties": {
                     "image": {
                         "type": "string",
                         "description": "Image to segment. Frontend uploads the image; backend resolves the local file path."
-                    }
+                    },
+                    "text": {"type": "string", "description": "Optional object name to focus the segmentation on (e.g., 'vehicle')."},
+                    "flag": {"type": "boolean", "description": "Optional mode flag."}
                 },
                 "required": ["image"]
             },
@@ -1578,7 +1657,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_perception.instructsam",
             name="InstructSAM Counting",
-            description="Open-vocabulary, instruction-based detection and counting of objects (any class described in text). Returns {count, objects, detections:[{label, score, x1, y1, x2, y2}]} — axis-aligned boxes ready for draw_bboxes/bbox_to_centroid.",
+            description="Open-vocabulary, instruction-based detection and counting (and text-to-bbox grounding) of objects described in text. Returns {count, objects, detections:[{label, score, x1, y1, x2, y2}]} — axis-aligned boxes ready for draw_bboxes/bbox_to_centroid. Set top1=true to locate just the single best-matching object (text-to-bbox).",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1586,12 +1665,21 @@ def setup(registrar):
                         "type": "string",
                         "description": "Image to analyze. Frontend uploads the image; backend resolves the local file path."
                     },
+                    "text": {
+                        "type": "string",
+                        "description": "Object/instruction to detect (e.g., 'trainstation', 'all the red cars'). Alias of text_prompt."
+                    },
                     "text_prompt": {
                         "type": "string",
-                        "description": "Instruction prompt (e.g., 'Count all the red cars')."
+                        "description": "Object/instruction to detect (alias of 'text')."
+                    },
+                    "top1": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "If true, return only the single highest-scoring detection (text-to-bbox)."
                     }
                 },
-                "required": ["image", "text_prompt"]
+                "required": ["image"]
             },
             requires_connection=False
         ),
@@ -1603,7 +1691,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_perception.draw_bboxes",
             name="Draw Bounding Boxes",
-            description="Draw labeled bounding boxes on an image and save the result. Each bbox needs x1,y1,x2,y2 (+optional label/color). Returns {status, output_path, boxes_drawn}.",
+            description="Draw labeled bounding box(es) on an image and save the result. Provide either a list of 'bboxes' (each {x1,y1,x2,y2,label?,color?}) or a single 'bbox' ('(x1, y1, x2, y2)' string or [x1,y1,x2,y2]) with an optional 'annotation' label. output_path is optional (auto-generated). Returns {status, output_path, boxes_drawn}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1622,10 +1710,12 @@ def setup(registrar):
                         },
                         "description": "List of bounding boxes with coordinates and optional label/color."
                     },
-                    "output_path": {"type": "string", "description": "Path to save the annotated image."},
+                    "bbox": {"type": "string", "description": "A single bbox as '(x1, y1, x2, y2)' or [x1,y1,x2,y2] (alternative to 'bboxes')."},
+                    "annotation": {"type": "string", "description": "Label for the single 'bbox'."},
+                    "output_path": {"type": "string", "description": "Optional path to save the annotated image (auto-generated if omitted)."},
                     "line_width": {"type": "integer", "default": 2, "description": "Width of the bounding box lines."}
                 },
-                "required": ["image", "bboxes", "output_path"]
+                "required": ["image"]
             },
             requires_connection=False
         ),
@@ -1637,11 +1727,13 @@ def setup(registrar):
         ToolSpec(
             slug="geo_perception.add_text",
             name="Add Text to Image",
-            description="Add text annotations to an image at specified positions. Each annotation needs text,x,y. Returns {status, output_path, annotations_added}.",
+            description="Overlay text on an image and save it. Provide either a single 'text' with a 'position' (keyword 'lt'/'rt'/'lb'/'rb'/'center' or [x,y]), or a list of 'annotations' (each {text,x,y,color?,font_size?}). output_path is optional (auto-generated). Returns {status, output_path, annotations_added}.",
             parameters={
                 "type": "object",
                 "properties": {
                     "image": {"type": "string", "description": "Path to the input image."},
+                    "text": {"type": "string", "description": "Text to overlay (single-annotation form)."},
+                    "position": {"type": "string", "description": "Placement for 'text': keyword 'lt'/'rt'/'lb'/'rb'/'center'/'top'/'bottom', or '[x, y]' pixel coords."},
                     "annotations": {
                         "type": "array",
                         "items": {
@@ -1655,11 +1747,11 @@ def setup(registrar):
                             },
                             "required": ["text", "x", "y"]
                         },
-                        "description": "List of text annotations with position and style."
+                        "description": "List of text annotations with position and style (multi-annotation form)."
                     },
-                    "output_path": {"type": "string", "description": "Path to save the annotated image."}
+                    "output_path": {"type": "string", "description": "Optional path to save the annotated image (auto-generated if omitted)."}
                 },
-                "required": ["image", "annotations", "output_path"]
+                "required": ["image"]
             },
             requires_connection=False
         ),
@@ -1863,6 +1955,7 @@ def setup(registrar):
                 "properties": {
                     "pre_image": {"type": "string", "description": "Path to the pre-event (before-disaster) image."},
                     "post_image": {"type": "string", "description": "Path to the post-event (after-disaster) image of the same area."},
+                    "text": {"type": "string", "description": "Optional free-text hint describing what to assess (e.g. 'buildings damaged by the hurricane')."},
                     "output_path": {"type": "string", "description": "Optional directory to save colorized localization/damage masks."}
                 },
                 "required": ["pre_image", "post_image"]
@@ -1886,8 +1979,9 @@ def setup(registrar):
                 "properties": {
                     "image": {"type": "string", "description": "Path to the image."},
                     "object": {"type": "string", "description": "The object class to count."},
+                    "text": {"type": "string", "description": "The object class to count (alias of 'object')."},
                 },
-                "required": ["image", "object"],
+                "required": ["image"],
             },
         ),
         count_given_object_handler
@@ -1908,6 +2002,7 @@ def setup(registrar):
                 "properties": {
                     "image": {"type": "string", "description": "Path to the image."},
                     "region": {"type": "string", "description": "Optional bbox/region [x1,y1,x2,y2] to focus on."},
+                    "bbox": {"type": "string", "description": "Optional bbox region to focus on (alias of 'region')."},
                     "attribute": {"type": "string", "description": "Which attribute(s) to describe (optional)."},
                 },
                 "required": ["image"],
