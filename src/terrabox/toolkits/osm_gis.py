@@ -1052,19 +1052,74 @@ def display_on_geotiff_handler(arguments: Dict[str, Any], context: Any, account:
             "message": f"Saved overlay GeoTIFF: {out_path}"}
 
 
-def add_index_layer_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
-    """Compute a spectral index (NDVI/NDBI/NBR) and save it as a uint8 layer in a GeoPackage.
+# Sentinel-2 band assets per index (earth-search STAC asset keys).
+_INDEX_BANDS = {"NDVI": ("nir", "red"), "NDBI": ("swir16", "nir"), "NBR": ("nir", "swir22")}
+_EARTH_SEARCH = "https://earth-search.aws.element84.com/v1"
 
-    Local raster substitute for OpenEarthAgent's GEE-backed AddIndexLayer: instead
-    of fetching Sentinel-2 by year/month from Earth Engine, it computes the index
-    from two band rasters (band_a_path/band_b_path for the chosen index) and stores
-    it with the same uint8 1..254 encoding the other gpkg index tools
-    (show_index_layer / compute_index_change) expect. The free public-STAC data
-    layer remains available separately via the stac_basic toolkit.
-    Band order per index: NDVI = NIR/Red, NDBI = SWIR1/NIR, NBR = NIR/SWIR2.
-    """
+
+def _aoi_bounds_lonlat(gpkg: str):
+    """Return the gpkg AOI bounds (minx,miny,maxx,maxy) in EPSG:4326."""
+    gpd = _lazy_gpd()
+    from pyogrio import list_layers
+    layers = [str(l[0]) for l in list_layers(gpkg)]
+    layer = "area_boundary" if "area_boundary" in layers else (layers[0] if layers else None)
+    if layer is None:
+        raise ValueError("GeoPackage has no layers to derive an AOI from")
+    gdf = gpd.read_file(gpkg, layer=layer)
+    if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
+        gdf = gdf.to_crs(4326)
+    return [float(v) for v in gdf.total_bounds]
+
+
+def _stac_fetch_index(index_type: str, year: int, month, gpkg: str):
+    """Fetch Sentinel-2 L2A from the free earth-search STAC for the gpkg AOI and the
+    given year/month, compute the spectral index, and return (idx, geotransform, crs_wkt).
+    Picks the least-cloudy scene and reads only the AOI window (light, no compositing)."""
+    import calendar
     import numpy as np
-    rasterio = _lazy_rasterio()
+    import rasterio
+    from rasterio.warp import transform_bounds
+    from rasterio.windows import from_bounds
+    from pystac_client import Client
+
+    minx, miny, maxx, maxy = _aoi_bounds_lonlat(gpkg)
+    if month:
+        start = f"{year}-{int(month):02d}-01"
+        end = f"{year}-{int(month):02d}-{calendar.monthrange(int(year), int(month))[1]:02d}"
+    else:
+        start, end = f"{year}-01-01", f"{year}-12-31"
+    client = Client.open(_EARTH_SEARCH)
+    items = list(client.search(
+        collections=["sentinel-2-l2a"], bbox=[minx, miny, maxx, maxy],
+        datetime=f"{start}/{end}", query={"eo:cloud_cover": {"lt": 60}}, max_items=20,
+    ).items())
+    if not items:
+        raise RuntimeError(f"No Sentinel-2 scenes for AOI in {start}..{end}")
+    items.sort(key=lambda it: it.properties.get("eo:cloud_cover", 100))
+    item = items[0]
+    a_key, b_key = _INDEX_BANDS[index_type]
+
+    def _read(href, out_shape=None):
+        with rasterio.open(href) as ds:
+            b = transform_bounds("EPSG:4326", ds.crs, minx, miny, maxx, maxy)
+            win = from_bounds(*b, transform=ds.transform)
+            arr = ds.read(1, window=win, out_shape=out_shape).astype("float32")
+            return arr, ds.window_transform(win), ds.crs
+
+    a, wt, crs = _read(item.assets[a_key].href)
+    b, _, _ = _read(item.assets[b_key].href, out_shape=a.shape)
+    idx = np.clip((a - b) / (a + b + 1e-6), -1, 1)
+    geotransform = (wt.c, wt.a, wt.b, wt.f, wt.d, wt.e)
+    return idx, geotransform, (crs.to_wkt() if crs else None), item.properties.get("eo:cloud_cover")
+
+
+def add_index_layer_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Compute a spectral index (NDVI/NDBI/NBR) over the gpkg AOI and save it as a
+    uint8 layer in the GeoPackage (same 1..254 encoding the other gpkg index tools
+    read). Imagery comes either from {year, month} via the free public Sentinel-2
+    STAC (earth-search), or from two local bands (band_a_path/band_b_path:
+    NDVI=NIR/Red, NDBI=SWIR1/NIR, NBR=NIR/SWIR2)."""
+    import numpy as np
     gdal = _lazy_gdal()
     gpkg = arguments.get("gpkg")
     index_type = str(arguments.get("index_type", "")).upper()
@@ -1072,34 +1127,45 @@ def add_index_layer_handler(arguments: Dict[str, Any], context: Any, account: An
     band_a_path = arguments.get("band_a_path") or arguments.get("nir_path")
     band_b_path = (arguments.get("band_b_path") or arguments.get("red_path")
                    or arguments.get("swir_path"))
+    year = arguments.get("year")
+    month = arguments.get("month")
     if not all([gpkg, index_type, layer_name]):
         return {"status": "error", "message": "add_index_layer requires gpkg, index_type, layer_name."}
     if index_type not in _INDEX_CHANGE_CLASSES:
         return {"status": "error", "message": "index_type must be one of NDVI, NDBI, NBR."}
-    if not (band_a_path and band_b_path):
-        return {"status": "error", "message": (
-            "add_index_layer needs band_a_path and band_b_path (local substitute for the "
-            "GEE/STAC fetch). Provide the two Sentinel-2 bands for the index: "
-            "NDVI=NIR/Red, NDBI=SWIR1/NIR, NBR=NIR/SWIR2.")}
     if not os.path.exists(gpkg):
         return {"status": "error", "message": f"GeoPackage not found: {gpkg}"}
-    with rasterio.open(band_a_path) as sa:
-        a = sa.read(1).astype("float32")
-        gt, crs = sa.transform, sa.crs
-    with rasterio.open(band_b_path) as sb:
-        b = sb.read(1).astype("float32")
-    if a.shape != b.shape:
-        return {"status": "error", "message": "band_a and band_b rasters differ in shape."}
-    idx = np.clip((a - b) / (a + b + 1e-6), -1, 1)
-    # encode to uint8 1..254 (0 = nodata) — the gpkg index convention shared by
-    # show_index_layer / compute_index_change.
+
+    cloud = None
+    if band_a_path and band_b_path:
+        rasterio = _lazy_rasterio()
+        with rasterio.open(band_a_path) as sa:
+            a = sa.read(1).astype("float32")
+            gt, crs = sa.transform, sa.crs
+        with rasterio.open(band_b_path) as sb:
+            b = sb.read(1).astype("float32")
+        if a.shape != b.shape:
+            return {"status": "error", "message": "band_a and band_b rasters differ in shape."}
+        idx = np.clip((a - b) / (a + b + 1e-6), -1, 1)
+        geotransform = (gt.c, gt.a, gt.b, gt.f, gt.d, gt.e)
+        crs_wkt = crs.to_wkt() if crs else None
+    elif year is not None:
+        try:
+            idx, geotransform, crs_wkt, cloud = _stac_fetch_index(index_type, year, month, gpkg)
+        except Exception as exc:
+            return {"status": "error", "message": f"STAC imagery fetch failed: {exc}"}
+    else:
+        return {"status": "error", "message": (
+            "add_index_layer needs either {year[, month]} (STAC imagery fetch) or "
+            "band_a_path + band_b_path (local Sentinel-2 bands).")}
+
+    # encode to uint8 1..254 (0 = nodata) — shared gpkg index convention
     enc = np.where(np.isfinite(idx), np.round(((idx + 1) / 2.0) * 254 + 1), 0).astype("uint8")
     h, w = enc.shape
-    geotransform = (gt.c, gt.a, gt.b, gt.f, gt.d, gt.e)
     mem = gdal.GetDriverByName("MEM").Create("", w, h, 1, gdal.GDT_Byte)
     mem.SetGeoTransform(geotransform)
-    if crs is not None:
-        mem.SetProjection(crs.to_wkt())
+    if crs_wkt:
+        mem.SetProjection(crs_wkt)
     mem.GetRasterBand(1).WriteArray(enc)
     try:
         gdal.GetDriverByName("GPKG").CreateCopy(
@@ -1113,10 +1179,11 @@ def add_index_layer_handler(arguments: Dict[str, Any], context: Any, account: An
         "min": round(float(np.min(valid)), 4) if valid.size else None,
         "max": round(float(np.max(valid)), 4) if valid.size else None,
     }
-    return {
-        "status": "success", "layer_name": layer_name, "index_type": index_type, "stats": stats,
-        "message": f"{index_type} index layer '{layer_name}' saved to {os.path.basename(gpkg)} (mean={stats['mean']}).",
-    }
+    src = "Sentinel-2 STAC" if cloud is not None else "local bands"
+    msg = f"{index_type} index layer '{layer_name}' saved to {os.path.basename(gpkg)} (mean={stats['mean']}, source={src}"
+    msg += f", cloud={cloud:.1f}%)." if cloud is not None else ")."
+    return {"status": "success", "layer_name": layer_name, "index_type": index_type,
+            "stats": stats, "cloud_cover": cloud, "message": msg}
 
 
 # ------------------------------------------------------------------------------
