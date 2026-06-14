@@ -1019,6 +1019,73 @@ def display_on_geotiff_handler(arguments: Dict[str, Any], context: Any, account:
             "message": f"Saved overlay GeoTIFF: {out_path}"}
 
 
+def add_index_layer_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Compute a spectral index (NDVI/NDBI/NBR) and save it as a uint8 layer in a GeoPackage.
+
+    Local raster substitute for OpenEarthAgent's GEE-backed AddIndexLayer: instead
+    of fetching Sentinel-2 by year/month from Earth Engine, it computes the index
+    from two band rasters (band_a_path/band_b_path for the chosen index) and stores
+    it with the same uint8 1..254 encoding the other gpkg index tools
+    (show_index_layer / compute_index_change) expect. The free public-STAC data
+    layer remains available separately via the stac_basic toolkit.
+    Band order per index: NDVI = NIR/Red, NDBI = SWIR1/NIR, NBR = NIR/SWIR2.
+    """
+    import numpy as np
+    rasterio = _lazy_rasterio()
+    gdal = _lazy_gdal()
+    gpkg = arguments.get("gpkg")
+    index_type = str(arguments.get("index_type", "")).upper()
+    layer_name = arguments.get("layer_name")
+    band_a_path = arguments.get("band_a_path") or arguments.get("nir_path")
+    band_b_path = (arguments.get("band_b_path") or arguments.get("red_path")
+                   or arguments.get("swir_path"))
+    if not all([gpkg, index_type, layer_name]):
+        return {"status": "error", "message": "add_index_layer requires gpkg, index_type, layer_name."}
+    if index_type not in _INDEX_CHANGE_CLASSES:
+        return {"status": "error", "message": "index_type must be one of NDVI, NDBI, NBR."}
+    if not (band_a_path and band_b_path):
+        return {"status": "error", "message": (
+            "add_index_layer needs band_a_path and band_b_path (local substitute for the "
+            "GEE/STAC fetch). Provide the two Sentinel-2 bands for the index: "
+            "NDVI=NIR/Red, NDBI=SWIR1/NIR, NBR=NIR/SWIR2.")}
+    if not os.path.exists(gpkg):
+        return {"status": "error", "message": f"GeoPackage not found: {gpkg}"}
+    with rasterio.open(band_a_path) as sa:
+        a = sa.read(1).astype("float32")
+        gt, crs = sa.transform, sa.crs
+    with rasterio.open(band_b_path) as sb:
+        b = sb.read(1).astype("float32")
+    if a.shape != b.shape:
+        return {"status": "error", "message": "band_a and band_b rasters differ in shape."}
+    idx = np.clip((a - b) / (a + b + 1e-6), -1, 1)
+    # encode to uint8 1..254 (0 = nodata) — the gpkg index convention shared by
+    # show_index_layer / compute_index_change.
+    enc = np.where(np.isfinite(idx), np.round(((idx + 1) / 2.0) * 254 + 1), 0).astype("uint8")
+    h, w = enc.shape
+    geotransform = (gt.c, gt.a, gt.b, gt.f, gt.d, gt.e)
+    mem = gdal.GetDriverByName("MEM").Create("", w, h, 1, gdal.GDT_Byte)
+    mem.SetGeoTransform(geotransform)
+    if crs is not None:
+        mem.SetProjection(crs.to_wkt())
+    mem.GetRasterBand(1).WriteArray(enc)
+    try:
+        gdal.GetDriverByName("GPKG").CreateCopy(
+            gpkg, mem, options=["APPEND_SUBDATASET=YES", f"RASTER_TABLE={layer_name}"]
+        )
+    finally:
+        mem = None
+    valid = idx[np.isfinite(idx)]
+    stats = {
+        "mean": round(float(np.mean(valid)), 4) if valid.size else None,
+        "min": round(float(np.min(valid)), 4) if valid.size else None,
+        "max": round(float(np.max(valid)), 4) if valid.size else None,
+    }
+    return {
+        "status": "success", "layer_name": layer_name, "index_type": index_type, "stats": stats,
+        "message": f"{index_type} index layer '{layer_name}' saved to {os.path.basename(gpkg)} (mean={stats['mean']}).",
+    }
+
+
 # ------------------------------------------------------------------------------
 # Registration
 # ------------------------------------------------------------------------------
@@ -1262,4 +1329,33 @@ def setup(registrar):
             requires_connection=False
         ),
         display_on_geotiff_handler,
+    )
+
+    # 9. AddIndexLayer (local raster substitute for GEE; STAC fetch via stac_basic)
+    registrar.tool(
+        ToolSpec(
+            slug="osm_gis.add_index_layer",
+            name="Add Index Layer",
+            description=(
+                "Compute a spectral index (NDVI/NDBI/NBR) and save it as a layer in a "
+                "GeoPackage, then it can be previewed (show_index_layer) or differenced "
+                "(compute_index_change). Local substitute for the Earth-Engine version: "
+                "provide the two Sentinel-2 bands for the index "
+                "(NDVI=NIR/Red, NDBI=SWIR1/NIR, NBR=NIR/SWIR2) as band_a_path/band_b_path. "
+                "Use the stac_basic tools to fetch the bands from public Sentinel-2 archives."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "gpkg": {"type": "string", "description": "Path to the GeoPackage (from get_area_boundary)."},
+                    "index_type": {"type": "string", "enum": ["NDVI", "NDBI", "NBR"], "description": "Spectral index to compute."},
+                    "layer_name": {"type": "string", "description": "Output raster layer name to save into the GeoPackage."},
+                    "band_a_path": {"type": "string", "description": "First band raster (NDVI:NIR, NDBI:SWIR1, NBR:NIR)."},
+                    "band_b_path": {"type": "string", "description": "Second band raster (NDVI:Red, NDBI:NIR, NBR:SWIR2)."},
+                },
+                "required": ["gpkg", "index_type", "layer_name", "band_a_path", "band_b_path"]
+            },
+            requires_connection=False
+        ),
+        add_index_layer_handler,
     )
