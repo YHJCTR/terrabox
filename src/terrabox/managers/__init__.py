@@ -40,6 +40,9 @@ else:
     from .strip_rcnn_manager import strip_rcnn_manager
     from .instructsam_manager import instructsam_manager
 
+# ChangeOS is docker-only (faithful torch==1.10.0 image); no subprocess variant.
+from .docker.changeos_manager import changeos_manager
+
 # agent_llm_manager only has a subprocess variant
 from .agent_llm_manager import agent_llm_manager
 
@@ -50,5 +53,6 @@ __all__ = [
     "remotesam_manager",
     "strip_rcnn_manager",
     "instructsam_manager",
+    "changeos_manager",
     "agent_llm_manager",
 ]

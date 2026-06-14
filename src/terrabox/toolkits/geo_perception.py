@@ -27,6 +27,7 @@ from ..managers import (
     remotesam_manager,
     strip_rcnn_manager,
     instructsam_manager,
+    changeos_manager,
 )
 
 logger = logging.getLogger(__name__)
@@ -1297,19 +1298,58 @@ def sm3det_detect_mock_handler(arguments: Dict[str, Any], context: Any, account:
     }
 
 
-def change_os_detect_mock_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
-    """[Mock] ChangeOS change detection / building extraction - returns stub result."""
-    pre_path = arguments.get("pre_image") or arguments.get("image")
-    mode = arguments.get("mode", "change_detection")
-    return {
-        "status": "mock",
-        "note": "ChangeOS model not yet deployed. This is a placeholder response.",
-        "mode": mode,
-        "pre_image": pre_path,
-        "post_image": arguments.get("post_image"),
-        "change_mask": None,
-        "changed_pixels": 0,
-    }
+def change_os_detect_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """ChangeOS building-damage assessment (RSE 2021, Z-Zheng/ChangeOS).
+
+    Runs the real TorchScript model via the docker service: given pre- and
+    post-disaster images it returns a building localization mask plus a per-
+    building damage assessment (no-damage / minor / major / destroyed),
+    pixel-level statistics, and saved colorized masks.
+    """
+    pre_path = _resolve_image_path({"image": arguments.get("pre_image") or arguments.get("pre_image_path") or arguments.get("image")})
+    post_raw = arguments.get("post_image") or arguments.get("post_image_path")
+    if not post_raw:
+        return {
+            "status": "error",
+            "message": "ChangeOS requires BOTH a pre-event and a post-event image "
+                       "(it performs object-based semantic change detection). "
+                       "Provide 'post_image'.",
+        }
+    post_path = _resolve_image_path({"image": post_raw})
+
+    payload = {"pre_image_path": pre_path, "post_image_path": post_path}
+    output_path = arguments.get("output_path")
+    if output_path:
+        payload["output_path"] = output_path
+
+    result = _call_service(
+        changeos_manager, f"{changeos_manager.API_URL}/detect", payload,
+        timeout=int(os.environ.get("CHANGEOS_TOOL_TIMEOUT", "300")),
+    )
+    if isinstance(result, dict) and result.get("status") == "error":
+        return result
+    if result.get("success"):
+        dam = result.get("damage_pixel_counts") or {}
+        n_obj = result.get("num_building_objects", 0)
+        changed = result.get("changed_pixels", 0)
+        return {
+            "status": "success",
+            "checkpoint": result.get("checkpoint"),
+            "num_building_objects": n_obj,
+            "building_pixels": result.get("building_pixels", 0),
+            "changed_pixels": changed,
+            "damage_pixel_counts": dam,
+            "damage_classes": result.get("damage_classes"),
+            "outputs": result.get("outputs", {}),
+            "pre_image": pre_path,
+            "post_image": post_path,
+            "message": (
+                f"ChangeOS detected {n_obj} building object(s); "
+                f"{changed} damaged (minor/major/destroyed) pixels. "
+                f"Damage pixel breakdown: {dam}."
+            ),
+        }
+    return {"status": "error", "message": f"ChangeOS failed: {result.get('error')}"}
 
 
 def count_given_object_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
@@ -1806,29 +1846,30 @@ def setup(registrar):
         sm3det_detect_mock_handler
     )
 
-    # 17. ChangeOS (Mock)
+    # 17. ChangeOS building-damage assessment (real TorchScript model via docker)
     registrar.tool(
         ToolSpec(
             slug="geo_perception.change_os_detect",
             name="ChangeOS Change Detection",
-            description="[Mock] Detect changes between two multi-temporal satellite images or extract building footprints using ChangeOS. NOTE: Returns mock results; model not yet deployed.",
+            description=(
+                "Building-damage assessment via deep object-based semantic change "
+                "detection (ChangeOS, RSE 2021). Given a PRE-event and a POST-event "
+                "image of the same area, returns a building localization mask and a "
+                "per-building damage rating (no-damage / minor / major / destroyed) "
+                "with pixel-level statistics. Requires BOTH images."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "pre_image": {"type": "string", "description": "Path to the pre-event image (or single image for building extraction)."},
-                    "post_image": {"type": "string", "description": "Path to the post-event image (optional for building extraction mode)."},
-                    "mode": {
-                        "type": "string",
-                        "enum": ["change_detection", "building_extraction"],
-                        "default": "change_detection",
-                        "description": "'change_detection': detect changes between two images. 'building_extraction': extract building footprints from a single image."
-                    }
+                    "pre_image": {"type": "string", "description": "Path to the pre-event (before-disaster) image."},
+                    "post_image": {"type": "string", "description": "Path to the post-event (after-disaster) image of the same area."},
+                    "output_path": {"type": "string", "description": "Optional directory to save colorized localization/damage masks."}
                 },
-                "required": ["pre_image"]
+                "required": ["pre_image", "post_image"]
             },
             requires_connection=False
         ),
-        change_os_detect_mock_handler
+        change_os_detect_handler
     )
 
     # 18. CountGivenObject (wraps InstructSAM detection)
