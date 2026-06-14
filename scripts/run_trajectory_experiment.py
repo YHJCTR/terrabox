@@ -111,9 +111,19 @@ def should_skip_task(
     skip_osm: bool = True,
     skip_vlm: bool = True,
     skip_changeos: bool = True,
+    skip_online: bool = False,
+    only_online: bool = False,
 ) -> Optional[str]:
     """Return skip reason or None."""
     expected = [canonical_slug(t) for t in task.get("expected_tools", [])]
+    is_online = any(t in API_KEY_TOOLS or t.startswith(OSM_TOOLS_PREFIX) for t in expected)
+    # Two complementary switches for the two-pass workflow:
+    #   --skip-online : run only OFFLINE tasks (no network).
+    #   --only-online : run only ONLINE tasks (run during the forwarding window).
+    if skip_online and is_online:
+        return "online"
+    if only_online and not is_online:
+        return "not_online"
     if skip_mock and any(t in MOCK_TOOLS for t in expected):
         return "mock"
     if skip_bing and any(t in API_KEY_TOOLS for t in expected):
@@ -554,6 +564,8 @@ def cmd_rollout(args):
         skip_osm=args.skip_osm,
         skip_vlm=args.skip_vlm,
         skip_changeos=args.skip_changeos,
+        skip_online=args.skip_online,
+        only_online=args.only_online,
     )
     skip_stats: Counter = Counter()
     tasks = []
@@ -615,9 +627,9 @@ def cmd_rollout(args):
         excluded = set()
         if args.skip_mock:
             excluded |= MOCK_TOOLS
-        if args.skip_bing:
+        if args.skip_bing or args.skip_online:
             excluded |= API_KEY_TOOLS
-        if args.skip_osm:
+        if args.skip_osm or args.skip_online:
             excluded |= {s for s in allowed_slugs_set if s.startswith(OSM_TOOLS_PREFIX)}
         if args.skip_vlm:
             excluded |= VLM_TOOLS
@@ -1106,6 +1118,13 @@ def main():
     p_rollout.add_argument("--no-skip-vlm", dest="skip_vlm", action="store_false")
     p_rollout.add_argument("--skip-changeos", action="store_true", default=True)
     p_rollout.add_argument("--no-skip-changeos", dest="skip_changeos", action="store_false")
+    # One explicit switch for all network-dependent tools (Serper web search +
+    # the OSM/GeoPackage/STAC workflow). Off by default; opt in with --skip-online.
+    p_rollout.add_argument("--skip-online", action="store_true", default=False,
+                           help="Run only OFFLINE tasks: skip any using a network tool (bing_search + osm_gis.*)")
+    p_rollout.add_argument("--no-skip-online", dest="skip_online", action="store_false")
+    p_rollout.add_argument("--only-online", action="store_true", default=False,
+                           help="Run only ONLINE tasks (bing_search + osm_gis.*) — for the forwarding window")
     p_rollout.add_argument(
         "--exclude-tools", default=None,
         help="逗号分隔的工具 slug，从 allowed 中额外剔除（如 ipython.execute）",
