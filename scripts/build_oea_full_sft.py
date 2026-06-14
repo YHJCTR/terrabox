@@ -239,15 +239,20 @@ def main() -> None:
     args = ap.parse_args()
 
     from terrabox.extensions import load_builtin_toolkits
-    from terrabox.core.registry import list_tools
+    from terrabox.core.registry import get_tool
     load_builtin_toolkits()
 
-    # Build the system message: reuse the prior prefix, refresh the catalog from
-    # the live registry (so all 24 OEA tools + everything else are listed).
-    catalog = [{
-        "slug": s.slug, "function_name": s.slug.replace(".", "__"),
-        "description": s.description, "parameters": s.parameters,
-    } for s in sorted(list_tools(), key=lambda x: x.slug)]
+    # OE-focused catalog: only the OpenEarthAgent tools (the 23 callable slugs this
+    # dataset uses) — NOT the whole 150-tool registry. Keeps the OE SFT context
+    # tight and aligned with the OE rollout tool list (EB stays separate).
+    oe_slugs = sorted({s for s in OEA_TO_SLUG.values() if s})
+    catalog = []
+    for slug in oe_slugs:
+        spec = get_tool(slug)
+        if spec is None:
+            raise SystemExit(f"OE tool missing from registry: {slug}")
+        catalog.append({"slug": slug, "function_name": slug.replace(".", "__"),
+                        "description": spec.description, "parameters": spec.parameters})
     catalog_blob = json.dumps(catalog, ensure_ascii=False, separators=(",", ":"))
     prefix = (
         "You are a Terrabox geospatial tool-use agent. Solve Earth observation, "
@@ -293,11 +298,11 @@ def main() -> None:
     n_oe_te = dump(out / "openearth" / "test.jsonl", test_recs)
 
     # ── EarthBench (reuse de-collapsed SFT records, refresh catalog) ──────────
-    eb_train = [refresh_system(json.loads(l), system_msg)
-                for l in open(args.eb_fixdata_train, encoding="utf-8")
+    # EarthBench kept as-is (its own catalog); EB gets its own focused catalog when
+    # we build the EB-only dataset later — not the OE catalog.
+    eb_train = [json.loads(l) for l in open(args.eb_fixdata_train, encoding="utf-8")
                 if json.loads(l).get("source") == "earthbench"]
-    eb_test = [refresh_system(json.loads(l), system_msg)
-               for l in open(args.eb_fixdata_test, encoding="utf-8")]
+    eb_test = [json.loads(l) for l in open(args.eb_fixdata_test, encoding="utf-8")]
     n_eb_tr = dump(out / "earthbench" / "train.jsonl", eb_train)
     n_eb_te = dump(out / "earthbench" / "test.jsonl", eb_test)
 

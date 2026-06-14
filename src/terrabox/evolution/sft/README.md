@@ -4,7 +4,52 @@
 
 > 训练的是**纯文本 Qwen3-8B**(工具调用能力),不是 VL。ReAct/Reflection 的 agent LLM(port 9100)就是这个文本 8B(vLLM 挂载 HF 目录跑 `--model /model`);感知交给工具(instructsam 等),图片不进 agent LLM。`scripts/train/train_sft.py` 与 `/data1/yuhongjie2` 下的 SFT 是**另一套 VL 训练**,与本模块无关,勿混用。
 
-## ✅ 最新实验(2026-06-09 实跑):`v2_sft` —— v2 数据 + unsloth 单卡 QLoRA
+## ✅ 最新实验(2026-06-15 实跑):`oe_full` —— OE 全量 + 23 工具聚焦 catalog + 单卡 QLoRA
+
+主线升级:**OE 与 EB 分开训练**,先单独用 **OpenEarth 全量**数据冷启动。相比 `v2_sft`(OE+EB 混合、47 工具 catalog、过滤子集),本次:
+- **OE/EB 分离**:只用 OE 数据;catalog 只放 **OE 的 23 个可调用工具**(不再把 40+ 工具塞进上下文)→ 训练上下文 = OE rollout 工具列表,对齐更紧。
+- **全量 + 去塌缩**:14538 条(此前被过滤的 osm/gpkg/search/changeos/count/region_attr 等任务**全部纳入**,因为这些工具现已全部真实实现)。
+- **工具吃 OEA 原生参数契约**:转换器逐字保留 gold 参数(只解析 `img_N`→绝对路径),**每个 gold 调用的参数都匹配工具 schema**(`argument_status` 全 `adapted`,0 未知参数)→ SFT 目标 = rollout 能执行的调用。
+- **0 丢弃**:聚焦 catalog 使 system prompt 19.5K(v2 是 38.8K),序列中位 5492 / 最长 6362 token → `max_seq 8192` 下仅丢 3/14338(0.02%)。
+- **AddIndexLayer** 接 `{year,month}` → 免账号 earth-search Sentinel-2 STAC 实时取数(轻量窗口读);其余 23 工具均已端到端验证可跑(24 工具覆盖 rollout:8/10 成功,含 changeos/strip-rcnn docker)。
+
+### 数据怎么来
+```bash
+# 1) 构建全量 OE/EB 分离数据集(OE catalog=23 工具;输出 data/oea_full_sft/{openearth,earthbench}/{train,test}.jsonl)
+PYTHONPATH=src python scripts/build_oea_full_sft.py
+# 2) 切 train/val(固定 seed shuffle,verbatim 不压缩)
+PYTHONPATH=src $PY -m terrabox.evolution.sft.runner prepare-data \
+  --experiment oe_full --strict-data data/oea_full_sft/openearth/train.jsonl \
+  --val-start 0 --val-limit 200 --train-start 200 --train-limit 100000
+#  → train 14338 / val 200 ; exp/oe_full/sft_data/{train,val}.jsonl
+```
+
+### 运行指令(2026-06-15 实跑,GPU3,tmux)
+```bash
+PY=/home/yuhongjie/miniconda3/envs/unsloth/bin/python
+# 必须在 tmux 里跑(关终端不杀);断路器:--temp-target 80 软件温控 + --dataset-num-proc 8 + 频繁存档/resume
+tmux new-session -d -s oe_full_sft "source /home/yuhongjie/miniconda3/etc/profile.d/conda.sh && conda activate unsloth && \
+  CUDA_VISIBLE_DEVICES=3 PYTHONPATH=src $PY -m terrabox.evolution.sft.train_lora \
+  --train-file src/terrabox/evolution/sft/exp/oe_full/sft_data/train.jsonl \
+  --val-file  src/terrabox/evolution/sft/exp/oe_full/sft_data/val.jsonl \
+  --model-path /data1/yuhongjie2/Earth-Agent/llm/qwen/3_8B/ \
+  --output-dir src/terrabox/evolution/sft/model/oe_full \
+  --max-seq-length 8192 --drop-overlength --lora-rank 32 --lora-alpha 64 --learning-rate 1e-4 \
+  --per-device-train-batch-size 1 --gradient-accumulation-steps 8 --num-train-epochs 1 \
+  --save-steps 50 --save-total-limit 2 --save-merged-model \
+  --dataset-num-proc 8 --temp-target 80 --temp-resume 75 --cooldown-sec 0 --resume \
+  > src/terrabox/evolution/sft/exp/oe_full/sft_train.log 2>&1"
+# 共 1792 步(14335÷8);跳闸/重启后重跑同命令 --resume 自动从最近 checkpoint 续
+# 监控:tmux attach -t oe_full_sft  |  tail -f .../oe_full/sft_train.log  |  grep telemetry 日志看温度
+# 产物:src/terrabox/evolution/sft/model/oe_full/merged (= ReAct agent LLM 挂载格式)
+```
+
+### SFT 后评测(分基准,带 JSON-actions 适配器)
+与下方 v2 的 ④ 完全相同,只是把 `MERGED` 换成 `model/oe_full/merged`、system prompt 取 `data/oea_full_sft/openearth/train.jsonl` 第 0 条;OE 评测用 `data/oea_full_sft/openearth/test.jsonl`(1162 条,已剔除 7 条 train/test 重叠)。**不再需要 `--skip-osm/--skip-bing`**(联网工具已就绪:OSM、Serper(`.env` 里 `SERPER_API_KEY` 自动加载 + SQLite 缓存)、STAC 全可用)。对比基线:`--model-path` 换 base 8B,其余不变。
+
+---
+
+## 最新实验(2026-06-09 实跑):`v2_sft` —— v2 数据 + unsloth 单卡 QLoRA
 
 主线 SFT,**用于 RL 冷启动 + SFT 后重跑 ReAct 对比**。目标:SFT 后模型在 ReAct 上比原生 Qwen3-8B 更好(原生主要败在选错工具/格式不对,SFT 教正确 slug + `{thought,actions}` 格式 + 调用顺序)。
 
