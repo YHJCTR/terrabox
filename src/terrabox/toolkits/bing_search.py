@@ -34,6 +34,23 @@ from ..core.registry import ToolSpec
 SERPER_ENDPOINT = "https://google.serper.dev"
 DEFAULT_MAX_OUT_LEN = 1500  # matches OpenEarthAgent GoogleSearch worker
 
+_ENV_LOADED = False
+
+
+def _ensure_env_loaded() -> None:
+    """Load a repo-root ``.env`` (gitignored) once so SERPER_API_KEY is available
+    by default in any react/evolution rollout, without hardcoding the key here.
+    Never overrides an already-set environment variable."""
+    global _ENV_LOADED
+    if _ENV_LOADED:
+        return
+    _ENV_LOADED = True
+    try:
+        from dotenv import find_dotenv, load_dotenv
+        load_dotenv(find_dotenv(usecwd=True), override=False)
+    except Exception:
+        pass  # dotenv optional; env vars set by the shell still work
+
 
 # ---------------------------------------------------------------------------
 # Cache (SQLite, de-duplicated by normalised query)
@@ -196,6 +213,8 @@ def search_with_cache(
                 "result_count": cached.count("\n\n"),
             }
 
+    if not api_key:
+        _ensure_env_loaded()
     key = api_key or os.getenv("SERPER_API_KEY")
     if not key:
         return {

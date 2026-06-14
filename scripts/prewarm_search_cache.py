@@ -29,7 +29,12 @@ import time
 # Make the package importable when run from the repo root.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from terrabox.toolkits.bing_search import SearchCache, search_with_cache, _normalize_query
+from terrabox.toolkits.bing_search import (
+    SearchCache,
+    search_with_cache,
+    _normalize_query,
+    _ensure_env_loaded,
+)
 
 SEARCH_TOOL_NAMES = {"GoogleSearch", "bing_search.search", "bing_search", "Bing"}
 
@@ -67,6 +72,8 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true", help="Only report what WOULD be fetched.")
     args = ap.parse_args()
 
+    if not args.api_key:
+        _ensure_env_loaded()  # pick up SERPER_API_KEY from repo-root .env by default
     api_key = args.api_key or os.getenv("SERPER_API_KEY")
 
     # Collect + de-dupe (by the same normalisation the cache uses).
