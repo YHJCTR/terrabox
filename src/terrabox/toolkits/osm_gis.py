@@ -684,6 +684,342 @@ def get_bbox_from_raster_handler(arguments: Dict[str, Any], context: Any, accoun
 
 
 # ------------------------------------------------------------------------------
+# GeoPackage index-layer + visualization tools (ported from OpenEarthAgent)
+#
+# Faithful re-implementations of OEA's ComputeIndexChange / ShowIndexLayer /
+# DisplayOnMap / DisplayOnGeotiff. The originals used QGIS python bindings
+# (unavailable / hard to install here); the raster algebra is reproduced exactly
+# on GDAL + numpy instead (identical decode formula, thresholds and statistics).
+# Index rasters are stored in the gpkg as uint8 1..254 (0 = nodata) encoding an
+# index value in [-1, 1] via index = (v - 1) / 254 * 2 - 1.
+# ------------------------------------------------------------------------------
+
+_INF = float("inf")
+_INDEX_CHANGE_CLASSES = {
+    "NDVI": ([-_INF, -0.3, -0.1, 0.1, 0.3, _INF], {
+        1: "Severe vegetation loss", 2: "Moderate vegetation loss",
+        3: "Stable / no significant change", 4: "Moderate vegetation gain",
+        5: "Strong vegetation gain / regrowth"}),
+    "NDBI": ([-_INF, -0.3, -0.1, 0.1, 0.3, _INF], {
+        1: "Strong urban decrease", 2: "Moderate urban decrease",
+        3: "Stable / no significant change", 4: "Moderate urban growth",
+        5: "Strong urban growth"}),
+    "NBR": ([-_INF, -0.66, -0.27, -0.1, 0.1, _INF], {
+        1: "Severe burn severity", 2: "Moderate burn severity",
+        3: "Low burn severity", 4: "Unburned", 5: "Enhanced regrowth"}),
+}
+
+
+def _lazy_gdal():
+    try:
+        from osgeo import gdal
+        gdal.UseExceptions()
+        return gdal
+    except ImportError:
+        raise ImportError("Missing GDAL (osgeo). Install: conda install gdal / pip install gdal")
+
+
+def _lazy_plt():
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        return plt
+    except ImportError:
+        raise ImportError("Missing matplotlib. Install: pip install matplotlib")
+
+
+def _decode_index_array(arr, dtype_name):
+    """Decode a stored index band to physical index values in [-1, 1]."""
+    import numpy as np
+    arr = arr.astype("float32")
+    if dtype_name.startswith("Float"):
+        arr[arr <= -100] = np.nan
+    else:
+        arr[arr <= 0] = np.nan
+        arr = ((arr - 1) / 254.0) * 2.0 - 1.0
+    return np.clip(arr, -1, 1)
+
+
+def show_index_layer_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Render a colorized PNG preview of an index raster layer in a GeoPackage."""
+    gdal = _lazy_gdal()
+    plt = _lazy_plt()
+    gpkg = arguments.get("gpkg")
+    layer_name = arguments.get("layer_name")
+    index_type = str(arguments.get("index_type", "")).upper()
+    if not gpkg or not layer_name:
+        return {"status": "error", "message": "show_index_layer requires 'gpkg' and 'layer_name'."}
+    if not os.path.exists(gpkg):
+        return {"status": "error", "message": f"GeoPackage not found: {gpkg}"}
+    out_file = arguments.get("out_file") or os.path.join(_get_save_dir(), f"{layer_name}_preview.png")
+    ds = gdal.Open(f"GPKG:{gpkg}:{layer_name}")
+    if ds is None:
+        return {"status": "error", "message": f"Could not open layer '{layer_name}' from {gpkg}"}
+    band = ds.GetRasterBand(1)
+    arr = _decode_index_array(band.ReadAsArray(), gdal.GetDataTypeName(band.DataType))
+    cmap = {"NDVI": "RdYlGn", "NDBI": "RdYlBu_r", "NBR": "RdYlGn"}.get(index_type, "viridis")
+    plt.figure(figsize=(8, 6))
+    plt.imshow(arr, cmap=cmap, vmin=-1, vmax=1)
+    plt.colorbar(label=f"{index_type} Value")
+    plt.title(f"{index_type} Layer: {layer_name}")
+    plt.axis("off")
+    plt.tight_layout()
+    plt.savefig(out_file, dpi=300, bbox_inches="tight", pad_inches=0)
+    plt.close()
+    return {
+        "status": "success", "out_file": out_file, "layer_name": layer_name,
+        "index_type": index_type,
+        "message": f"Saved colorized {index_type} preview to: {out_file}",
+    }
+
+
+def compute_index_change_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """ΔIndex = layer2 - layer1; classify change, report class percentages, and
+    save the float difference raster back into the GeoPackage."""
+    import numpy as np
+    gdal = _lazy_gdal()
+    gpkg = arguments.get("gpkg")
+    index_type = str(arguments.get("index_type", "")).upper()
+    l1 = arguments.get("layer1_name")
+    l2 = arguments.get("layer2_name")
+    diff_layer_name = arguments.get("diff_layer_name") or f"{index_type}_Change"
+    if not all([gpkg, index_type, l1, l2]):
+        return {"status": "error", "message": "requires gpkg, index_type, layer1_name, layer2_name."}
+    if index_type not in _INDEX_CHANGE_CLASSES:
+        return {"status": "error", "message": "index_type must be one of NDVI, NDBI, NBR."}
+    if not os.path.exists(gpkg):
+        return {"status": "error", "message": f"GeoPackage not found: {gpkg}"}
+    ds1 = gdal.Open(f"GPKG:{gpkg}:{l1}")
+    ds2 = gdal.Open(f"GPKG:{gpkg}:{l2}")
+    if ds1 is None or ds2 is None:
+        return {"status": "error", "message": "One or both raster layers could not be loaded."}
+    b1, b2 = ds1.GetRasterBand(1), ds2.GetRasterBand(1)
+    a1 = _decode_index_array(b1.ReadAsArray(), gdal.GetDataTypeName(b1.DataType))
+    a2 = _decode_index_array(b2.ReadAsArray(), gdal.GetDataTypeName(b2.DataType))
+    diff = a2 - a1
+    breaks, class_names = _INDEX_CHANGE_CLASSES[index_type]
+    valid = diff[np.isfinite(diff)]
+    total = int(valid.size)
+    summary = f"{index_type} Change Statistics:\n"
+    classes_pct = {}
+    for i in range(1, len(breaks)):
+        cnt = int(np.sum((valid >= breaks[i - 1]) & (valid < breaks[i])))
+        pct = (cnt / total * 100) if total > 0 else 0.0
+        classes_pct[class_names[i]] = round(pct, 2)
+        summary += f"  {class_names[i]:<45}: {pct:6.2f} %\n"
+    # Save the float difference raster back into the GeoPackage (georeferenced from layer1).
+    gt, proj = ds1.GetGeoTransform(), ds1.GetProjection()
+    h, w = diff.shape
+    mem = gdal.GetDriverByName("MEM").Create("", w, h, 1, gdal.GDT_Float32)
+    mem.SetGeoTransform(gt)
+    mem.SetProjection(proj)
+    out = np.where(np.isfinite(diff), diff, -9999.0).astype("float32")
+    mem.GetRasterBand(1).WriteArray(out)
+    mem.GetRasterBand(1).SetNoDataValue(-9999.0)
+    try:
+        gdal.GetDriverByName("GPKG").CreateCopy(
+            gpkg, mem, options=["APPEND_SUBDATASET=YES", f"RASTER_TABLE={diff_layer_name}"]
+        )
+        saved = True
+    except Exception as exc:  # raster save is best-effort; stats are the main output
+        saved = False
+        summary += f"  (note: could not append raster layer to gpkg: {exc})\n"
+    finally:
+        mem = ds1 = ds2 = None
+    gpkg_name = os.path.basename(gpkg)
+    return {
+        "status": "success", "diff_layer_name": diff_layer_name, "index_type": index_type,
+        "class_percentages": classes_pct, "layer_saved": saved, "summary": summary,
+        "message": f"delta-{index_type} layer saved to {gpkg_name} as '{diff_layer_name}'\n" + summary,
+    }
+
+
+def display_on_map_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Render GeoPackage vector layer(s) to a PNG map with an optional basemap."""
+    import random
+    from datetime import datetime as _dt
+    gpd = _lazy_gpd()
+    plt = _lazy_plt()
+    try:
+        import contextily as ctx
+    except ImportError:
+        ctx = None
+    from pyogrio import list_layers
+    gpkg = arguments.get("gpkg")
+    layers = arguments.get("layers")
+    if not gpkg or not layers:
+        return {"status": "error", "message": "display_on_map requires 'gpkg' and 'layers'."}
+    if isinstance(layers, str):
+        layers = [layers]
+    if not os.path.exists(gpkg):
+        return {"status": "error", "message": f"GeoPackage not found: {gpkg}"}
+    available = [str(l[0]) for l in list_layers(gpkg)]
+    missing = [l for l in layers if l not in available]
+    if missing:
+        return {"status": "error", "message": f"Missing layers: {missing}. Available: {available}"}
+    if "area_boundary" not in available:
+        return {"status": "error", "message": '"area_boundary" layer not found in gpkg'}
+    random.seed(42)
+    area_gdf = gpd.read_file(gpkg, layer="area_boundary")
+    if area_gdf.empty:
+        return {"status": "error", "message": '"area_boundary" layer is empty'}
+    fig, ax = plt.subplots(figsize=(10, 10))
+    legend_added: set = set()
+
+    def _lbl(n):
+        if n not in legend_added:
+            legend_added.add(n)
+            return n
+        return None
+
+    for layer in layers:
+        gdf = gpd.read_file(gpkg, layer=layer)
+        if gdf.empty:
+            continue
+        color = "#" + "".join(random.choices("0123456789ABCDEF", k=6))
+        gt = gdf.geometry.geom_type
+        lines = gdf[gt.str.contains("Line", na=False)]
+        points = gdf[gt.str.contains("Point", na=False)]
+        polys = gdf[gt.str.contains("Polygon", na=False)]
+        if not lines.empty:
+            has = "distance_m" in lines.columns
+            lines.plot(ax=ax, column="distance_m" if has else None,
+                       cmap="plasma" if has else None, color=None if has else color,
+                       linewidth=2, alpha=0.8, label=_lbl(layer))
+        if not points.empty:
+            points.plot(ax=ax, color=color, markersize=50, alpha=0.9, label=_lbl(layer))
+            for _, row in points.iterrows():
+                g = row.geometry
+                if g is None or g.is_empty:
+                    continue
+                nm = _get_name_from_row(row)
+                if nm:
+                    ax.text(g.x, g.y, nm, fontsize=8, color="black", ha="left", va="bottom",
+                            bbox=dict(facecolor="white", alpha=0.6, edgecolor="none", pad=0.5))
+        if not polys.empty:
+            polys.boundary.plot(ax=ax, linewidth=1.2, edgecolor=color, label=_lbl(layer))
+            polys.plot(ax=ax, alpha=0.05, facecolor=color)
+            for _, row in polys.iterrows():
+                g = row.geometry
+                if g is None or g.is_empty:
+                    continue
+                nm = _get_name_from_row(row)
+                if nm:
+                    cp = g.representative_point()
+                    ax.text(cp.x, cp.y, nm, fontsize=8, color="black", ha="center", va="center",
+                            bbox=dict(facecolor="white", alpha=0.6, edgecolor="none", pad=0.5))
+    minx, miny, maxx, maxy = area_gdf.total_bounds
+    ax.set_xlim(minx, maxx)
+    ax.set_ylim(miny, maxy)
+    ax.set_aspect("equal")
+    if ctx is not None:
+        try:
+            ctx.add_basemap(ax, crs=area_gdf.crs.to_string(), source=ctx.providers.CartoDB.Positron)
+        except Exception:
+            pass  # basemap needs network; the vector map is still valid without it
+    ax.legend(loc="upper left")
+    ax.set_axis_off()
+    out_path = os.path.join(_get_save_dir(), f"map_{_dt.now().strftime('%Y%m%d_%H%M%S')}.png")
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return {"status": "success", "out_file": out_path, "layers": layers,
+            "message": f"Rendered {len(layers)} layer(s) to map: {out_path}"}
+
+
+def display_on_geotiff_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Overlay GeoPackage vector layer(s) onto a GeoTIFF and save a georeferenced
+    RGB overlay raster (same CRS / resolution)."""
+    import numpy as np
+    import random
+    from datetime import datetime as _dt
+    rasterio = _lazy_rasterio()
+    gpd = _lazy_gpd()
+    from rasterio.features import rasterize
+    from scipy.ndimage import binary_dilation
+    from PIL import Image, ImageDraw
+    from pyogrio import list_layers
+    gpkg = arguments.get("gpkg")
+    layers = arguments.get("layers")
+    geotiff = arguments.get("geotiff") or arguments.get("input_path")
+    show_names = bool(arguments.get("show_names", True))
+    if not gpkg or not layers or not geotiff:
+        return {"status": "error", "message": "display_on_geotiff requires 'gpkg', 'layers', and 'geotiff'."}
+    if isinstance(layers, str):
+        layers = [layers]
+    for p in (gpkg, geotiff):
+        if not os.path.exists(p):
+            return {"status": "error", "message": f"Not found: {p}"}
+    available = [str(l[0]) for l in list_layers(gpkg)]
+    missing = [l for l in layers if l not in available]
+    if missing:
+        return {"status": "error", "message": f"Missing layers: {missing}. Available: {available}"}
+    random.seed(42)
+    with rasterio.open(geotiff) as src:
+        meta = src.meta.copy()
+        raster = src.read()
+        transform = src.transform
+        crs = src.crs
+        height, width = src.height, src.width
+    if crs is None:
+        return {"status": "error", "message": "GeoTIFF has no CRS; cannot align vector layers."}
+    base = (raster[:3] if raster.shape[0] >= 3 else np.repeat(raster[0:1], 3, axis=0)).astype("uint8")
+    color_mask = np.zeros((3, height, width), dtype="uint8")
+    labels = []
+    for layer in layers:
+        gdf = gpd.read_file(gpkg, layer=layer)
+        if gdf.empty:
+            continue
+        if gdf.crs is not None and gdf.crs != crs:
+            gdf = gdf.to_crs(crs)
+        hexc = "".join(random.choices("0123456789ABCDEF", k=6))
+        r, g, b = int(hexc[0:2], 16), int(hexc[2:4], 16), int(hexc[4:6], 16)
+        shapes = []
+        for geom in gdf.geometry:
+            if geom is None or geom.is_empty:
+                continue
+            if geom.geom_type in ("Polygon", "MultiPolygon"):
+                geom = geom.boundary
+            shapes.append((geom, 1))
+        if shapes:
+            burned = rasterize(shapes=shapes, out_shape=(height, width), transform=transform,
+                               fill=0, all_touched=True, dtype="uint8")
+            mask = binary_dilation(burned == 1, structure=np.ones((3, 3), dtype=bool))
+            color_mask[0][mask] = r
+            color_mask[1][mask] = g
+            color_mask[2][mask] = b
+        if show_names:
+            for _, row in gdf.iterrows():
+                geom = row.geometry
+                if geom is None or geom.is_empty:
+                    continue
+                nm = _get_name_from_row(row)
+                if not nm:
+                    continue
+                pt = geom if geom.geom_type == "Point" else geom.representative_point()
+                col, rowi = ~transform * (pt.x, pt.y)
+                labels.append((int(col), int(rowi), nm))
+    overlay = np.any(color_mask > 0, axis=0)
+    blended = base.copy()
+    for c in range(3):
+        blended[c][overlay] = color_mask[c][overlay]
+    img = Image.fromarray(np.moveaxis(blended, 0, -1)).convert("RGB")
+    if show_names and labels:
+        draw = ImageDraw.Draw(img)
+        for x, y, nm in labels:
+            if 0 <= x < width and 0 <= y < height:
+                draw.text((x, y), nm, fill=(255, 255, 0))
+    blended = np.moveaxis(np.array(img), -1, 0)
+    meta.update({"count": 3, "dtype": "uint8", "height": height, "width": width,
+                 "transform": transform, "crs": crs, "driver": "GTiff"})
+    out_path = os.path.join(_get_save_dir(), f"overlay_{_dt.now().strftime('%Y%m%d_%H%M%S')}.tif")
+    with rasterio.open(out_path, "w", **meta) as dst:
+        dst.write(blended)
+    return {"status": "success", "out_file": out_path, "layers": layers,
+            "message": f"Saved overlay GeoTIFF: {out_path}"}
+
+
+# ------------------------------------------------------------------------------
 # Registration
 # ------------------------------------------------------------------------------
 
@@ -695,9 +1031,10 @@ def setup(registrar):
             "Geospatial data acquisition from OpenStreetMap: area boundaries (saved as GeoPackage), "
             "POI layer queries (fire stations, hospitals, schools, etc.), "
             "pairwise road-network distance computation between POI layers, "
-            "and raster metadata extraction."
+            "raster metadata extraction, spectral-index layer change/preview (NDVI/NDBI/NBR), "
+            "and map/GeoTIFF visualization of GeoPackage layers."
         ),
-        version="2.0.0"
+        version="2.1.0"
     )
 
     # 1. Get area boundary → creates GeoPackage
@@ -825,4 +1162,104 @@ def setup(registrar):
             requires_connection=False
         ),
         get_bbox_from_raster_handler,
+    )
+
+    # 5. ShowIndexLayer → colorized PNG preview of a gpkg index raster
+    registrar.tool(
+        ToolSpec(
+            slug="osm_gis.show_index_layer",
+            name="Show Index Layer",
+            description=(
+                "Generate a colorized PNG preview of a spectral-index layer (NDVI/NDBI/NBR) "
+                "stored in a GeoPackage. Use after add_index_layer has created the index layer."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "gpkg": {"type": "string", "description": "Path to the GeoPackage."},
+                    "layer_name": {"type": "string", "description": "Raster layer name inside the GeoPackage."},
+                    "index_type": {"type": "string", "enum": ["NDVI", "NDBI", "NBR"], "description": "Index type (chooses default colormap)."},
+                    "out_file": {"type": "string", "description": "Optional output image path (.png)."},
+                },
+                "required": ["gpkg", "layer_name", "index_type"]
+            },
+            requires_connection=False
+        ),
+        show_index_layer_handler,
+    )
+
+    # 6. ComputeIndexChange → ΔIndex between two gpkg index layers
+    registrar.tool(
+        ToolSpec(
+            slug="osm_gis.compute_index_change",
+            name="Compute Index Change",
+            description=(
+                "Compute ΔIndex (layer2 − layer1) for NDVI/NDBI/NBR from two GeoPackage index "
+                "raster layers, classify the change into 5 severity classes (e.g. vegetation "
+                "loss/gain, urban decrease/growth, burn severity/regrowth), report per-class "
+                "area percentages, and save the difference layer back into the GeoPackage. "
+                "Call add_index_layer first to create the two index layers being compared."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "gpkg": {"type": "string", "description": "Path to the GeoPackage."},
+                    "index_type": {"type": "string", "enum": ["NDVI", "NDBI", "NBR"], "description": "Index type."},
+                    "layer1_name": {"type": "string", "description": "Baseline raster layer name."},
+                    "layer2_name": {"type": "string", "description": "Comparison raster layer name."},
+                    "diff_layer_name": {"type": "string", "description": "Optional output layer name (defaults to '<index_type>_Change')."},
+                },
+                "required": ["gpkg", "index_type", "layer1_name", "layer2_name"]
+            },
+            requires_connection=False
+        ),
+        compute_index_change_handler,
+    )
+
+    # 7. DisplayOnMap → render gpkg vector layers to a PNG map
+    registrar.tool(
+        ToolSpec(
+            slug="osm_gis.display_on_map",
+            name="Display On Map",
+            description=(
+                "Render selected GeoPackage vector layers (boundary, POIs, distance lines) "
+                "on a PNG map over a web basemap, with feature-name labels. The GeoPackage "
+                "must contain an 'area_boundary' layer (from get_area_boundary)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "gpkg": {"type": "string", "description": "Path to the GeoPackage (must contain 'area_boundary')."},
+                    "layers": {"description": "Layer name (string) or list of layer names to render."},
+                },
+                "required": ["gpkg", "layers"]
+            },
+            requires_connection=False
+        ),
+        display_on_map_handler,
+    )
+
+    # 8. DisplayOnGeotiff → overlay gpkg vector layers onto a GeoTIFF
+    registrar.tool(
+        ToolSpec(
+            slug="osm_gis.display_on_geotiff",
+            name="Display On GeoTIFF",
+            description=(
+                "Render one or more GeoPackage vector layers (with feature names) directly "
+                "over a given GeoTIFF, saving a georeferenced RGB overlay raster with the same "
+                "CRS and resolution as the input GeoTIFF."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "gpkg": {"type": "string", "description": "Path to the GeoPackage."},
+                    "layers": {"description": "Layer name (string) or list of layer names to overlay."},
+                    "geotiff": {"type": "string", "description": "Path to the base GeoTIFF."},
+                    "show_names": {"type": "boolean", "description": "Draw feature name labels (default true)."},
+                },
+                "required": ["gpkg", "layers", "geotiff"]
+            },
+            requires_connection=False
+        ),
+        display_on_geotiff_handler,
     )
