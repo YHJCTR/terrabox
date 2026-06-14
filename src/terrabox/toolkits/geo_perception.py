@@ -1312,6 +1312,49 @@ def change_os_detect_mock_handler(arguments: Dict[str, Any], context: Any, accou
     }
 
 
+def count_given_object_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Count instances of a named object class in an image (OpenEarthAgent
+    `CountGivenObject`). Thin wrapper over InstructSAM detection: detect the
+    requested class, return the count + boxes."""
+    obj = (
+        arguments.get("object")
+        or arguments.get("text_prompt")
+        or arguments.get("category")
+        or arguments.get("class")
+        or "objects"
+    )
+    is_args = dict(arguments)
+    is_args["text_prompt"] = obj
+    result = instructsam_handler(is_args, context, account)
+    if not isinstance(result, dict) or result.get("status") == "error":
+        return result if isinstance(result, dict) else {"status": "error", "message": str(result)}
+    count = result.get("count", 0)
+    return {
+        "status": "success",
+        "object": obj,
+        "count": count,
+        "objects": result.get("objects", []),
+        "detections": result.get("detections", []),
+        "output": f"Found {count} instance(s) of '{obj}'.",
+    }
+
+
+def region_attribute_description_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
+    """Describe attributes of a region/object in an image (OpenEarthAgent
+    `RegionAttributeDescription`). Wraps the VLM with a description prompt;
+    an optional bbox/region focuses the description."""
+    region = arguments.get("region") or arguments.get("bbox") or arguments.get("box")
+    attr = arguments.get("attribute") or arguments.get("query") or "color, type, condition, and notable attributes"
+    focus = f" within the region {region}" if region else ""
+    prompt = (
+        f"Describe the {attr} of the object{focus} in this remote-sensing image. "
+        "Be concise and factual; do not invent measurements or counts."
+    )
+    vlm_args = dict(arguments)
+    vlm_args["prompt"] = prompt
+    return vlm_analyze_handler(vlm_args, context, account)
+
+
 # --- Tool Registration ---
 
 def setup(registrar):
@@ -1786,4 +1829,48 @@ def setup(registrar):
             requires_connection=False
         ),
         change_os_detect_mock_handler
+    )
+
+    # 18. CountGivenObject (wraps InstructSAM detection)
+    registrar.tool(
+        ToolSpec(
+            slug="geo_perception.count_given_object",
+            name="CountGivenObject",
+            description=(
+                "Count the number of instances of a named object class in an image "
+                "(e.g. 'ship', 'airplane', 'storage tank'). Returns {count, objects}."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "image": {"type": "string", "description": "Path to the image."},
+                    "object": {"type": "string", "description": "The object class to count."},
+                },
+                "required": ["image", "object"],
+            },
+        ),
+        count_given_object_handler
+    )
+
+    # 19. RegionAttributeDescription (wraps VLM)
+    registrar.tool(
+        ToolSpec(
+            slug="geo_perception.region_attribute_description",
+            name="RegionAttributeDescription",
+            description=(
+                "Describe attributes (color, type, condition, etc.) of an object or "
+                "region in a remote-sensing image, optionally focused on a bbox region. "
+                "Returns a textual description."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "image": {"type": "string", "description": "Path to the image."},
+                    "region": {"type": "string", "description": "Optional bbox/region [x1,y1,x2,y2] to focus on."},
+                    "attribute": {"type": "string", "description": "Which attribute(s) to describe (optional)."},
+                },
+                "required": ["image"],
+            },
+        ),
+        region_attribute_description_handler
     )

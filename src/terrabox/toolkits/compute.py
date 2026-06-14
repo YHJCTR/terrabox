@@ -155,6 +155,16 @@ def plot_handler(arguments: dict, context: dict | None = None, account=None):
         return f"Error in Plot: {exc}"
 
 
+def terminate_handler(arguments: dict, context: dict | None = None, account=None) -> dict:
+    """Signal task completion and return the consolidated final answer.
+
+    Mirrors OpenEarthAgent's `Terminate` control tool: the agent calls it with
+    the final answer once all sub-steps are done. Pure pass-through, no compute.
+    """
+    ans = arguments.get("ans", arguments.get("answer", ""))
+    return {"status": "success", "terminated": True, "answer": str(ans), "output": str(ans)}
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -233,4 +243,27 @@ def setup(registrar):
             },
         ),
         plot_handler,
+    )
+
+    registrar.tool(
+        ToolSpec(
+            slug="compute.terminate",
+            name="Terminate",
+            description=(
+                "Signal that the task is complete and return the final consolidated "
+                "answer. Call this once, after all needed tools have run. "
+                "Example: {\"ans\": \"The average area is 734.98 m^2.\"}"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "ans": {
+                        "type": "string",
+                        "description": "The final answer to the user's question.",
+                    }
+                },
+                "required": ["ans"],
+            },
+        ),
+        terminate_handler,
     )
