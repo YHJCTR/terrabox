@@ -93,11 +93,22 @@ def _resolve_image(value, images_abs: list[str]):
     return value
 
 
-def _abs_image(rel: str) -> str:
+def _abs_image(rel: str, split: str = "train") -> str:
+    """Resolve an OEA image reference to an absolute path. Train uses relative
+    paths ('data/train_images/x.jpg'); test uses bare filenames that live under
+    data/test/."""
     p = Path(rel)
-    if p.is_absolute():
+    if p.is_absolute() and p.exists():
         return str(p)
-    return str(OEA_ROOT / rel)
+    cand = OEA_ROOT / rel
+    if cand.exists():
+        return str(cand)
+    search_dirs = (["test"] if split == "test" else ["train_images", "train_part2", "train"])
+    for d in search_dirs + ["test", "train_images", "train_part2", "test_images"]:
+        c = OEA_DATA / d / p.name
+        if c.exists():
+            return str(c)
+    return str(cand)
 
 
 def get_schema_props(slug: str) -> set[str]:
@@ -135,7 +146,7 @@ def extract_terminate_ans(value: str) -> str | None:
 
 def convert_oea_task(task: dict, idx: int, source_split: str, schema_cache: dict, system_msg: str):
     conv = task.get("conversation", [])
-    images_abs = [_abs_image(i) for i in (task.get("images") or [])]
+    images_abs = [_abs_image(i, source_split) for i in (task.get("images") or [])]
     messages = [{"role": "system", "content": system_msg}]
     gold_calls: list[dict] = []
     expected_tools: list[str] = []

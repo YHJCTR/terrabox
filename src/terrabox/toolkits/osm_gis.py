@@ -830,6 +830,12 @@ def compute_index_change_handler(arguments: Dict[str, Any], context: Any, accoun
     b1, b2 = ds1.GetRasterBand(1), ds2.GetRasterBand(1)
     a1 = _decode_index_array(b1.ReadAsArray(), gdal.GetDataTypeName(b1.DataType))
     a2 = _decode_index_array(b2.ReadAsArray(), gdal.GetDataTypeName(b2.DataType))
+    if a1.shape != a2.shape:
+        # Two index layers fetched from different scenes/dates can land on slightly
+        # different pixel grids; resample layer2 onto layer1's grid before differencing.
+        from scipy.ndimage import zoom
+        fy, fx = a1.shape[0] / a2.shape[0], a1.shape[1] / a2.shape[1]
+        a2 = zoom(a2, (fy, fx), order=1)
     diff = a2 - a1
     breaks, class_names = _INDEX_CHANGE_CLASSES[index_type]
     valid = diff[np.isfinite(diff)]

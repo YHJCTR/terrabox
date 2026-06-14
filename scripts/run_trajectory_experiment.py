@@ -64,7 +64,6 @@ log = logging.getLogger(__name__)
 MOCK_TOOLS = {
     "geo_perception.mscn_classify",
     "geo_perception.sm3det_detect",
-    "geo_perception.change_os_detect",
 }
 
 API_KEY_TOOLS = {"bing_search.search"}
