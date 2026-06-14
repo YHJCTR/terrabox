@@ -1,496 +1,272 @@
+"""Web search toolkit (slug ``bing_search.search``) backed by the Serper API.
+
+Faithful to OpenEarthAgent's ``GoogleSearch`` worker: queries Google through
+``https://google.serper.dev/search`` (header ``X-API-KEY``) and parses the
+``answerBox`` / ``knowledgeGraph`` / ``organic`` blocks into the same readable
+text format the SFT trajectories were generated with.
+
+Persistent SQLite cache (``.db``) with de-duplication:
+  - lookup is by a *normalised* query (lowercased, quotes removed, whitespace
+    collapsed) used as the table PRIMARY KEY, so semantically-identical queries
+    map to one row and never get stored twice;
+  - on a cache HIT the result is returned from the DB with NO network call and
+    NO API credit spent;
+  - on a MISS we query Serper live, then ``INSERT OR IGNORE`` the
+    (query, k, result, raw_json) row so the next identical call is free.
+
+Configuration:
+  - API key:  ``SERPER_API_KEY`` env var, or per-call ``api_key`` argument.
+  - Cache DB: ``BING_SEARCH_CACHE_DB`` env var, else ``~/.verl_cache/search_cache.db``.
+"""
+
 import os
+import re
 import json
 import time
-import queue
-import atexit
+import sqlite3
 import pathlib
-import threading
-try:
-    import aiohttp
-except ImportError:
-    # Mock aiohttp for testing
-    class aiohttp:
-        class ClientSession:
-            pass
-import asyncio
-from typing import Optional, Union, Dict, List, Any
-from urllib.parse import urlencode
-try:
-    import regex as re
-except ImportError:
-    # Fallback to standard re module if regex is not available
-    import re
+from typing import Any, Dict, Optional
 
-try:
-    import langid
-except ImportError:
-    # Mock langid for testing
-    class langid:
-        @staticmethod
-        def classify(text):
-            return ('en', 1.0)
+import requests
 
 from ..core.registry import ToolSpec
 
-class BingSearchEngine():
-    """
-    Async Bing search engine that provides web search capability with caching.
-    
-    This tool interfaces with the Brightdata API to perform Bing searches.
-    It includes robust caching to minimize redundant API calls and supports
-    asynchronous operations with connection pooling.
-    """
+SERPER_ENDPOINT = "https://google.serper.dev"
+DEFAULT_MAX_OUT_LEN = 1500  # matches OpenEarthAgent GoogleSearch worker
 
-    def __init__(
-        self,
-        api_key: str,
-        zone: str = "serp_api1",
-        max_results: int = 10,
-        result_length: int = 1000,
-        location: str = "us",
-        cache_file: Optional[str] = None,
-        cache_refresh_interval: float = 15.0
-    ):
-        """
-        Initialize the Bing search engine.
-        
-        Args:
-            api_key: Brightdata API key
-            zone: Brightdata zone name
-            max_results: Maximum number of search results to return
-            result_length: Maximum length of each result snippet
-            location: Country code for search localization
-            cache_file: Path to cache file (if None, uses ~/.verl_cache/bing_search_cache.jsonl)
-            cache_refresh_interval: Minimum seconds between cache file checks
-        """
-        # API configuration
-        self._api_key = api_key
-        self._zone = zone
-        self._max_results = max_results
-        self._result_length = result_length
-        self._location = location
-        
-        # Cache and synchronization
-        self._cache = {}
-        self._cache_lock = threading.Lock()
-        self._lang_id_lock = threading.Lock()
-        self._cache_refresh_interval = cache_refresh_interval
-        self._last_cache_check = 0.0
-        self._cache_mod_time = 0.0
-        
-        # Setup cache file paths
-        self._setup_cache_paths(cache_file)
-        
-        # Load existing cache
-        self._load_cache()
-        
-        # HTTP session for connection pooling
-        self._session = None
-    
-    def _setup_cache_paths(self, cache_file: Optional[str]) -> None:
-        """
-        Set up cache file path.
-        
-        Args:
-            cache_file: Path to cache file or None for default
-        """
-        if cache_file is None:
-            cache_dir = pathlib.Path.home() / ".verl_cache"
-            cache_dir.mkdir(exist_ok=True)
-            self._cache_file = cache_dir / "bing_search_cache.jsonl"
-        else:
-            self._cache_file = pathlib.Path(cache_file)
-            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-    
-    def _load_cache(self) -> None:
-        """Load the cache from JSONL file."""
-        if not self._cache_file.exists():
-            return
-            
-        try:
-            # Record file modification time
-            self._cache_mod_time = os.path.getmtime(self._cache_file)
-            
-            # Load JSONL file line by line
-            cache_data = {}
-            with open(self._cache_file, "r", encoding="utf-8") as f:
-                for line_num, line in enumerate(f, 1):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                        if 'query' in entry and 'result' in entry:
-                            cache_data[entry['query']] = entry['result']
-                        else:
-                            print(f"Invalid cache entry format at line {line_num}")
-                    except json.JSONDecodeError as e:
-                        print(f"Invalid JSON at line {line_num}: {e}")
-                        continue
-            
-            # Update in-memory cache
-            with self._cache_lock:
-                self._cache = cache_data
-            
-            self._last_cache_check = time.time()
-            print(f"Loaded {len(self._cache)} cache entries from {self._cache_file}")
-            
-        except Exception as e:
-            print(f"Failed to load cache file: {str(e)}")
-            self._cache = {}
 
-    async def _save_cache_async(self, query: str, result: str) -> None:
-        """Save a single cache entry to JSONL file asynchronously."""
-        if query is None or result is None:
-            return
-            
-        def _write_cache():
-            try:
-                # Create cache entry
-                cache_entry = {
-                    "query": query,
-                    "result": result,
-                    "timestamp": time.time()
-                }
-                
-                # Append to JSONL file
-                with open(self._cache_file, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(cache_entry, ensure_ascii=False) + "\n")
-                
-                # Update modification time record
-                self._cache_mod_time = os.path.getmtime(self._cache_file)
-                    
-            except Exception as e:
-                print(f"Failed to save cache entry: {str(e)}")
-        
-        # Run cache write in thread pool to avoid blocking
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _write_cache)
+# ---------------------------------------------------------------------------
+# Cache (SQLite, de-duplicated by normalised query)
+# ---------------------------------------------------------------------------
+def _default_db_path() -> str:
+    env = os.environ.get("BING_SEARCH_CACHE_DB", "").strip()
+    if env:
+        return env
+    cache_dir = pathlib.Path.home() / ".verl_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return str(cache_dir / "search_cache.db")
 
-    async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create aiohttp session with connection pooling."""
-        if self._session is None or self._session.closed:
-            connector = aiohttp.TCPConnector(
-                limit=100,  # Total connection pool size
-                limit_per_host=30,  # Max connections per host
-                keepalive_timeout=30,
-                enable_cleanup_closed=True
+
+def _normalize_query(query: str) -> str:
+    """Normalise a query for de-duplication: drop quotes, lowercase, collapse
+    whitespace. Two queries that differ only in case/spacing/quotes collapse to
+    the same cache key (and thus the same stored row)."""
+    q = (query or "").replace('"', "").strip().lower()
+    q = re.sub(r"\s+", " ", q)
+    return q
+
+
+class SearchCache:
+    """Thin SQLite wrapper. One connection per operation keeps it safe across
+    threads/processes during parallel rollouts."""
+
+    def __init__(self, db_path: Optional[str] = None):
+        self.db_path = db_path or _default_db_path()
+        self._init_schema()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        return conn
+
+    def _init_schema(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS search_cache (
+                    qnorm   TEXT PRIMARY KEY,
+                    query   TEXT NOT NULL,
+                    k       INTEGER,
+                    result  TEXT NOT NULL,
+                    raw_json TEXT,
+                    ts      REAL
+                )
+                """
             )
-            timeout = aiohttp.ClientTimeout(total=30, connect=10)
-            self._session = aiohttp.ClientSession(
-                connector=connector,
-                timeout=timeout,
-                headers={'User-Agent': 'AsyncBingSearchEngine/1.0'}
+
+    def get(self, query: str) -> Optional[str]:
+        qnorm = _normalize_query(query)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT result FROM search_cache WHERE qnorm = ?", (qnorm,)
+            ).fetchone()
+        return row[0] if row else None
+
+    def put(self, query: str, k: int, result: str, raw_json: str = "") -> bool:
+        """Insert if absent; returns True if a new row was stored, False if the
+        normalised query was already present (de-dup, no overwrite)."""
+        qnorm = _normalize_query(query)
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO search_cache (qnorm, query, k, result, raw_json, ts) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (qnorm, query, int(k), result, raw_json, time.time()),
             )
-        return self._session
+            return cur.rowcount > 0
 
-    @property
-    def name(self) -> str:
-        """Tool name identifier."""
-        return "bing_search"
-
-    @property
-    def trigger_tag(self) -> str:
-        """Tag used to trigger this tool."""
-        return "search"
-
-    async def _make_request(self, query: str, timeout: int) -> Dict:
-        """
-        Send async request to Brightdata API.
-
-        Args:
-            query: Search query
-            timeout: Request timeout in seconds
-
-        Returns:
-            API response data as dict
-        """
-        # Determine language settings based on query language
-        with self._lang_id_lock:
-            lang_code, lang_confidence = langid.classify(query)
-        if lang_code == 'zh':
-            mkt, setLang = "zh-CN", "zh"
-        else:
-            mkt, setLang = "en-US", "en"
-        
-        # Prepare URL with query parameters
-        encoded_query = urlencode({
-            "q": query, 
-            "mkt": mkt, 
-            "setLang": setLang
-        })
-        target_url = f"https://www.bing.com/search?{encoded_query}&brd_json=1&cc={self._location}"
-
-        # Prepare headers and payload
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "zone": self._zone,
-            "url": target_url,
-            "format": "raw"
-        }
-
-        # Get session and make async request
-        session = await self._get_session()
-        
-        async with session.post(
-            "https://api.brightdata.com/request",
-            headers=headers,
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=timeout)
-        ) as response:
-            if response.status != 200:
-                text = await response.text()
-                raise Exception(f"HTTP {response.status}: {text}")
-            
-            response_text = await response.text()
-            return json.loads(response_text)
-
-    async def execute(self, query: str, timeout: int = 60) -> str:
-        """
-        Execute Bing search query asynchronously.
-
-        Args:
-            query: Search query string
-            timeout: API request timeout in seconds
-
-        Returns:
-            Formatted search results as string
-        """
-        # Clean query
-        query = query.replace('"', '')
-        
-        # Check cache for existing results
-        with self._cache_lock:
-            if query in self._cache:
-                print(f"Cache hit for query: {query}")
-                return self._cache[query]
-
-        try:
-            # Make async API request
-            data = await self._make_request(query, timeout)
-
-            # Extract search results
-            result = self._extract_and_format_results(data)
-            
-            # Update cache
-            with self._cache_lock:
-                self._cache[query] = result
-            
-            # Save cache asynchronously
-            await self._save_cache_async(query, result)
-                
-            return result
-
-        except asyncio.TimeoutError:
-            error_msg = f"Bing search request timed out after {timeout} seconds"
-            print(error_msg)
-            return f"Search failed: {error_msg}"
-        except Exception as e:
-            error_msg = f"Bing search failed: {str(e)}"
-            print(error_msg)
-            return f"Search failed: {error_msg}"
-    
-    def _extract_and_format_results(self, data: Dict) -> str:
-        """
-        Extract and format search results from API response.
-        
-        Args:
-            data: API response data
-            
-        Returns:
-            Formatted search results as string
-        """
-        # If no organic results, return empty response
-        if 'organic' not in data:
-            data['chunk_content'] = []
-            return self._format_results(data)
-
-        # Extract unique snippets
-        chunk_content_list = []
-        seen_snippets = set()
-        for result in data['organic']:
-            snippet = result.get('description', '').strip()
-            if len(snippet) > 0 and snippet not in seen_snippets:
-                chunk_content_list.append(snippet)
-                seen_snippets.add(snippet)
-
-        data['chunk_content'] = chunk_content_list
-        return self._format_results(data)
-
-    def _format_results(self, results: Dict) -> str:
-        """
-        Format search results into readable text.
-        
-        Args:
-            results: Dictionary containing search results
-            
-        Returns:
-            Formatted string of search results
-        """
-        if not results.get("chunk_content"):
-            return "No search results found."
-
-        formatted = []
-        for idx, snippet in enumerate(results["chunk_content"][:self._max_results], 1):
-            snippet = snippet[:self._result_length]
-            formatted.append(f"Page {idx}: {snippet}")
-        
-        return "\n".join(formatted)
-
-    async def close(self):
-        """Close the HTTP session."""
-        if self._session and not self._session.closed:
-            await self._session.close()
+    def count(self) -> int:
+        with self._connect() as conn:
+            return conn.execute("SELECT COUNT(*) FROM search_cache").fetchone()[0]
 
 
-def bing_search_handler(arguments: dict, context: dict, account=None) -> Dict[str, Any]:
+# ---------------------------------------------------------------------------
+# Serper query + OEA-faithful result parsing
+# ---------------------------------------------------------------------------
+def _parse_results(data: Dict[str, Any], k: int, max_out_len: int = DEFAULT_MAX_OUT_LEN) -> str:
+    """Port of OpenEarthAgent's GoogleSearch _parse_results (answerBox /
+    knowledgeGraph / organic -> '1 - ...\\n\\n2 - ...')."""
+    snippets = []
+
+    answer_box = data.get("answerBox", {}) or {}
+    if answer_box:
+        if answer_box.get("answer"):
+            snippets.append(f"Answer box: {answer_box['answer']}")
+        elif answer_box.get("snippet"):
+            snippets.append(f"Answer box: {answer_box['snippet']}")
+
+    kg = data.get("knowledgeGraph", {}) or {}
+    if kg:
+        desc = f"{kg.get('title', '')} knowledge graph: {kg.get('type', '')}. {kg.get('description', '')}"
+        if kg.get("attributes"):
+            attrs = ", ".join(f"{kk}: {vv}" for kk, vv in kg["attributes"].items())
+            desc += f" ({attrs})"
+        snippets.append(desc)
+
+    for item in (data.get("organic", []) or [])[:k]:
+        content = ""
+        if item.get("title"):
+            content += item["title"] + ": "
+        if item.get("snippet"):
+            content += item["snippet"]
+        if content:
+            snippets.append(content)
+
+    if not snippets:
+        return "No good Google Search result found."
+
+    out = ""
+    for idx, item in enumerate(snippets):
+        out += f"{idx + 1} - {item.strip().replace(chr(10), ' ')}\n\n"
+    return out[:max_out_len]
+
+
+def _serper_request(query: str, api_key: str, timeout: int = 30) -> Dict[str, Any]:
+    headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
+    resp = requests.post(
+        f"{SERPER_ENDPOINT}/search",
+        headers=headers,
+        json={"q": query},
+        timeout=timeout,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Serper API error {resp.status_code}: {resp.text[:300]}")
+    return resp.json()
+
+
+def search_with_cache(
+    query: str,
+    k: int = 10,
+    api_key: Optional[str] = None,
+    db_path: Optional[str] = None,
+    timeout: int = 30,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    """Cache-first Google search. Returns
+    {success, query, results, from_cache, newly_cached, result_count}.
+
+    HIT  -> served from SQLite, no API credit spent.
+    MISS -> live Serper query, parsed, then de-dup inserted into the cache.
     """
-    Bing search handler function for Terrabox plugin system.
-    
-    Args:
-        arguments: Tool arguments containing search parameters
-        context: Execution context (user_id, etc.)
-        account: Optional account information
-        
-    Returns:
-        Dict containing search results or error information
-    """
-    try:
-        # Extract search parameters
-        query = arguments.get("query", "")
-        max_results = int(arguments.get("max_results", 10))
-        result_length = int(arguments.get("result_length", 1000))
-        location = arguments.get("location", "cn")
-        timeout = int(arguments.get("timeout", 60))
-        
-        # Validate required parameters
-        if not query:
+    query = (query or "").strip()
+    if not query:
+        return {"success": False, "error": "Search query is required", "query": query}
+
+    cache = SearchCache(db_path)
+
+    if not force_refresh:
+        cached = cache.get(query)
+        if cached is not None:
             return {
-                "success": False,
-                "error": "Search query is required",
-                "query": query
+                "success": True,
+                "query": query,
+                "results": cached,
+                "text": cached,
+                "from_cache": True,
+                "newly_cached": False,
+                "result_count": cached.count("\n\n"),
             }
-        
-        # Get API key from environment or arguments
-        api_key = arguments.get("api_key") or os.getenv('BRIGHTDATA_API_KEY')
-        if not api_key:
-            return {
-                "success": False,
-                "error": "API key must be provided either as parameter or BRIGHTDATA_API_KEY environment variable",
-                "query": query
-            }
-        
-        # Initialize search engine
-        search_engine = BingSearchEngine(
-            api_key=api_key,
-            max_results=max_results,
-            result_length=result_length,
-            location=location
-        )
-        
-        # Create new event loop for async execution
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            # Execute search
-            search_results = loop.run_until_complete(search_engine.execute(query, timeout))
-            
-            # Process results
-            if search_results and not search_results.startswith("Search failed:"):
-                return {
-                    "success": True,
-                    "query": query,
-                    "results": search_results,
-                    "result_count": len(search_results.split('\n')) if search_results else 0
-                }
-            else:
-                return {
-                    "success": False,
-                    "error": search_results or "Search returned no results",
-                    "query": query
-                }
-                
-        finally:
-            # Cleanup event loop
-            loop.close()
-            # Cleanup search engine session
-            if hasattr(search_engine, '_session') and search_engine._session and not search_engine._session.closed:
-                try:
-                    close_loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(close_loop)
-                    close_loop.run_until_complete(search_engine.close())
-                    close_loop.close()
-                except:
-                    pass  # Best effort cleanup
-                    
-    except Exception as e:
+
+    key = api_key or os.getenv("SERPER_API_KEY")
+    if not key:
         return {
             "success": False,
-            "error": f"Search failed with error: {str(e)}",
-            "query": arguments.get("query", "")
+            "error": "Cache miss and no SERPER_API_KEY available (set env var or pass api_key).",
+            "query": query,
+            "from_cache": False,
         }
+
+    try:
+        data = _serper_request(query, key, timeout=timeout)
+        result_text = _parse_results(data, k)
+        newly = cache.put(query, k, result_text, raw_json=json.dumps(data, ensure_ascii=False))
+        return {
+            "success": True,
+            "query": query,
+            "results": result_text,
+            "text": result_text,
+            "from_cache": False,
+            "newly_cached": newly,
+            "result_count": result_text.count("\n\n"),
+        }
+    except Exception as e:  # surface error text like the other tools
+        return {"success": False, "error": f"Search failed: {e}", "query": query, "from_cache": False}
+
+
+# ---------------------------------------------------------------------------
+# Handler + registration
+# ---------------------------------------------------------------------------
+def bing_search_handler(arguments: dict, context: dict, account=None) -> Dict[str, Any]:
+    """Web search handler (Serper-backed, cache-first)."""
+    query = arguments.get("query", "")
+    # accept both OEA's `k` and the legacy `max_results`
+    k = int(arguments.get("k", arguments.get("max_results", 10)))
+    api_key = arguments.get("api_key")
+    timeout = int(arguments.get("timeout", 30))
+    return search_with_cache(query, k=k, api_key=api_key, timeout=timeout)
 
 
 def setup(registrar):
-    """
-    Setup function for Bing Search toolkit plugin.
-    
-    This function registers the Bing Search toolkit and its tools with the Terrabox plugin system.
-    
-    Args:
-        registrar: The registrar object used to register toolkits and tools
-    """
-    # Register the toolkit
+    """Register the web-search toolkit (Serper-backed GoogleSearch + SQLite cache)."""
     registrar.toolkit(
         name="bing_search",
-        description="Bing search toolkit for web search functionality",
-        version="1.0.0"
+        description="Web search toolkit (Google via Serper API) with a persistent, de-duplicated SQLite cache.",
+        version="2.0.0",
     )
-    
-    # Define the Bing search tool specification
+
     bing_search_spec = ToolSpec(
         slug="bing_search.search",
         name="Bing Search",
-        description="Perform web searches using Bing search engine via Brightdata API",
+        description=(
+            "Search the web for a factual query (e.g. a region's area in km², a "
+            "unit price, an object's function) and return the top result snippets. "
+            "Results are cached, so repeated identical queries are free."
+        ),
         parameters={
             "type": "object",
             "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "The search query string"
-                },
-                "max_results": {
+                "query": {"type": "string", "description": "The search query string."},
+                "k": {
                     "type": "integer",
-                    "description": "Maximum number of search results to return (default: 10)",
-                    "default": 10
-                },
-                "result_length": {
-                    "type": "integer",
-                    "description": "Maximum length of each result snippet (default: 1000)",
-                    "default": 1000
-                },
-                "location": {
-                    "type": "string",
-                    "description": "Country code for search localization (default: cn)",
-                    "default": "cn"
-                },
-                "timeout": {
-                    "type": "integer",
-                    "description": "API request timeout in seconds (default: 60)",
-                    "default": 60
+                    "description": "Number of top organic results to include (default: 10).",
+                    "default": 10,
                 },
                 "api_key": {
                     "type": "string",
-                    "description": "Brightdata API key (optional, can use BRIGHTDATA_API_KEY env var)"
-                }
+                    "description": "Serper API key (optional; defaults to the SERPER_API_KEY env var).",
+                },
             },
-            "required": ["query"]
+            "required": ["query"],
         },
-        requires_connection=True
+        requires_connection=True,
     )
-    
-    # Register the tool with its handler
     registrar.tool(bing_search_spec, bing_search_handler)
