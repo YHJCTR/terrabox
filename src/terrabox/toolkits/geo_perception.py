@@ -524,8 +524,30 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
 
 
 
+_SAM2_MAX_BBOXES = int(os.environ.get("TERRABOX_SAM2_MAX_BBOXES", "60"))
+
+
 def sam2_segment_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
-    """Handler for SAM2 Segmentation (Full Image Box Prompt)."""
+    """SAM2 segmentation, returning the segmented regions' pixel areas.
+
+    OpenEarthAgent's SegmentObjectPixels names a target object (e.g. text='vehicles')
+    and wants the pixels of THAT object. SAM2 itself is class-agnostic full-image
+    segmentation, so when a ``text`` target is given we route to RemoteSAM referring
+    segmentation (text-targeted) — this both segments the right object AND returns a
+    compact positive-pixel summary, instead of dumping every scene segment (which
+    can overflow the agent context). Without ``text``, run full-image SAM2 with the
+    bbox list capped so the observation stays bounded.
+    """
+    text = arguments.get("text") or arguments.get("sentence") or arguments.get("object")
+    if text and str(text).strip():
+        rs_args = dict(arguments)
+        rs_args["task_type"] = "referring"
+        rs_args["sentence"] = str(text).strip()
+        out = remotesam_handler(rs_args, context, account)
+        if isinstance(out, dict) and out.get("status") != "error":
+            out["note"] = f"text-targeted segmentation of '{text}' via RemoteSAM (positive_pixels = object pixel area)"
+        return out
+
     clean_path = _resolve_image_path(arguments)
     service_path, preprocessing = _prepare_perception_image(clean_path, context)
 
@@ -533,12 +555,7 @@ def sam2_segment_handler(arguments: Dict[str, Any], context: Any, account: Any) 
     if result.get("status") == "error":
         return result
 
-    vis_b64 = result.get("visualization")
     count = result.get("count", 0)
-    md_text = f"SAM2 Segmentation Complete. Found {count} regions.\n\n"
-    if vis_b64:
-        md_text += f"![Segmentation Result]({vis_b64})"
-
     bboxes = []
     for feature in result.get("geojson", {}).get("features", []):
         coords_list = feature.get("geometry", {}).get("coordinates", [])
@@ -551,7 +568,18 @@ def sam2_segment_handler(arguments: Dict[str, Any], context: Any, account: Any) 
             bbox = _scale_bbox_to_original([min(xs), min(ys), max(xs), max(ys)], preprocessing)
             bboxes.append({"x1": bbox[0], "y1": bbox[1], "x2": bbox[2], "y2": bbox[3]})
 
-    return {"status": "success", "output": md_text, "bboxes": bboxes, "image_preprocessing": preprocessing}
+    # Bound the observation: a busy scene can yield hundreds of segments which,
+    # dumped verbatim, blow past the agent's context window.
+    n = len(bboxes)
+    md_text = f"SAM2 Segmentation Complete. Found {n} regions.\n\n"
+    truncated = n > _SAM2_MAX_BBOXES
+    out_bboxes = bboxes[:_SAM2_MAX_BBOXES]
+    if truncated:
+        md_text += (f"(showing first {_SAM2_MAX_BBOXES} of {n} region bboxes; pass a `text` "
+                    f"target for object-specific segmentation)")
+    return {"status": "success", "output": md_text, "count": n,
+            "bboxes": out_bboxes, "num_regions": n, "truncated": truncated,
+            "image_preprocessing": preprocessing}
         
         
 # --- Wrappers ---
@@ -1527,7 +1555,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_perception.sam2_segment",
             name="SAM2 Segmentation",
-            description="Segment objects / the full scene in a satellite image with SAM2 and return their pixel regions. Returns {bboxes:[{x1,y1,x2,y2}] of segments, output, image_preprocessing}. An optional 'text' hint names the object of interest.",
+            description="Segment objects in a satellite image and return their pixel regions/areas. Provide a 'text' target (e.g. 'vehicles') to segment just that object class (returns its positive-pixel area, ideal for 'sum the pixel areas of X'); omit 'text' for class-agnostic full-image segmentation. Returns {output, count, bboxes:[{x1,y1,x2,y2}]} (and a positive_pixels summary when text-targeted).",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1535,7 +1563,7 @@ def setup(registrar):
                         "type": "string",
                         "description": "Image to segment. Frontend uploads the image; backend resolves the local file path."
                     },
-                    "text": {"type": "string", "description": "Optional object name to focus the segmentation on (e.g., 'vehicle')."},
+                    "text": {"type": "string", "description": "Object class to segment (e.g., 'vehicles'). Strongly recommended — gives object-specific pixels."},
                     "flag": {"type": "boolean", "description": "Optional mode flag."}
                 },
                 "required": ["image"]

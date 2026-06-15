@@ -627,9 +627,14 @@ def cmd_rollout(args):
         excluded = set()
         if args.skip_mock:
             excluded |= MOCK_TOOLS
-        if args.skip_bing or args.skip_online:
+        # NOTE: --skip-online / --only-online only PARTITION TASKS (see
+        # should_skip_task); they do NOT strip tools from the catalog, so the
+        # agent always sees the full dataset tool list (matches the SFT catalog
+        # for a fair base-vs-SFT comparison). Use --skip-bing/--skip-osm to also
+        # hide those tools from the catalog.
+        if args.skip_bing:
             excluded |= API_KEY_TOOLS
-        if args.skip_osm or args.skip_online:
+        if args.skip_osm:
             excluded |= {s for s in allowed_slugs_set if s.startswith(OSM_TOOLS_PREFIX)}
         if args.skip_vlm:
             excluded |= VLM_TOOLS
