@@ -149,9 +149,20 @@ def run_sequential_react_loop(
                 f"executing only the first one this turn."
             )
         if first_call.get("name") not in tool_names:
-            err = f"ERROR: selected unavailable tool {first_call.get('name')}"
-            messages.append(AIMessage(content=err))
-            return messages, err
+            # Align with OEA: a bad/misspelled tool name (e.g. missing the
+            # "osm_gis." prefix) must NOT terminate the whole task. Feed back an
+            # error observation listing the valid tools and let the model correct
+            # itself next turn (OEA returns "There is no tool named X" with
+            # error_code=1 and continues; only Terminate / max_steps end the loop).
+            err = (f"There is no tool named '{first_call.get('name')}'. "
+                   f"Use the EXACT tool name from this list: {sorted(tool_names)}.")
+            if sft_mode:
+                messages.append(AIMessage(content=ai_msg.content))
+                messages.append(HumanMessage(content=f"OBSERVATION:\n{err}"))
+            else:
+                messages.append(AIMessage(content=ai_msg.content, tool_calls=[first_call]))
+                messages.append(ToolMessage(content=err, tool_call_id=first_call["id"]))
+            continue
 
         slug = first_call["name"].replace("__", ".")
         args = first_call.get("args", {}) or {}

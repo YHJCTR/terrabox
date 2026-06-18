@@ -92,6 +92,13 @@ class PrincipleBank:
                     merged[text]["score"] += float(e.get("score", 1.0))
                     merged[text]["support"] += int(e.get("support", 1))
                     merged[text]["source_tasks"].extend(e.get("source_tasks", []))
+                seen_sources = set()
+                unique_sources = []
+                for source_task in merged[text]["source_tasks"]:
+                    if source_task and source_task not in seen_sources:
+                        seen_sources.add(source_task)
+                        unique_sources.append(source_task)
+                merged[text]["source_tasks"] = unique_sources
             out = list(merged.values())
             out.sort(key=lambda x: (x.get("support", 0), x.get("score", 0.0)), reverse=True)
             return out

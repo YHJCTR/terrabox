@@ -37,6 +37,9 @@ def build_rollout_command(
     max_iterations: int = 15,
     resume: bool = True,
     exclude_tools: str | None = None,
+    only_online: bool = False,
+    skip_online: bool = False,
+    gpu_class: str = "any",
 ) -> list[str]:
     cmd = [
         sys.executable,
@@ -55,9 +58,18 @@ def build_rollout_command(
         "--max-iterations",
         str(max_iterations),
         "--use-docker",
+        # oea_full runs the full 23-OE-tool set: do NOT skip osm/bing/vlm/changeos
+        # (the script defaults skip them on). Mirrors the ReAct oe_full experiment.
+        "--no-skip-mock", "--no-skip-bing", "--no-skip-osm", "--no-skip-vlm", "--no-skip-changeos",
     ]
     if resume:
         cmd.append("--resume")
+    if only_online:
+        cmd.append("--only-online")
+    if skip_online:
+        cmd.append("--skip-online")
+    if gpu_class and gpu_class != "any":
+        cmd.extend(["--gpu-class", gpu_class])
     if start_index is not None:
         cmd.extend(["--start-index", str(start_index)])
     if end_index is not None:
@@ -126,6 +138,9 @@ def cmd_rollout(args: argparse.Namespace) -> None:
         max_iterations=args.max_iterations,
         resume=args.resume,
         exclude_tools=getattr(args, "exclude_tools", None),
+        only_online=getattr(args, "only_online", False),
+        skip_online=getattr(args, "skip_online", False),
+        gpu_class=getattr(args, "gpu_class", "any"),
     )
     log_path = exp_dir / "logs" / f"{args.phase}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -181,6 +196,9 @@ def _rollout_namespace(base: argparse.Namespace, *, phase: str, start_index: int
         limit=limit,
         max_iterations=base.max_iterations,
         resume=base.resume,
+        only_online=getattr(base, "only_online", False),
+        skip_online=getattr(base, "skip_online", False),
+        gpu_class=getattr(base, "gpu_class", "any"),
     )
 
 
@@ -320,6 +338,13 @@ def main() -> None:
     p_rollout.add_argument("--end-index", type=int)
     p_rollout.add_argument("--limit", type=int)
     p_rollout.add_argument("--max-iterations", type=int, default=15)
+    # online/GPU partitioning (passed through to run_trajectory_experiment.py):
+    p_rollout.add_argument("--only-online", action="store_true", default=False,
+                           help="只跑联网任务(osm_gis/bing);配合本地转发窗口")
+    p_rollout.add_argument("--skip-online", action="store_true", default=False,
+                           help="只跑离线任务(跳过 osm_gis/bing)")
+    p_rollout.add_argument("--gpu-class", choices=["any", "gpu", "nogpu"], default="any",
+                           help="按是否需 GPU 感知服务再分:gpu=单卡跑感知任务;nogpu=可多卡并行")
     p_rollout.add_argument("--resume", action="store_true", default=True)
     p_rollout.add_argument("--no-resume", dest="resume", action="store_false")
     p_rollout.set_defaults(func=cmd_rollout)
@@ -349,6 +374,9 @@ def main() -> None:
     p_pipe.add_argument("--vlm-max-model-len", type=int, default=None)
     p_pipe.add_argument("--exclude-tools", default=None)
     p_pipe.add_argument("--max-iterations", type=int, default=15)
+    p_pipe.add_argument("--only-online", action="store_true", default=False)
+    p_pipe.add_argument("--skip-online", action="store_true", default=False)
+    p_pipe.add_argument("--gpu-class", choices=["any", "gpu", "nogpu"], default="any")
     p_pipe.add_argument("--resume", action="store_true", default=True)
     p_pipe.add_argument("--no-resume", dest="resume", action="store_false")
     p_pipe.set_defaults(func=cmd_pipeline)

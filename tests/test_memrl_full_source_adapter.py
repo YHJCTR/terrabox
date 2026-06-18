@@ -257,3 +257,135 @@ def test_source_runner_rollout_command_forwards_runtime_controls():
     assert "--resume" not in cmd
     assert "--no-restrict-tools" in cmd
     assert "--no-skip-osm" in cmd
+
+
+def test_external_source_service_retrieve_uses_memrl_retrieve_query(tmp_path):
+    from terrabox.evolution.memrl_full.source_memory_service import ExternalMemRLSourceService
+
+    calls = []
+
+    class FakeExternalService:
+        def retrieve_query(self, task_description, k=5, threshold=0.0):
+            calls.append((task_description, k, threshold))
+            return {
+                "selected": [
+                    {
+                        "memory_id": "mem-1",
+                        "content": "Task: measure baseball field distance\nUse remotesam then compute distance.",
+                        "similarity": 0.91,
+                        "q_estimate": 0.7,
+                        "metadata": {"tool_sequence": ["geo_perception.remotesam"]},
+                    }
+                ],
+                "candidates": [],
+                "actions": ["mem-1"],
+                "simmax": 0.91,
+            }
+
+    service = object.__new__(ExternalMemRLSourceService)
+    service.store_dir = tmp_path / "store"
+    service.backend = "external_memrl"
+    service._service = FakeExternalService()
+
+    retrieval = service.retrieve_for_prompt("How far apart are the baseball fields?", top_k=3, threshold=0.2)
+
+    assert calls == [("How far apart are the baseball fields?", 3, 0.2)]
+    assert retrieval["retrieved_ids"] == ["mem-1"]
+    assert retrieval["prompt"]
+    assert "Use remotesam then compute distance" in retrieval["prompt"]
+
+
+def test_external_closed_loop_updates_then_adds_rollout_memory(tmp_path, monkeypatch):
+    from terrabox.evolution.memrl_full import source_runner
+
+    events = []
+
+    class FakeService:
+        backend = "external_memrl"
+
+        def retrieve_for_prompt(self, query, *, top_k=5, threshold=0.0):
+            events.append(("retrieve", query, top_k, threshold))
+            return {
+                "prompt": "## Relevant MemRL Source Memories\nprior distance solution",
+                "retrieved_ids": ["mem-1"],
+                "retrieved_queries": [("previous distance task", 0.8)],
+                "selected": [{"memory_id": "mem-1"}],
+            }
+
+        def update_values(self, successes, retrieved_ids_list, **kwargs):
+            events.append(("update", list(successes), list(retrieved_ids_list)))
+            return {"mem-1": 0.9}
+
+        def add_records_with_retrieval(self, records, retrieved_queries_list=None, retrieved_ids_list=None):
+            events.append(
+                (
+                    "add",
+                    [r.task_id for r in records],
+                    retrieved_queries_list,
+                    retrieved_ids_list,
+                )
+            )
+            return {"backend": "external_memrl", "added": len(records)}
+
+        def save_snapshot(self, snapshot_id):
+            events.append(("snapshot", snapshot_id))
+            return {"backend": "external_memrl", "checkpoint_id": snapshot_id}
+
+        def manifest(self, added=0):
+            return {"backend": "external_memrl", "added": added, "count": 1}
+
+    monkeypatch.setattr(source_runner, "_build_external_rollout_runtime", lambda args: (FakeService(), {}, None, None))
+    monkeypatch.setattr(source_runner, "run_single_task", lambda **kwargs: {
+        "task_id": kwargs["task"]["task_id"],
+        "source": "openearth",
+        "question": kwargs["task"]["question"],
+        "expected_tools": ["geo_perception.remotesam"],
+        "tool_calls": ["geo_perception.remotesam"],
+        "tool_calls_deduped": ["geo_perception.remotesam"],
+        "metrics": {"f1": 1.0, "precision": 1.0, "recall": 1.0, "exact_match": True},
+        "status": "completed",
+        "success": True,
+        "real_success": True,
+        "conversation_history": [{"role": "assistant", "content": "done"}],
+    })
+
+    task_file = tmp_path / "tasks.json"
+    task_file.write_text(
+        json.dumps(
+            [
+                {
+                    "task_id": "task-1",
+                    "source": "openearth",
+                    "question": "Measure the distance between two fields.",
+                    "expected_tools": ["geo_perception.remotesam"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    args = source_runner.build_parser().parse_args(
+        [
+            "train-external",
+            "--task-file",
+            str(task_file),
+            "--store-dir",
+            str(tmp_path / "store"),
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--limit",
+            "1",
+            "--backend",
+            "external_memrl",
+            "--snapshot-id",
+            "trained",
+        ]
+    )
+    args.func(args)
+
+    assert events[0] == ("retrieve", "Measure the distance between two fields.", 5, 0.0)
+    assert events[1] == ("update", [True], [["mem-1"]])
+    assert events[2] == ("add", ["task-1"], [[("previous distance task", 0.8)]], [["mem-1"]])
+    assert events[3] == ("snapshot", "trained")
+    summary = json.loads((tmp_path / "store" / "results" / "memrl_full_external_train_summary.json").read_text())
+    assert summary["rollout_summary"]["avg_f1"] == 1.0

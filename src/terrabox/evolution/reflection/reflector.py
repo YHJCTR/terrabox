@@ -65,16 +65,53 @@ _REFLECT_SYSTEM = (
     "task. You do NOT know the correct answer or the correct tools. Based only on "
     "what you did and the feedback you observed, write 1-2 short, concrete lessons "
     "to do similar tasks better next time — focus on which tool to choose, avoiding "
-    "the errors you hit, and not repeating useless steps. Be specific and actionable. "
-    "Output only the lesson text (no preamble)."
+    "the errors you hit, and not repeating useless steps. A list of the tools that "
+    "were available to you (with descriptions) is provided so you can reconsider "
+    "whether your chosen tools were the best fit; if a different available tool seems "
+    "more appropriate, name it and say why. Do NOT assume you know the correct "
+    "answer — frame this as reconsidering, not asserting. "
+    "Be specific and actionable. Output only the lesson text (no preamble)."
 )
+
+# Tool catalog injected into the reflection prompt. This is NOT gold leakage: the
+# catalog (which tools exist + what they do) is the SAME information the policy
+# already sees at eval time; it only lets the reflector reason about tool SELECTION
+# instead of writing generic "be careful" lessons. Gold (which tools are correct
+# for THIS task) is still never shown. Source defaults to the eval-aligned OE-23
+# catalog; override via TERRABOX_REFLECT_TOOL_CATALOG.
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+_DEFAULT_CATALOG = _REPO_ROOT / "data" / "oea_full_sft" / "tools_catalog.json"
+_CATALOG_TEXT_CACHE: str | None = None
+
+
+def _tool_catalog_text() -> str:
+    global _CATALOG_TEXT_CACHE
+    if _CATALOG_TEXT_CACHE is not None:
+        return _CATALOG_TEXT_CACHE
+    import os
+    path = Path(os.environ.get("TERRABOX_REFLECT_TOOL_CATALOG", "") or _DEFAULT_CATALOG)
+    lines: list[str] = []
+    try:
+        entries = json.loads(path.read_text(encoding="utf-8"))
+        for e in entries:
+            slug = e.get("slug") or e.get("function_name") or ""
+            desc = " ".join(str(e.get("description", "")).split())[:200]
+            if slug:
+                lines.append(f"- {slug}: {desc}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("reflection tool catalog unavailable (%s); reflecting without it", exc)
+    _CATALOG_TEXT_CACHE = "\n".join(lines)
+    return _CATALOG_TEXT_CACHE
 
 
 def _llm_reflection(row: dict[str, Any], issues: list[str], llm) -> str:
     called = list(row.get("tools_called") or row.get("tool_calls") or [])
     final = str(row.get("final_answer") or row.get("final_answer_full") or "")[:400]
+    catalog = _tool_catalog_text()
+    catalog_block = f"Tools that were available to you (with descriptions):\n{catalog}\n\n" if catalog else ""
     prompt = (
         f"Task:\n{row.get('question') or row.get('query') or ''}\n\n"
+        f"{catalog_block}"
         f"Tools you called (in order): {called or 'none'}\n"
         f"Problems you observed: {issues or 'none observed'}\n"
         f"Your final answer: {final or '(none produced)'}\n\n"

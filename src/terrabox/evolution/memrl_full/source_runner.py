@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ..ReAct.runner import build_rollout_env
+from .trajectory_formatter import format_real_trajectory
 from .source_adapter import (
     MemRLSourceRecord,
     load_sft_as_memrl_records,
@@ -25,6 +26,27 @@ DEFAULT_SFT = "data/fixdata_decollapse/sft_train_strict.jsonl"
 DEFAULT_TASK_FILE = "data/merged/merged_train_tasks.json"
 DEFAULT_STORE = "evolution_store/memrl_full_source"
 DEFAULT_PYTHON = "/home/yuhongjie/miniconda3/envs/unsloth/bin/python"
+REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
+try:  # Imported lazily enough for unit tests, but exposed for monkeypatching.
+    from scripts.run_trajectory_experiment import (
+        build_llm,
+        canonical_slug,
+        cleanup_gpu_memory,
+        load_tasks_from_file,
+        run_single_task,
+        setup_agent,
+        should_skip_task,
+    )
+except Exception:  # pragma: no cover - real runs import from repo root
+    build_llm = None
+    canonical_slug = None
+    cleanup_gpu_memory = None
+    load_tasks_from_file = None
+    run_single_task = None
+    setup_agent = None
+    should_skip_task = None
 
 
 def _write_json(path: Path, data: dict) -> None:
@@ -69,6 +91,12 @@ def _experiment_dir(args: argparse.Namespace) -> Path:
     return root / args.experiment / args.mode
 
 
+def _output_dir(args: argparse.Namespace) -> Path:
+    if getattr(args, "output_dir", ""):
+        return Path(args.output_dir)
+    return REPO_ROOT / "tmp" / "trajectories" / args.experiment / args.mode
+
+
 def _load_rollout_rows(exp_dir: Path) -> list[dict[str, Any]]:
     trajectory_rows = _iter_jsonl(exp_dir / "trajectories_full.jsonl")
     if trajectory_rows:
@@ -87,6 +115,34 @@ def _load_rollout_rows(exp_dir: Path) -> list[dict[str, Any]]:
         if isinstance(row, dict):
             rows.append(row)
     return rows
+
+
+def _result_to_memrl_record(row: dict[str, Any]) -> MemRLSourceRecord:
+    metrics = row.get("metrics") or {}
+    success = bool(row.get("real_success", row.get("success", False)))
+    try:
+        reward = 1.0 if success else max(0.0, min(1.0, float(metrics.get("f1", 0.0) or 0.0)))
+    except (TypeError, ValueError):
+        reward = 1.0 if success else 0.0
+    source = str(row.get("source") or "unknown")
+    return MemRLSourceRecord(
+        task_id=str(row.get("task_id") or row.get("id") or "unknown"),
+        task_description=str(row.get("question") or row.get("query") or ""),
+        trajectory=format_real_trajectory(row),
+        success=success,
+        reward=reward,
+        metadata={
+            "source_benchmark": f"terrabox_{source}_rollout",
+            "source": source,
+            "task_type": row.get("task_type", "unknown"),
+            "expected_tools": row.get("expected_tools", []),
+            "tool_sequence": row.get("tool_sequence") or row.get("tools_called") or row.get("tool_calls") or [],
+            "status": row.get("status", "unknown"),
+            "metrics": metrics,
+            "tokens": row.get("tokens", {}),
+            "origin": "external_train_rollout",
+        },
+    )
 
 
 def _summarize_rollout_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -146,6 +202,124 @@ def _summarize_rollout_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "top_tools": tools.most_common(20),
         "total_tokens": dict(token_totals),
     }
+
+
+def _select_tasks(args: argparse.Namespace) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
+    if load_tasks_from_file is None or should_skip_task is None:
+        raise RuntimeError("scripts.run_trajectory_experiment helpers are not importable")
+    all_tasks = load_tasks_from_file(args.task_file)
+    skip_stats: Counter = Counter()
+    tasks = []
+    for task in all_tasks:
+        reason = should_skip_task(
+            task,
+            skip_mock=not getattr(args, "no_skip_mock", False),
+            skip_bing=not getattr(args, "no_skip_bing", False),
+            skip_osm=not getattr(args, "no_skip_osm", False),
+            skip_vlm=not getattr(args, "no_skip_vlm", False),
+            skip_changeos=not getattr(args, "no_skip_changeos", False),
+        )
+        if reason:
+            skip_stats[reason] += 1
+        else:
+            tasks.append(task)
+    start = getattr(args, "start_index", None) or 0
+    end = getattr(args, "end_index", None)
+    end = min(end if end is not None else len(tasks), len(tasks))
+    if getattr(args, "limit", None) is not None:
+        end = min(start + args.limit, end)
+    return all_tasks, tasks[start:end], dict(skip_stats)
+
+
+def _allowed_slugs(args: argparse.Namespace, all_tasks: list[dict[str, Any]], registry: Any) -> list[str] | None:
+    if getattr(args, "no_restrict_tools", False) or registry is None or canonical_slug is None:
+        return None
+    all_expected = set()
+    for task in all_tasks:
+        all_expected.update(canonical_slug(t) for t in task.get("expected_tools", []))
+    registered = {spec.slug for spec in registry.list_tools()}
+    allowed = all_expected & registered
+    if not getattr(args, "no_skip_osm", False):
+        allowed -= {slug for slug in allowed if slug.startswith("osm_gis.")}
+    if not getattr(args, "no_skip_bing", False):
+        allowed -= {"bing_search.search"}
+    if not getattr(args, "no_skip_vlm", False):
+        allowed -= {"geo_perception.vlm_analyze"}
+    if not getattr(args, "no_skip_changeos", False):
+        allowed -= {slug for slug in allowed if "change_os" in slug}
+    if not getattr(args, "no_skip_mock", False):
+        allowed -= {
+            "geo_perception.mscn_classify",
+            "geo_perception.sm3det_detect",
+            "geo_perception.change_os_detect",
+        }
+    return sorted(allowed)
+
+
+def _write_external_outputs(args: argparse.Namespace, rows: list[dict[str, Any]], summary: dict[str, Any]) -> Path:
+    out_dir = _output_dir(args)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    results_dir = out_dir / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    for row in rows:
+        task_id = str(row.get("task_id") or row.get("id") or f"task_{len(rows)}")
+        (results_dir / f"{task_id}.json").write_text(
+            json.dumps(row, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    with (out_dir / "trajectories.jsonl").open("w", encoding="utf-8") as f:
+        for row in rows:
+            compact = {
+                "task_id": row.get("task_id"),
+                "source": row.get("source", "unknown"),
+                "query": row.get("question", ""),
+                "tool_sequence": row.get("tool_calls_deduped", []),
+                "tools_called": row.get("tool_calls", []),
+                "expected_tools": row.get("expected_tools", []),
+                "f1": row.get("metrics", {}).get("f1", 0.0),
+                "reward": 1.0 if row.get("success") else 0.0,
+                "task_type": row.get("task_type", "general"),
+                "status": row.get("status", "unknown"),
+                "real_success": row.get("real_success", row.get("success", False)),
+                "memrl_retrieval": row.get("memrl_retrieval", {}),
+            }
+            f.write(json.dumps(compact, ensure_ascii=False) + "\n")
+    with (out_dir / "trajectories_full.jsonl").open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    (out_dir / "report.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return out_dir
+
+
+def _build_external_rollout_runtime(args: argparse.Namespace) -> tuple[object, object, object, object, object | None]:
+    if setup_agent is None or build_llm is None:
+        raise RuntimeError("scripts.run_trajectory_experiment helpers are not importable")
+    env = build_rollout_env(args.agent_gpu, args.tool_gpu, getattr(args, "vlm_gpus", None))
+    os.environ.update(env)
+    os.environ.setdefault("TERRABOX_USE_DOCKER", "true")
+    os.environ.setdefault("TERRABOX_TOOL_SERVICE_SCOPE", "call")
+    os.environ.setdefault("TERRABOX_TOOL_MAX_GPUS", "1")
+    if getattr(args, "instructsam_backend", None):
+        os.environ["TERRABOX_INSTRUCTSAM_BACKEND"] = args.instructsam_backend
+    service = create_memrl_source_service(
+        store_dir=args.store_dir,
+        backend=args.backend,
+        memrl_root=args.memrl_root,
+    )
+    load_snapshot_id = getattr(args, "load_snapshot_id", "")
+    if load_snapshot_id and hasattr(service, "load_snapshot"):
+        service.load_snapshot(load_snapshot_id)
+    config, registry = setup_agent(
+        port=args.port,
+        use_docker=True,
+        gpu_devices=os.environ.get("AGENT_LLM_GPU_DEVICES") or str(args.agent_gpu),
+        max_iterations=args.max_iterations,
+    )
+    llm, tracer = build_llm(config)
+    return service, config, llm, tracer, registry
 
 
 def _collect_records(args: argparse.Namespace) -> list[MemRLSourceRecord]:
@@ -353,6 +527,124 @@ def cmd_online_source(args: argparse.Namespace) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def cmd_external_loop(args: argparse.Namespace) -> None:
+    """Run MemRL's retrieve → rollout → feedback loop directly in this process."""
+    train = args.command == "train-external"
+    runtime = _build_external_rollout_runtime(args)
+    service, config, llm, tracer = runtime[:4]
+    registry = runtime[4] if len(runtime) > 4 else None
+    all_tasks, tasks, skip_stats = _select_tasks(args)
+    allowed_slugs = _allowed_slugs(args, all_tasks, registry)
+    rows: list[dict[str, Any]] = []
+    retrieved_ids_list: list[list[str]] = []
+
+    out_dir = _output_dir(args)
+    results_dir = out_dir / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    for index, task in enumerate(tasks, start=1):
+        task_id = str(task.get("task_id") or task.get("id") or f"task_{index}")
+        result_path = results_dir / f"{task_id}.json"
+        if getattr(args, "resume", True) and result_path.exists() and result_path.stat().st_size > 0:
+            row = json.loads(result_path.read_text(encoding="utf-8"))
+            rows.append(row)
+            continue
+
+        retrieval = service.retrieve_for_prompt(
+            str(task.get("question", "")),
+            top_k=args.top_k,
+            threshold=args.retrieve_threshold,
+        )
+        if run_single_task is None:
+            raise RuntimeError("scripts.run_trajectory_experiment.run_single_task is not importable")
+        try:
+            row = run_single_task(
+                task=task,
+                mode=args.mode,
+                config=config,
+                llm=llm,
+                tracer=tracer,
+                allowed_slugs=allowed_slugs,
+                evolution_prompt=str(retrieval.get("prompt", "")),
+            )
+            if cleanup_gpu_memory is not None:
+                cleanup_gpu_memory()
+        except Exception as exc:
+            if cleanup_gpu_memory is not None:
+                cleanup_gpu_memory()
+            row = {
+                "task_id": task_id,
+                "source": task.get("source", "unknown"),
+                "question": task.get("question", ""),
+                "expected_tools": task.get("expected_tools", []),
+                "tool_calls": [],
+                "tool_calls_deduped": [],
+                "metrics": {"precision": 0, "recall": 0, "f1": 0, "exact_match": False},
+                "status": "exception",
+                "success": False,
+                "real_success": False,
+                "error": str(exc),
+                "conversation_history": [],
+            }
+
+        compact_retrieval = {
+            "backend": retrieval.get("backend", getattr(service, "backend", "unknown")),
+            "retrieved_ids": retrieval.get("retrieved_ids", []),
+            "retrieved_queries": retrieval.get("retrieved_queries", []),
+            "selected_count": len(retrieval.get("selected", []) or []),
+        }
+        row["memrl_retrieval"] = compact_retrieval
+        rows.append(row)
+        result_path.write_text(json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        retrieved_ids = [str(x) for x in retrieval.get("retrieved_ids", []) if x]
+        retrieved_queries = retrieval.get("retrieved_queries", []) or []
+        retrieved_ids_list.append(retrieved_ids)
+        record = _result_to_memrl_record(row)
+        record.metadata["retrieved_memory_ids"] = retrieved_ids
+
+        if train:
+            service.update_values([record.success], [retrieved_ids])
+            if hasattr(service, "add_records_with_retrieval"):
+                service.add_records_with_retrieval(
+                    [record],
+                    retrieved_queries_list=[retrieved_queries],
+                    retrieved_ids_list=[retrieved_ids],
+                )
+            else:
+                service.add_records([record])
+
+    snapshot = None
+    if train:
+        snapshot = service.save_snapshot(args.snapshot_id)
+
+    rollout_summary = _summarize_rollout_rows(rows)
+    summary = {
+        "mode": args.command,
+        "experiment": args.experiment,
+        "task_file": args.task_file,
+        "output_dir": str(out_dir),
+        "num_tasks": len(rows),
+        "skip_stats": skip_stats,
+        "train_updates": bool(train),
+        "retrieval": {
+            "top_k": args.top_k,
+            "threshold": args.retrieve_threshold,
+            "zero_retrieved": sum(1 for ids in retrieved_ids_list if not ids),
+            "avg_retrieved": (
+                sum(len(ids) for ids in retrieved_ids_list) / len(retrieved_ids_list)
+                if retrieved_ids_list else 0.0
+            ),
+        },
+        "rollout_summary": rollout_summary,
+        "memory": service.manifest(added=0),
+        "snapshot": snapshot,
+    }
+    _write_external_outputs(args, rows, summary)
+    _write_json(Path(args.store_dir) / "results" / f"{args.experiment}_summary.json", summary)
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
 def cmd_stats(args: argparse.Namespace) -> None:
     summary = _write_run_summary(args, mode="stats")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -458,6 +750,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_online.add_argument("--include-empty-failures", action="store_true")
     p_online.add_argument("--snapshot-id", default="online")
     p_online.set_defaults(func=cmd_online_source)
+
+    def add_external_loop_args(p: argparse.ArgumentParser) -> None:
+        add_rollout_args(p)
+        p.add_argument("--backend", default="external_memrl", choices=["external", "external_memrl", "lite"])
+        p.add_argument("--memrl-root", default="/data1/yuhongjie2/MemRL")
+        p.add_argument("--top-k", type=int, default=5)
+        p.add_argument("--retrieve-threshold", type=float, default=0.0)
+        p.add_argument("--snapshot-id", default="trained")
+        p.add_argument(
+            "--load-snapshot-id",
+            default="",
+            help="Load an existing external MemRL snapshot before rollout, e.g. final or trained.",
+        )
+
+    p_train_ext = sub.add_parser("train-external", help="run MemRL external retrieve/update/add loop on train tasks")
+    add_external_loop_args(p_train_ext)
+    p_train_ext.set_defaults(func=cmd_external_loop, experiment="memrl_full_external_train")
+
+    p_eval_ext = sub.add_parser("eval-external", help="run MemRL external retrieval on eval tasks without updates")
+    add_external_loop_args(p_eval_ext)
+    p_eval_ext.set_defaults(func=cmd_external_loop, experiment="memrl_full_external_eval")
 
     p_stats = sub.add_parser("stats", help="summarize rollout report")
     p_stats.add_argument("--store-dir", default=DEFAULT_STORE)

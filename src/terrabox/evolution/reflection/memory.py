@@ -85,7 +85,10 @@ class ReflectionMemoryBank:
             union = len(q_tokens | e_tokens) or 1
             jaccard = overlap / union
             quality = 0.1 * float(entry.f1)
-            failure_bonus = 0.05 if entry.kind in {"failure", "recovery"} else 0.0
+            # Prioritise reflections written off a problematic attempt. Current
+            # reflector emits kind="problematic"; "failure"/"recovery" kept for
+            # backward-compat with older memory banks.
+            failure_bonus = 0.05 if entry.kind in {"problematic", "failure", "recovery"} else 0.0
             score = jaccard + quality + failure_bonus
             if score > 0 or overlap > 0:
                 scored.append((score, -index, entry))

@@ -1077,18 +1077,59 @@ def _aoi_bounds_lonlat(gpkg: str):
     return [float(v) for v in gdf.total_bounds]
 
 
+# STAC index fetch: resolution cap + persistent disk cache. Both are internal —
+# the tool signature and return structure are unchanged. A capped read pulls the
+# AOI window decimated to <= _STAC_MAX_DIM px (via COG overviews, far fewer bytes),
+# which is plenty for the class-% statistics these tools report and avoids the
+# 120 s timeout when imagery is fetched over a forwarded proxy. The cache stores the
+# computed index array + georeferencing keyed by AOI+index+year+month, so repeated
+# experiments skip the download entirely (a cache hit is byte-identical to a fetch).
+_STAC_MAX_DIM = int(os.environ.get("TERRABOX_STAC_MAX_DIM", "512"))
+
+
+def _stac_cache_dir() -> str:
+    d = os.environ.get("TERRABOX_STAC_CACHE_DIR", "").strip() or os.path.join(
+        os.path.expanduser("~"), ".verl_cache", "stac_index_cache")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _stac_cache_key(minx, miny, maxx, maxy, index_type, year, month) -> str:
+    import hashlib
+    raw = (f"{round(minx, 4)},{round(miny, 4)},{round(maxx, 4)},{round(maxy, 4)}"
+           f"|{index_type}|{year}|{month}|dim{_STAC_MAX_DIM}")
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
 def _stac_fetch_index(index_type: str, year: int, month, gpkg: str):
     """Fetch Sentinel-2 L2A from the free earth-search STAC for the gpkg AOI and the
-    given year/month, compute the spectral index, and return (idx, geotransform, crs_wkt).
-    Picks the least-cloudy scene and reads only the AOI window (light, no compositing)."""
+    given year/month, compute the spectral index, and return
+    (idx, geotransform, crs_wkt, cloud_cover). Picks the least-cloudy scene and reads
+    only the AOI window, decimated to <= _STAC_MAX_DIM px. Results are cached on disk."""
     import calendar
     import numpy as np
+
+    minx, miny, maxx, maxy = _aoi_bounds_lonlat(gpkg)
+
+    # --- disk cache (a hit returns the identical array/transform, no network) ---
+    cdir = _stac_cache_dir()
+    key = _stac_cache_key(minx, miny, maxx, maxy, index_type, year, month)
+    npy_path = os.path.join(cdir, key + ".npy")
+    meta_path = os.path.join(cdir, key + ".json")
+    if os.path.exists(npy_path) and os.path.exists(meta_path):
+        try:
+            idx = np.load(npy_path)
+            meta = json.load(open(meta_path))
+            return idx, tuple(meta["geotransform"]), meta.get("crs_wkt"), meta.get("cloud")
+        except Exception:
+            pass  # corrupt cache entry -> refetch below
+
     import rasterio
+    from rasterio.enums import Resampling
     from rasterio.warp import transform_bounds
     from rasterio.windows import from_bounds
     from pystac_client import Client
 
-    minx, miny, maxx, maxy = _aoi_bounds_lonlat(gpkg)
     if month:
         start = f"{year}-{int(month):02d}-01"
         end = f"{year}-{int(month):02d}-{calendar.monthrange(int(year), int(month))[1]:02d}"
@@ -1107,16 +1148,41 @@ def _stac_fetch_index(index_type: str, year: int, month, gpkg: str):
 
     def _read(href, out_shape=None):
         with rasterio.open(href) as ds:
-            b = transform_bounds("EPSG:4326", ds.crs, minx, miny, maxx, maxy)
-            win = from_bounds(*b, transform=ds.transform)
-            arr = ds.read(1, window=win, out_shape=out_shape).astype("float32")
-            return arr, ds.window_transform(win), ds.crs
+            bnds = transform_bounds("EPSG:4326", ds.crs, minx, miny, maxx, maxy)
+            win = from_bounds(*bnds, transform=ds.transform)
+            nat_tr = ds.window_transform(win)
+            if out_shape is None:
+                h = max(1, int(round(win.height)))
+                w = max(1, int(round(win.width)))
+                if max(h, w) > _STAC_MAX_DIM:
+                    s = _STAC_MAX_DIM / max(h, w)
+                    out_shape = (max(1, int(round(h * s))), max(1, int(round(w * s))))
+                else:
+                    out_shape = (h, w)
+            arr = ds.read(1, window=win, out_shape=out_shape,
+                          resampling=Resampling.average).astype("float32")
+            # scale the native window transform to the decimated output resolution
+            sx = win.width / out_shape[1]
+            sy = win.height / out_shape[0]
+            out_tr = nat_tr * rasterio.Affine.scale(sx, sy)
+            return arr, out_tr, ds.crs
 
     a, wt, crs = _read(item.assets[a_key].href)
     b, _, _ = _read(item.assets[b_key].href, out_shape=a.shape)
     idx = np.clip((a - b) / (a + b + 1e-6), -1, 1)
     geotransform = (wt.c, wt.a, wt.b, wt.f, wt.d, wt.e)
-    return idx, geotransform, (crs.to_wkt() if crs else None), item.properties.get("eo:cloud_cover")
+    crs_wkt = crs.to_wkt() if crs else None
+    cloud = item.properties.get("eo:cloud_cover")
+
+    # --- persist to cache for future runs ---
+    try:
+        np.save(npy_path, idx)
+        json.dump({"geotransform": list(geotransform), "crs_wkt": crs_wkt, "cloud": cloud},
+                  open(meta_path, "w"))
+    except Exception:
+        pass
+
+    return idx, geotransform, crs_wkt, cloud
 
 
 def add_index_layer_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:

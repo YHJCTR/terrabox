@@ -72,6 +72,23 @@ OSM_TOOLS_PREFIX = "osm_gis."
 
 VLM_TOOLS = {"geo_perception.vlm_analyze"}
 
+# Perception tools that require a GPU docker service (RemoteSAM / vLLM / ChangeOS /
+# strip-rcnn). Used by --gpu-class to split online tasks into a GPU-service batch
+# (run on a dedicated card) and a fully GPU-free batch (safe for multi-card parallel).
+# CPU-only "perception" tools (draw_bboxes, add_text) and compute.* are NOT here.
+GPU_PERCEPTION_TOOLS = {
+    "geo_perception.instructsam",
+    "geo_perception.sam2_segment",
+    "geo_perception.vlm_analyze",
+    "geo_perception.change_os_detect",
+    "geo_perception.strip_rcnn_detect",
+    "geo_perception.region_attribute_description",
+    "geo_perception.count_given_object",
+    "geo_perception.ocr_extract",
+    "geo_perception.mscn_classify",
+    "geo_perception.sm3det_detect",
+}
+
 CHANGEOS_KEYWORDS = {"change_os", "changeos", "changedetection", "change detection"}
 
 TOOL_ALIASES = {
@@ -103,6 +120,63 @@ def cleanup_gpu_memory():
     log.debug("GPU cleanup delegated to per-call Docker managers")
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Transient-failure retry (experiment layer only — keeps the agent core untouched).
+# A task that dies from network jitter / a flaky service connection is re-run from
+# scratch and the failed attempt is DISCARDED (never written), so jitter-induced
+# extra tool calls never pollute the trajectory or the metrics. Capped to avoid
+# looping forever on a genuine outage. Reused by every module that drives rollout
+# through this script (e.g. reflection, which calls it as a subprocess).
+# ──────────────────────────────────────────────────────────────────────────────
+_TRANSIENT_FAILURE_MARKERS = (
+    "connection error",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "remote end closed",
+    "max retries exceeded",
+    "temporarily unavailable",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "apiconnectionerror",
+    "apitimeouterror",
+    "econnreset",
+    "read timed out",
+    "readtimeout",
+    " 502",
+    " 503",
+    " 504",
+    # infra/container hiccups (LLM or tool docker container died mid-run) — retryable
+    "container exited unexpectedly",
+    "no such container",
+    "container exited",
+    "tls connect error",
+)
+# Deterministic LLM/model errors — re-running won't help, so never retry these
+# (otherwise we'd burn the cap looping on the same context overflow / bad tool name).
+_NONRETRYABLE_MARKERS = (
+    "maximum context length",
+    "context length",
+    "selected unavailable tool",
+    "invalid action format",
+)
+
+
+def is_transient_failure(result: dict) -> bool:
+    """True if a result died from a transient network/service hiccup (retryable),
+    not from a deterministic LLM/model error."""
+    if result.get("status") not in {"failed", "exception"}:
+        return False
+    text = " ".join(
+        str(result.get(k, "") or "")
+        for k in ("final_answer_full", "final_answer_preview", "error")
+    ).lower()
+    if any(m in text for m in _NONRETRYABLE_MARKERS):
+        return False
+    return any(m in text for m in _TRANSIENT_FAILURE_MARKERS)
+
+
 def should_skip_task(
     task: dict,
     *,
@@ -113,10 +187,12 @@ def should_skip_task(
     skip_changeos: bool = True,
     skip_online: bool = False,
     only_online: bool = False,
+    gpu_class: str = "any",
 ) -> Optional[str]:
     """Return skip reason or None."""
     expected = [canonical_slug(t) for t in task.get("expected_tools", [])]
     is_online = any(t in API_KEY_TOOLS or t.startswith(OSM_TOOLS_PREFIX) for t in expected)
+    needs_gpu = any(t in GPU_PERCEPTION_TOOLS for t in expected)
     # Two complementary switches for the two-pass workflow:
     #   --skip-online : run only OFFLINE tasks (no network).
     #   --only-online : run only ONLINE tasks (run during the forwarding window).
@@ -124,6 +200,12 @@ def should_skip_task(
         return "online"
     if only_online and not is_online:
         return "not_online"
+    # --gpu-class partitions further by whether a GPU docker service is needed,
+    # so the GPU batch runs on a dedicated card and the rest parallelizes freely.
+    if gpu_class == "gpu" and not needs_gpu:
+        return "not_gpu"
+    if gpu_class == "nogpu" and needs_gpu:
+        return "needs_gpu"
     if skip_mock and any(t in MOCK_TOOLS for t in expected):
         return "mock"
     if skip_bing and any(t in API_KEY_TOOLS for t in expected):
@@ -566,6 +648,7 @@ def cmd_rollout(args):
         skip_changeos=args.skip_changeos,
         skip_online=args.skip_online,
         only_online=args.only_online,
+        gpu_class=args.gpu_class,
     )
     skip_stats: Counter = Counter()
     tasks = []
@@ -691,39 +774,53 @@ def cmd_rollout(args):
             except Exception as e:
                 log.warning(f"Evolution augment failed: {e}")
 
-        try:
-            llm, tracer = build_llm(config)
-            result = run_single_task(
-                task,
-                mode=args.mode,
-                config=config,
-                llm=llm,
-                tracer=tracer,
-                allowed_slugs=allowed_slugs,
-                evolution_prompt=evo_prompt,
-            )
-            # 清理GPU显存（释放perception模型占用的容器）
-            cleanup_gpu_memory()
-        except Exception as e:
-            log.error(f"Task {task_id} failed with exception: {e}")
-            traceback.print_exc()
-            # 即使出错也要清理GPU
-            cleanup_gpu_memory()
-            result = {
-                "task_id": task_id,
-                "source": task.get("source", "unknown"),
-                "question": task["question"],
-                "expected_tools": task.get("expected_tools", []),
-                "tool_calls": [],
-                "tool_calls_deduped": [],
-                "metrics": {"precision": 0, "recall": 0, "f1": 0, "exact_match": False},
-                "status": "exception",
-                "success": False,
-                "error": str(e),
-                "llm_calls": 0,
-                "tokens": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-                "time": 0,
-            }
+        # Transient-failure retry: re-run the whole task on network jitter and
+        # DISCARD the failed attempt (never written), so jitter never inflates the
+        # recorded tool calls / metrics. Capped by --max-transient-retries.
+        max_transient = getattr(args, "max_transient_retries", 5)
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                llm, tracer = build_llm(config)
+                result = run_single_task(
+                    task,
+                    mode=args.mode,
+                    config=config,
+                    llm=llm,
+                    tracer=tracer,
+                    allowed_slugs=allowed_slugs,
+                    evolution_prompt=evo_prompt,
+                )
+                # 清理GPU显存（释放perception模型占用的容器）
+                cleanup_gpu_memory()
+            except Exception as e:
+                log.error(f"Task {task_id} failed with exception: {e}")
+                traceback.print_exc()
+                # 即使出错也要清理GPU
+                cleanup_gpu_memory()
+                result = {
+                    "task_id": task_id,
+                    "source": task.get("source", "unknown"),
+                    "question": task["question"],
+                    "expected_tools": task.get("expected_tools", []),
+                    "tool_calls": [],
+                    "tool_calls_deduped": [],
+                    "metrics": {"precision": 0, "recall": 0, "f1": 0, "exact_match": False},
+                    "status": "exception",
+                    "success": False,
+                    "error": str(e),
+                }
+            if is_transient_failure(result) and attempt <= max_transient:
+                backoff = min(30, 3 * attempt)
+                log.warning(
+                    f"[{i+1}/{len(tasks)}] {task_id} transient failure "
+                    f"(attempt {attempt}/{max_transient + 1}, status={result.get('status')}): "
+                    f"discarding attempt and re-running whole task in {backoff}s …"
+                )
+                time.sleep(backoff)
+                continue
+            break
 
         # Save per-task result
         with open(result_path, "w") as f:
@@ -759,6 +856,7 @@ def cmd_rollout(args):
                 "status": r.get("status", "unknown"),
                 "real_success": r.get("real_success", r.get("success", False)),
                 "system_limitation_acknowledged": r.get("system_limitation_acknowledged", False),
+                "has_tool_error": r.get("has_tool_error", False),
                 "has_tool_oom": r.get("has_tool_oom", False),
             }
             f.write(json.dumps(traj, ensure_ascii=False) + "\n")
@@ -779,6 +877,7 @@ def cmd_rollout(args):
                 "success": r.get("success", False),
                 "real_success": r.get("real_success", r.get("success", False)),
                 "system_limitation_acknowledged": r.get("system_limitation_acknowledged", False),
+                "has_tool_error": r.get("has_tool_error", False),
                 "has_tool_oom": r.get("has_tool_oom", False),
                 "tokens": r.get("tokens", {}),
                 "llm_calls": r.get("llm_calls", 0),
@@ -1109,6 +1208,9 @@ def main():
     p_rollout.add_argument("--limit", type=int, default=None, help="最多跑 N 条")
     p_rollout.add_argument("--port", type=int, default=9100, help="LLM 端口")
     p_rollout.add_argument("--max-iterations", type=int, default=15, help="Agent 最大迭代次数")
+    p_rollout.add_argument("--max-transient-retries", type=int, default=5,
+                           help="网络/服务抖动导致整条任务失败时,丢弃该次并重跑的最大次数"
+                                "(只针对连接类瞬时错误;上下文超限/选错工具等确定性错误不重试)")
     p_rollout.add_argument("--resume", action="store_true", help="跳过已有结果的任务")
     p_rollout.add_argument("--use-docker", action="store_true", help="使用 Docker 感知服务")
 
@@ -1130,6 +1232,10 @@ def main():
     p_rollout.add_argument("--no-skip-online", dest="skip_online", action="store_false")
     p_rollout.add_argument("--only-online", action="store_true", default=False,
                            help="Run only ONLINE tasks (bing_search + osm_gis.*) — for the forwarding window")
+    p_rollout.add_argument("--gpu-class", choices=["any", "gpu", "nogpu"], default="any",
+                           help="Partition by GPU need: 'gpu' = only tasks using a GPU perception "
+                                "service (run on a dedicated card); 'nogpu' = only fully GPU-free "
+                                "tasks (safe for multi-card parallel); 'any' = no partition (default).")
     p_rollout.add_argument(
         "--exclude-tools", default=None,
         help="逗号分隔的工具 slug，从 allowed 中额外剔除（如 ipython.execute）",

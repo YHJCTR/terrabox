@@ -2,6 +2,8 @@
 
 这个目录是**胶水代码**，让 `/data1/yuhongjie2/MemRL` 的**原始 MemRL 方法**能在 Terrabox 的数据集和运行环境上跑起来，用于和 baseline（ReAct/Reflection）以及后续自研方法对比。
 
+严格 train/test 闭环实验说明见 [`EXPERIMENT.md`](EXPERIMENT.md)。如果要在 SFT train split 上按 MemRL runtime learning 跑、再在 test split 上报 F1，优先看该文档的 `train-external` / `eval-external` 流程。
+
 > **不是 MemRL 的重实现。** `source_*` 这条路径通过 `ExternalMemRLSourceService` 直接 import 并调用原仓库的 `memrl.service.memory_service.MemoryService` / strategies / value-driven（Two-Phase Retrieval、Q 更新等都走原方法）。本模块只负责：① 把 Terrabox 数据转成 MemRL 记录；② 把 rollout 跑在和 baseline 相同的环境上；③ 在 rollout worker 侧提供可移植的记忆检索索引。MemRL 算法逻辑保持原样。
 
 ## 两条路径（别混用）
@@ -240,7 +242,63 @@ PYTHONPATH=src $PY -m terrabox.evolution.memrl_full.source_runner stats \
 | `populate-source` | 从 SFT gold / 历史 rollout 轨迹构建 MemRL 记忆（写 `memory_index.jsonl` + 调原方法 `add_memories`） |
 | `eval-source` | 真实 Terrabox rollout（注入记忆），环境对齐 baseline |
 | `online-source` | eval 后把新轨迹写回记忆 + Q 更新（原方法的 runtime RL 闭环） |
+| `train-external` | 严格 external MemRL 训练闭环：每题 `retrieve_query` → Terrabox rollout → `update_values` → `add_memories` → 保存 snapshot |
+| `eval-external` | 严格 external MemRL 测试：加载 snapshot 后每题 `retrieve_query` → Terrabox rollout，只统计指标，不更新 memory |
 | `stats` | 汇总 rollout 指标和记忆统计 |
+
+## 严格 external train/test 闭环
+
+如果目标是“在 train split 上按 MemRL 原方法学习，再在 test split 上报 ReAct 口径 F1”，优先使用 `train-external` / `eval-external`，不要用旧的 `eval-source` 代替。旧 `eval-source` 仍通过 Terrabox prompt augmenter 读取便携 `memory_index.jsonl`，适合 memory-injection baseline；`train-external` / `eval-external` 会在 rollout 前直接调用原 MemRL `MemoryService.retrieve_query(...)`。
+
+典型流程：
+
+```bash
+PY=/home/yuhongjie/miniconda3/envs/memoryrl/bin/python
+STORE=evolution_store/memrl_full_external_v2
+
+# 可选：先用 SFT train gold bootstrap 一个初始库
+env -u ALL_PROXY -u all_proxy \
+PYTHONPATH=src:/data1/yuhongjie2/MemRL \
+no_proxy=localhost,127.0.0.1 NO_PROXY=localhost,127.0.0.1 \
+MEMRL_LLM_BASE_URL=http://localhost:9100/v1 \
+MEMRL_LLM_MODEL=/model \
+MEMRL_EMBED_BASE_URL=http://localhost:<EMBED_PORT>/v1 \
+MEMRL_EMBED_MODEL=<embedding-model-id> \
+$PY -m terrabox.evolution.memrl_full.source_runner populate-source \
+  --backend external_memrl \
+  --memrl-root /data1/yuhongjie2/MemRL \
+  --sft src/terrabox/evolution/sft/exp/v2_sft/sft_data/train.jsonl \
+  --store-dir $STORE \
+  --snapshot-id bootstrap
+
+# 在 train task split 上执行 MemRL runtime learning
+PY=/home/yuhongjie/miniconda3/envs/unsloth/bin/python
+PYTHONPATH=src:/data1/yuhongjie2/MemRL \
+no_proxy=localhost,127.0.0.1 NO_PROXY=localhost,127.0.0.1 \
+$PY -m terrabox.evolution.memrl_full.source_runner train-external \
+  --backend external_memrl \
+  --memrl-root /data1/yuhongjie2/MemRL \
+  --store-dir $STORE \
+  --load-snapshot-id bootstrap \
+  --snapshot-id trained \
+  --task-file <train_tasks.json> \
+  --experiment memrl_external_train \
+  --agent-gpu 0 --tool-gpu 1 --vlm-gpus 2 --instructsam-backend service
+
+# 在 test split 上只读评测
+PYTHONPATH=src:/data1/yuhongjie2/MemRL \
+no_proxy=localhost,127.0.0.1 NO_PROXY=localhost,127.0.0.1 \
+$PY -m terrabox.evolution.memrl_full.source_runner eval-external \
+  --backend external_memrl \
+  --memrl-root /data1/yuhongjie2/MemRL \
+  --store-dir $STORE \
+  --load-snapshot-id trained \
+  --task-file <test_tasks.json> \
+  --experiment memrl_external_test \
+  --agent-gpu 0 --tool-gpu 1 --vlm-gpus 2 --instructsam-backend service
+```
+
+输出仍写到 `tmp/trajectories/{experiment}/{mode}/` 或 `--output-dir` 指定目录，包含 `results/`、`trajectories.jsonl`、`trajectories_full.jsonl`、`report.json`；`report.json` 和 store 下的 `results/*_summary.json` 都包含 F1 汇总。
 
 ## 注意
 

@@ -59,11 +59,21 @@ def _predict_tools_from_principles(bank: PrincipleBank, question: str, task_type
 
     candidates: dict[str, float] = {}
 
+    def extract_tool_slugs(text: str) -> list[str]:
+        pattern = r"(?<![A-Za-z0-9_.-])([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)(?![A-Za-z0-9_.-])"
+        seen = set()
+        slugs = []
+        for slug in re.findall(pattern, text or ""):
+            if slug not in seen:
+                seen.add(slug)
+                slugs.append(slug)
+        return slugs
+
     def add_from_entries(entries: list[dict], weight: float) -> None:
         for e in entries:
             text = e.get("text", "")
             score = float(e.get("score", 1.0)) * weight
-            for slug in re.findall(r"'([a-z_]+\.[a-z_]+(?:\.[a-z_]+)?)'", text):
+            for slug in extract_tool_slugs(text):
                 candidates[slug] = max(candidates.get(slug, 0.0), score)
 
     add_from_entries(bank.data.get("general", []), 1.0)

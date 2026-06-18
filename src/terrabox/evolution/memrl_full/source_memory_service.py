@@ -20,6 +20,96 @@ from .source_adapter import MemRLSourceRecord
 DEFAULT_MEMRL_ROOT = "/data1/yuhongjie2/MemRL"
 
 
+def _memory_id(item: dict[str, Any]) -> str | None:
+    for key in ("memory_id", "id"):
+        value = item.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _memory_content(item: dict[str, Any]) -> str:
+    for key in ("content", "trajectory", "memory", "task_description"):
+        value = item.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def _format_retrieved_memories(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return ""
+    blocks = [
+        "## Relevant MemRL Source Memories",
+        (
+            "These memories were retrieved by MemRL before solving the current task. "
+            "Use them only when they are relevant to the current Terrabox tools and evidence."
+        ),
+    ]
+    for idx, item in enumerate(items, start=1):
+        meta = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        tools = " -> ".join(str(t) for t in meta.get("tool_sequence", []) or [])
+        content = _memory_content(item).strip()
+        if len(content) > 1200:
+            content = content[:1200] + "\n...[truncated]"
+        header = [f"Memory {idx}"]
+        mem_id = _memory_id(item)
+        if mem_id:
+            header.append(f"id={mem_id}")
+        if "similarity" in item:
+            try:
+                header.append(f"similarity={float(item['similarity']):.3f}")
+            except (TypeError, ValueError):
+                pass
+        if "q_estimate" in item:
+            try:
+                header.append(f"q={float(item['q_estimate']):.3f}")
+            except (TypeError, ValueError):
+                pass
+        if tools:
+            header.append(f"tools={tools}")
+        blocks.append("; ".join(header) + "\n" + content)
+    return "\n\n".join(blocks)
+
+
+def _normalize_external_retrieval(raw: Any) -> dict[str, Any]:
+    retrieved_queries = []
+    result = raw
+    if isinstance(raw, tuple):
+        result = raw[0] if raw else {}
+        if len(raw) > 1 and isinstance(raw[1], list):
+            retrieved_queries = raw[1]
+    if not isinstance(result, dict):
+        result = {}
+    selected = result.get("selected") or []
+    if isinstance(selected, dict):
+        selected = [selected]
+    selected = [item for item in selected if isinstance(item, dict)]
+    retrieved_ids = [_memory_id(item) for item in selected]
+    retrieved_ids = [mem_id for mem_id in retrieved_ids if mem_id]
+    if not retrieved_ids:
+        actions = result.get("actions") or []
+        if isinstance(actions, list):
+            retrieved_ids = [str(action) for action in actions if action]
+    if not retrieved_queries:
+        queries = []
+        for item in result.get("candidates") or []:
+            if not isinstance(item, dict):
+                continue
+            query = item.get("query") or item.get("task_description") or item.get("content")
+            score = item.get("similarity", item.get("score", 0.0))
+            if query:
+                queries.append((str(query), float(score or 0.0)))
+        retrieved_queries = queries
+    return {
+        "prompt": _format_retrieved_memories(selected),
+        "selected": selected,
+        "retrieved_ids": retrieved_ids,
+        "retrieved_queries": retrieved_queries,
+        "raw": result,
+    }
+
+
 def _tokens(text: str) -> set[str]:
     return {
         "".join(ch for ch in token.lower() if ch.isalnum())
@@ -96,6 +186,19 @@ class LiteMemRLSourceService:
         scored.sort(key=lambda item: item[0], reverse=True)
         return [record for _, record in scored[:top_k]]
 
+    def retrieve_for_prompt(self, query: str, *, top_k: int = 5, threshold: float = 0.0) -> dict[str, Any]:
+        selected = self.retrieve(query, top_k=top_k, threshold=threshold)
+        return {
+            "prompt": _format_retrieved_memories(selected),
+            "selected": selected,
+            "retrieved_ids": [str(item.get("id")) for item in selected if item.get("id")],
+            "retrieved_queries": [
+                (str(item.get("task_description", "")), float(item.get("utility", 0.0)))
+                for item in selected
+            ],
+            "raw": {"selected": selected},
+        }
+
     def update_values(
         self,
         successes: list[bool],
@@ -146,6 +249,15 @@ class LiteMemRLSourceService:
             encoding="utf-8",
         )
         return meta
+
+    def add_records_with_retrieval(
+        self,
+        records: list[MemRLSourceRecord],
+        *,
+        retrieved_queries_list: list[list[tuple[str, float]]] | None = None,
+        retrieved_ids_list: list[list[str]] | None = None,
+    ) -> dict[str, Any]:
+        return self.add_records(records)
 
     def manifest(self, *, added: int = 0) -> dict[str, Any]:
         return {
@@ -250,18 +362,40 @@ class ExternalMemRLSourceService(LiteMemRLSourceService):
         )
 
     def add_records(self, records: list[MemRLSourceRecord]) -> dict[str, Any]:
-        manifest = super().add_records(records)
+        return self.add_records_with_retrieval(records)
+
+    def add_records_with_retrieval(
+        self,
+        records: list[MemRLSourceRecord],
+        *,
+        retrieved_queries_list: list[list[tuple[str, float]]] | None = None,
+        retrieved_ids_list: list[list[str]] | None = None,
+    ) -> dict[str, Any]:
+        manifest = LiteMemRLSourceService.add_records(self, records)
         if records:
             self._service.add_memories(
                 task_descriptions=[r.task_description for r in records],
                 trajectories=[r.trajectory for r in records],
                 successes=[r.success for r in records],
-                retrieved_memory_queries=[None for _ in records],
-                retrieved_memory_ids_list=[None for _ in records],
+                retrieved_memory_queries=retrieved_queries_list or [None for _ in records],
+                retrieved_memory_ids_list=retrieved_ids_list or [None for _ in records],
                 metadatas=[r.metadata | {"success": r.success, "reward": r.reward} for r in records],
             )
         manifest["backend"] = self.backend
         return manifest
+
+    def retrieve_for_prompt(self, query: str, *, top_k: int = 5, threshold: float = 0.0) -> dict[str, Any]:
+        raw = self._service.retrieve_query(query, k=top_k, threshold=threshold)
+        return _normalize_external_retrieval(raw) | {"backend": self.backend}
+
+    def load_snapshot(self, ckpt_id: str = "final") -> dict[str, Any]:
+        snapshot_root = self.store_dir / "external_snapshot" / "snapshot" / str(ckpt_id)
+        checkpoint_id = self._service.load_checkpoint_snapshot(str(snapshot_root))
+        return {
+            "backend": self.backend,
+            "checkpoint_id": checkpoint_id,
+            "snapshot_root": str(snapshot_root),
+        }
 
     def update_values(
         self,

@@ -25,6 +25,7 @@ from ..core.services.connection_service import ConnectionService
 from ..core.services.tool_override_service import ToolOverrideService
 from ..core.services.tool_service import ToolService
 from ..core.utils.runtime_paths import apply_default_output_paths, prepare_runtime_context, write_manifest
+from . import tool_result_cache as _trc
 from ..core.utils.tool_output_serialization import make_json_safe
 from .harness import create_approval, current_context, emit_event, record_artifact, record_step, update_step
 from .runtime import get_runtime
@@ -611,13 +612,23 @@ def _capture_gpkg(result: Any) -> None:
 class AgentToolExecutor:
     @staticmethod
     def execute(slug: str, arguments: dict[str, Any], user) -> str:
+        # Content-addressed result cache: checked at the OUTERMOST point so a hit
+        # returns WITHOUT starting the tool's docker service / model load / network
+        # call. Key covers tool + input-file content + all non-output args (see
+        # tool_result_cache). Only successful results are stored.
+        cache_key = _trc.cache_key(slug, arguments)
+        if cache_key is not None:
+            hit = _trc.lookup(cache_key)
+            if hit is not None:
+                logger.info("Tool result cache HIT: %s", slug)
+                return hit
         ctx = current_context()
         if ctx is None:
-            return AgentToolExecutor._execute_legacy(slug, arguments, user)
-        return AgentToolExecutor._execute_harness(slug, arguments, user)
+            return AgentToolExecutor._execute_legacy(slug, arguments, user, _cache_key=cache_key)
+        return AgentToolExecutor._execute_harness(slug, arguments, user, _cache_key=cache_key)
 
     @staticmethod
-    def _execute_legacy(slug: str, arguments: dict[str, Any], user) -> str:
+    def _execute_legacy(slug: str, arguments: dict[str, Any], user, _cache_key: str | None = None) -> str:
         handler = get_handler(slug)
         if handler is None:
             return f"Tool execution error: Tool not found: {slug}"
@@ -672,7 +683,9 @@ class AgentToolExecutor:
                 outputs=result if isinstance(result, dict) else {"result": result},
                 status="success",
             )
-            return _display_text(result)
+            display_text = _display_text(result)
+            _trc.store(_cache_key, slug, arguments, display_text, _artifact_paths(result))
+            return display_text
         except ToolExecutionTimeout as exc:
             logger.warning("Tool execution timeout: %s", exc)
             write_manifest(
@@ -701,10 +714,10 @@ class AgentToolExecutor:
             return f"Tool execution error: {exc}"
 
     @staticmethod
-    def _execute_harness(slug: str, arguments: dict[str, Any], user) -> str:
+    def _execute_harness(slug: str, arguments: dict[str, Any], user, _cache_key: str | None = None) -> str:
         ctx = current_context()
         if ctx is None:
-            return AgentToolExecutor._execute_legacy(slug, arguments, user)
+            return AgentToolExecutor._execute_legacy(slug, arguments, user, _cache_key=_cache_key)
 
         config = ctx.config
         db = ctx.db
@@ -862,6 +875,8 @@ class AgentToolExecutor:
             for path in artifact_paths:
                 if os.path.exists(path):
                     record_artifact(step.id if step else None, path=path, metadata={"tool_slug": slug})
+
+            _trc.store(_cache_key, slug, arguments, display_text, artifact_paths)
 
             ToolService._log_tool_execution(
                 db,

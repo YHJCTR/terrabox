@@ -11,8 +11,11 @@ from ..ReAct.data_adapter import samples_to_tasks
 from ..full_shared.sft_schema import FullSFTSample, load_sft_samples
 
 
-DEFAULT_STRICT_DATA = "data/newdata/sft_train_strict.jsonl"
-DEFAULT_SHUFFLED_DATA = "data/newdata/sft_train_strict_shuffled_seed42.jsonl"
+# OEA full OpenEarth split (23 OE tools). train.jsonl is the reflection TRAIN pool;
+# the fixed TEST set is data/oea_full_sft/openearth_test_tasks.json (prompt-only,
+# already produced by the ReAct experiment) — pass it directly as the eval --task-file.
+DEFAULT_STRICT_DATA = "data/oea_full_sft/openearth/train.jsonl"
+DEFAULT_SHUFFLED_DATA = "data/oea_full_sft/openearth/train_shuffled_seed42.jsonl"
 
 
 def load_shuffled_samples(
