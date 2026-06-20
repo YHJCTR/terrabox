@@ -15,8 +15,20 @@ from .common import run_sequential_react_loop, sft_json_actions_enabled
 
 
 def _resolve_system_prompt() -> str:
-    """SFT 'text ReAct' models need the training system prompt (tool catalog +
-    JSON-actions schema); native models use the standard ReAct prompt."""
+    """Resolve the system prompt for a standard ReAct rollout.
+
+    优先级:
+    1. TERRABOX_REACT_SYSTEM_PROMPT_FILE —— 通用覆盖口子(如 promptevo 进化出的提示词)。
+       **未设置则完全无影响,行为与改动前一字不差;只有显式设置且文件存在时才生效。**
+    2. SFT 'text ReAct' 模型用训练时的 system prompt(工具目录 + JSON-actions schema)。
+    3. 硬编码的标准 ReAct 提示词。
+    """
+    override = os.environ.get("TERRABOX_REACT_SYSTEM_PROMPT_FILE", "").strip()
+    if override and os.path.isfile(override):
+        try:
+            return open(override, encoding="utf-8").read()
+        except Exception:
+            pass
     if sft_json_actions_enabled():
         path = os.environ.get("TERRABOX_SFT_SYSTEM_PROMPT_FILE", "").strip()
         if path and os.path.isfile(path):
