@@ -44,12 +44,15 @@ _DIAGNOSE = """对比新旧两版静态系统提示词在**同一批任务**上�
 ================ 配对轨迹(同一 task 在 A / B 下的走法) ================
 {cases}
 
-任务:**只针对上面"真实改动清单"里的每一条**(用它的 edit_id),结合指标变化与轨迹,判断它在哪些维度 help/hurt。
-**严禁归因到清单之外的"改动"**;若某个指标变化无法由这几条真实改动解释,放进 unexplained,**不要编造一个不存在的改动来解释它**。
-注意:同一条改动可能是**双刃**(同时 help 一个维度、hurt 另一个),请如实标 mixed 并写清各维度。
+任务:对每个退步,做**三步链式归因**(像反向传播,从指标穿过"行为"反传到"提示词子句"):
+  (1) **行为**:**自己仔细读 B 的轨迹**,指出 B 反复出现的反常/浪费/低效行为(例如:反复调用同一工具、为凑更精确结果而反复重查、报错后仍硬调、动作远多于 A 却没进展…由你从轨迹观察归纳,不限于这些例子);
+  (2) **子句定位(关键)**:在【真实改动清单】对应的那条规则里,**逐字引用是哪一个子句/短语指示或允许了这个行为**——这才是"原因在提示词文本的哪里";
+  (3) **指标**:这个行为对应哪个指标退步。
+约束:**只针对真实改动清单里的改动**(用 edit_id);**严禁归因到清单之外**;无法由这几条改动解释的指标变化放进 unexplained,不要编造。同一条改动可能**双刃**(help A + hurt B),如实标 mixed。
 严格 JSON:
-{{"attributions":[{{"edit_id":"edit-1","effect":"help|hurt|mixed",
-  "dims":["受影响指标名,如 f1_gis/f1_logic/turn_cap_rate/success_rate"],"evidence":"支撑的任务/现象"}}],
+{{"attributions":[{{"edit_id":"edit-1","behavior":"B 的问题行为(来自行为事实)",
+  "offending_clause":"该规则里肇事的子句/短语(逐字引用)","effect":"help|hurt|mixed",
+  "dims":["受影响指标名,如 f1_gis/turn_cap_rate/success_rate"],"evidence":"支撑的任务/现象"}}],
   "unexplained":["无法归因到上述真实改动的指标变化(可空)"]}}
 """
 
@@ -158,22 +161,43 @@ class ContrastiveOptimizer:
                     continue
                 eid = str(a.get("edit_id") or a.get("edit_ref", ""))
                 ref = f"{eid}: {id2text.get(eid, '(清单外!)')}"
+                clause = str(a.get("offending_clause", "")).strip()
+                behavior = str(a.get("behavior", "")).strip()
+                # 把"行为→肇事子句"并进 evidence,好让 propose 知道改哪条子句
+                ev = (f"行为:{behavior} | 肇事子句:「{clause}」 | {a.get('evidence', '')}"
+                      if clause or behavior else str(a.get("evidence", "")))
                 key = (a.get("effect", ""), tuple(sorted(a.get("dims", []))))
                 tally[key] += 1
                 store.setdefault(str(key), Attribution(
                     edit_ref=ref, effect=str(a.get("effect", "")),
-                    dims=list(a.get("dims", []) or []), evidence=str(a.get("evidence", ""))))
+                    dims=list(a.get("dims", []) or []), evidence=ev))
         # 只保留出现≥1次(单批时)/多批时优先反复出现的
         ranked = sorted(store.values(), key=lambda at: -tally[(at.effect, tuple(sorted(at.dims)))])
         return ranked
 
+    @staticmethod
+    def _grounded(cand: dict, prompt_b: str) -> bool:
+        """M3 自动门:候选是否"说到做到"——
+        (a) revised 必须真的不同于 B;
+        (b) changes 里每条 new_phrase 必须真出现在 revised 里(否则=假改动,如之前 edit-2)。"""
+        rev = (cand.get("revised_prompt") or "").strip()
+        if not rev or rev == prompt_b.strip():
+            return False
+        for ch in cand.get("changes", []) or []:
+            if not isinstance(ch, dict):
+                continue
+            npz = (ch.get("new_phrase") or "").strip()
+            if npz and npz[:40] not in rev:      # 声称改成的短语没出现 → 假改动
+                return False
+        return True
+
     def propose_candidates(self, prompt_b: str, attributions: list[Attribution],
                            n: int = 3, max_tokens: int = 3500,
                            objective: str = _DEFAULT_OBJECTIVE) -> list[dict]:
-        """best-of-N:生成 n 个下一版候选(由调用方用 dev 验证选优)。
+        """best-of-N:生成 n 个下一版候选,并用自动门过滤"说了没做"的假候选。
         objective: 优化目标;默认通用兜底,使用者可覆盖。"""
         attr_txt = "\n".join(
-            f"- [{a.effect}] {a.edit_ref}  (维度 {a.dims}; 证据 {a.evidence[:80]})"
+            f"- [{a.effect}] {a.edit_ref}  (维度 {a.dims}; 证据 {a.evidence[:160]})"
             for a in attributions) or "(无显著归因)"
         cands = []
         for _ in range(n):
@@ -182,4 +206,6 @@ class ContrastiveOptimizer:
                 system=_SYSTEM, max_tokens=max_tokens)
             if isinstance(data, dict) and data.get("revised_prompt"):
                 cands.append(data)
-        return cands
+        grounded = [c for c in cands if self._grounded(c, prompt_b)]
+        # 全部没过门时,退回原始候选(至少有东西),并标记
+        return grounded if grounded else cands

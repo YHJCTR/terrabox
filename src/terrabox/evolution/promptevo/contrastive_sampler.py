@@ -53,7 +53,8 @@ def sample_paired(
     render: Callable[[Trace, int], str] = default_render,
     skip_filter: Optional[Callable[[Trace], bool]] = None,
 ) -> list[PairedCase]:
-    """返回按价值排序的配对证据。skip_filter(trace)->True 的(如纯瞬时失败)被排除。"""
+    """返回按价值排序的配对证据。skip_filter(trace)->True 的(如纯瞬时失败)被排除。
+    注:不做任何代码层的"行为特征"预判(那不通用);B 的反常行为由诊断阶段 LLM 自己读轨迹发现。"""
     common = [t for t in a_metrics if t in b_metrics and t in a_traces and t in b_traces]
     if skip_filter:
         common = [t for t in common if not (skip_filter(a_traces[t]) or skip_filter(b_traces[t]))]
