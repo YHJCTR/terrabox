@@ -316,7 +316,8 @@ def main() -> None:
 
     p_rollout = sub.add_parser("rollout", help="Run standard rollout, optionally with reflection memory")
     p_rollout.add_argument("--experiment", required=True)
-    p_rollout.add_argument("--phase", default="eval", choices=["train", "eval"])
+    p_rollout.add_argument("--phase", default="eval",
+                           help="输出子目录标签;常用 train/eval,self-eval 模式用 eval_r1/eval(任意字符串均可)")
     p_rollout.add_argument("--task-file", required=True)
     p_rollout.add_argument("--output-dir")
     p_rollout.add_argument("--evolution-store")

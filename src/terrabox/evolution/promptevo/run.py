@@ -37,7 +37,14 @@ def _cmd_propose(args):
     # 开放式自发现:只把(原始静态提示词 + 采样的原始日志)交给 LLM,问题由它自己看出来。
     trace_text = sample_traces(args.trajectories, n_failed=args.n_failed,
                                n_success=args.n_success)
-    base = PromptAugmenter.BASE_SYSTEM
+    # 待优化的 base 提示词:默认用硬编码 BASE_SYSTEM;给了 --base-prompt-file 则读该 txt
+    # (可优化任意起始提示词,如坏提示词版本,而不限于代码内置那一份)。
+    if args.base_prompt_file:
+        with open(args.base_prompt_file, encoding="utf-8") as f:
+            base = f.read().strip()
+        print(f"(待优化 base 来自文件: {args.base_prompt_file}, {len(base)} 字)")
+    else:
+        base = PromptAugmenter.BASE_SYSTEM
     optimizer = PromptOptimizer(max_growth_ratio=args.max_growth_ratio)
     proposal = optimizer.propose(base, trace_text)
     if proposal is None:
@@ -109,6 +116,8 @@ def main():
     pp.add_argument("--n-failed", type=int, default=8, help="采样多少条失败轨迹给 LLM 读")
     pp.add_argument("--n-success", type=int, default=2, help="搭配多少条成功轨迹做对照")
     pp.add_argument("--max-growth-ratio", type=float, default=1.5, help="改写后体量超过原文此倍数则标记不够克制")
+    pp.add_argument("--base-prompt-file", default="",
+                    help="待优化的 base 提示词 txt(默认用代码内置 BASE_SYSTEM;可指向任意版本如坏提示词)")
     pp.add_argument("--out", default="")
     pp.set_defaults(func=_cmd_propose)
 

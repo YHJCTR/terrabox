@@ -70,13 +70,49 @@ _PROPOSE = """基于下面对两版提示词的**对比归因**,产出**下一�
 要求:
 1. 一切改动都要服务于上面的**优化目标**:**保留**被判 help 的改动;**回退或收窄**被判 hurt 的改动。
 2. **子句级因果分解(关键)**:被判 hurt / mixed 的规则往往**整条很长、含多个子句**,但真正肇事的常常只是其中**一个子句/短语**。对每条 hurt/mixed 规则,先逐子句想清楚:**agent 读到这个子句会实际做出什么动作?** 尤其注意那些**指示或暗示 agent 去"多做一个动作"的子句**——例如"再发起一次调用 / 重试 / 换个方式重查 / 为再确认而重复操作"。这类"无界额外动作"的子句,正是**过度调用、来回打转、耗尽步数**这类 hurt 的常见根因。**精确定位到那个肇事子句,只改它**,别动同一规则里无辜的其它部分。
-3. 定位后的改法:把**无界的额外动作**改成**有界/有条件**——例如"只在确有必要时再做一次,且不得仅为再确认/凑更精确结果而重复";**双刃规则(同时 help A、hurt B)改成条件规则**(在 help 的场景保留、只在 hurt 的场景退让),禁止整体删除或全局弱化。
+3. 定位后的改法:把**无界的额外动作**改成**有界/有条件**——例如"只在确有必要时再做一次,且不得仅为再确认/凑更精确结果而重复";**双刃规则(同时 help A、hurt B)改成条件规则**(在 help 的场景保留、只在 hurt 的场景退让),不要因为它在某些场景 hurt 就整条删除或全局弱化。**但若某处改动被判为纯 hurt、找不到任何 help 场景,则可以直接回退/删除它**(与要求1一致)。
 4. 规则保持**通用、领域无关**(条件用"是否确有必要""能否用现有结果"这类通用判据,**不要写死任何工具名/领域术语/任务**);保持克制、最小改动、不要显著变长。
 5. 严格 JSON。**changes 必须逐字引用你实际改动的原文短语→新短语**(便于核对你确实改了,而非空泛声称):
 {{"revised_prompt":"完整下一版提示词","rationale":"一句话",
   "changes":[{{"edit_id":"针对哪条归因","offending_clause":"你判定为肇事的那个子句/短语",
     "old_phrase":"被改前的原文(逐字)","new_phrase":"改后的文本(逐字)","why":"为什么这半句导致该 hurt"}}]}}
 """
+
+
+def build_emphasized_prompt(old_prompt: str, new_prompt: str,
+                            changes: Optional[list] = None,
+                            header: str = "## 需特别遵守（本版相对上一版改动的规则，请优先严格执行）") -> str:
+    """在 new_prompt 末尾追加"需特别遵守"小节,提升新规则在 rollout 时的显著性(近因效应)。
+    **领域无关、确定性**:用代码 diff 取出 new 相对 old 改动的"新规则那侧"(地面真值,不靠 LLM 自述);
+    `changes` 里 LLM 的 why 只作注解,且**只能附在代码验证过的真实改动上**(锚定,编不出清单外的)。
+    无改动则原样返回。供 rollout 端用 toggle 决定加不加。"""
+    import difflib
+    a = old_prompt.strip().splitlines()
+    b = new_prompt.strip().splitlines()
+    sm = difflib.SequenceMatcher(None, [l.strip() for l in a], [l.strip() for l in b])
+    new_lines = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag in ("replace", "insert"):
+            new_lines += [l.strip() for l in b[j1:j2] if l.strip()]
+    if not new_lines:
+        return new_prompt
+    whys = {}
+    for ch in (changes or []):
+        if isinstance(ch, dict):
+            npz = (ch.get("new_phrase") or "").strip()
+            why = (ch.get("why") or "").strip()
+            if npz and why:
+                whys[npz[:30]] = why
+    lines = [new_prompt.strip(), "", header]
+    for nl in new_lines:
+        note = ""
+        for k, w in whys.items():
+            if k and k in nl:
+                note = f"\n  （为什么重要：{w}）"
+                break
+        clean = nl[2:].strip() if nl.startswith("- ") else nl   # 规则本就带"- ",去掉避免双重项目符
+        lines.append(f"- {clean}{note}")
+    return "\n".join(lines)
 
 
 def _compute_diff(prompt_a: str, prompt_b: str) -> str:

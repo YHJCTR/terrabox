@@ -54,6 +54,12 @@ os.environ.setdefault("no_proxy", "localhost,127.0.0.1")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+# 把工具产物(osm_gis gpkg / 各类 preview png 等相对输出路径)统一重定向到 tmp/artifacts,
+# 避免散落到仓库根目录。这是 tool_executor 早有的重定向机制(会记 alias 供后续引用回查,
+# 与 evolution/ReAct/runner.py 一致),仅在**实验入口**补设默认值,不改任何路径解析逻辑;
+# setdefault → 已显式设置(如 runner 或手动 export)时尊重原值,不覆盖。
+os.environ.setdefault("TERRABOX_ARTIFACT_OUTPUT_DIR", str(REPO_ROOT / "tmp" / "artifacts"))
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
