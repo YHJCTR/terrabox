@@ -51,8 +51,7 @@ def main():
     ap.add_argument("--subset", type=int, default=0, help="只判前 N 条(0=全部)")
     ap.add_argument("--no-numeric-shortcut", action="store_true", help="禁用单数字代码判,全走 LLM")
     ap.add_argument("--no-cache", action="store_true")
-    ap.add_argument("--out", default="", help="逐条结果写出路径(jsonl,可选)")
-    ap.add_argument("--summary", default="", help="汇总 json 路径(默认落 results 同级目录 answer_acc_<provider>.json)")
+    ap.add_argument("--out", default="", help="逐条结果写出路径(jsonl)")
     args = ap.parse_args()
 
     gt_map = _load_gt(args.task_file)
@@ -80,61 +79,29 @@ def main():
 
     # 跑前预估(仅外部 provider 有意义):粗估每条 LLM 判 ~900 input + 150 output
     if args.provider != "local":
+        n_llm = sum(1 for _, _, g, p in items if (args.no_numeric_shortcut or
+                    len([c for c in g if c.isdigit()]) and True))
         est = estimate_cny(len(items) * 900, len(items) * 150, cache_hit_ratio=0.3)
-        print(f"[预估] 最多 {len(items)} 条送 judge → 约 ¥{est:.3f}(实际更低:单数字走代码 + 缓存命中)")
+        print(f"[预估] 最多 {len(items)} 条送 judge → 约 ¥{est:.3f}(实际更低,单数字走代码+缓存命中)")
 
     out_f = open(args.out, "w") if args.out else None
     agg = {"sum": 0.0, "n": 0, "src": {}}
-    errors = 0
     for i, (tid, q, g, pred) in enumerate(items, 1):
-        try:
-            res = judge.score(q, g, pred)
-        except Exception as e:
-            # 单条失败(网络/限流/解析)不拖垮整轮:计为 error、跳过聚合,可重跑(未缓存)
-            errors += 1
-            res = {"score": None, "source": "error", "justification": str(e)[:200]}
-            agg["src"]["error"] = agg["src"].get("error", 0) + 1
-        else:
-            agg["sum"] += res["score"]; agg["n"] += 1
-            agg["src"][res["source"]] = agg["src"].get(res["source"], 0) + 1
+        res = judge.score(q, g, pred)
+        agg["sum"] += res["score"]; agg["n"] += 1
+        agg["src"][res["source"]] = agg["src"].get(res["source"], 0) + 1
         if out_f:
             out_f.write(json.dumps({"task_id": tid, **res}, ensure_ascii=False) + "\n")
-        if i % 50 == 0 and agg["n"]:
+        if i % 50 == 0:
             print(f"  ...{i}/{len(items)}  当前 answer_acc={agg['sum']/agg['n']:.3f}"
                   + (f"  {cost.summary()}" if args.provider != "local" else ""))
     if out_f:
         out_f.close()
 
-    answer_acc = agg["sum"] / agg["n"] if agg["n"] else 0.0
-    summary = {"answer_acc": round(answer_acc, 4), "n_judged": agg["n"], "n_error": errors,
-               "provider": args.provider, "source_breakdown": agg["src"],
-               "results_dir": os.path.abspath(args.results)}
-    if args.provider != "local":
-        summary["cost_cny"] = round(cost.cny, 4)
-
-    # 落在实验目录(results 同级,与 report.json / trajectories.jsonl 并排),方便按实验管理
-    exp_dir = os.path.dirname(os.path.abspath(args.results.rstrip("/")))
-    summ_path = args.summary or os.path.join(exp_dir, f"answer_acc_{args.provider}.json")
-    with open(summ_path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
-
-    # 同时并入该实验的 report.json(一站式汇总;按 provider 存,additive 不破坏既有字段)
-    report_path = os.path.join(exp_dir, "report.json")
-    if os.path.exists(report_path):
-        try:
-            report = json.load(open(report_path))
-            report.setdefault("answer_acc", {})[args.provider] = summary
-            json.dump(report, open(report_path, "w"), ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-
-    print(f"\n==== answer_acc = {answer_acc:.4f}  (judged={agg['n']}, error={errors}) ====")
+    print(f"\n==== answer_acc = {agg['sum']/agg['n']:.4f}  (n={agg['n']}) ====")
     print(f"判分来源: {agg['src']}")
     if args.provider != "local":
         print(cost.summary())
-    print(f"汇总已存: {summ_path}"
-          + (f"  + 并入 {report_path}" if os.path.exists(report_path) else "")
-          + (f"  | 逐条: {args.out}" if args.out else ""))
 
 
 if __name__ == "__main__":
