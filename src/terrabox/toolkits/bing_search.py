@@ -169,11 +169,15 @@ def _parse_results(data: Dict[str, Any], k: int, max_out_len: int = DEFAULT_MAX_
 
 def _serper_request(query: str, api_key: str, timeout: int = 30) -> Dict[str, Any]:
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
+    request_kwargs = {}
+    if os.environ.get("TERRABOX_SEARCH_USE_ENV_PROXY", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        request_kwargs["proxies"] = {"http": None, "https": None}
     resp = requests.post(
         f"{SERPER_ENDPOINT}/search",
         headers=headers,
         json={"q": query},
         timeout=timeout,
+        **request_kwargs,
     )
     if resp.status_code != 200:
         raise RuntimeError(f"Serper API error {resp.status_code}: {resp.text[:300]}")
