@@ -33,6 +33,23 @@ CRS = "EPSG:4326"
 DEFAULT_ROUTE_DIST_MAX_PAIRS = int(os.environ.get("TERRABOX_ROUTE_DIST_MAX_PAIRS", "5000"))
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _direct_requests_kwargs() -> dict:
+    """Requests kwargs for external OSM calls.
+
+    Rollout shells on migrated machines can inherit dead localhost proxies from
+    another server. OSM tools should be direct by default; explicit
+    TERRABOX_OSM_* proxy variables opt back into proxying.
+    """
+    return {"proxies": {"http": None, "https": None}}
+
+
 # ------------------------------------------------------------------------------
 # Lazy Imports
 # ------------------------------------------------------------------------------
@@ -60,16 +77,10 @@ def _osm_proxy_context(ox):
     https_proxy = os.environ.get("TERRABOX_OSM_HTTPS_PROXY", "").strip()
     no_proxy = os.environ.get("TERRABOX_OSM_NO_PROXY", "localhost,127.0.0.1,::1").strip()
 
-    if not http_proxy and not https_proxy:
-        yield
-        return
-
     updated_kwargs = copy.deepcopy(original_kwargs)
     proxies = dict(updated_kwargs.get("proxies") or {})
-    if http_proxy:
-        proxies["http"] = http_proxy
-    if https_proxy:
-        proxies["https"] = https_proxy
+    proxies["http"] = http_proxy or None
+    proxies["https"] = https_proxy or None
     if no_proxy:
         proxies["no_proxy"] = no_proxy
     updated_kwargs["proxies"] = proxies
@@ -952,7 +963,7 @@ def display_on_map_handler(arguments: Dict[str, Any], context: Any, account: Any
     ax.set_xlim(minx, maxx)
     ax.set_ylim(miny, maxy)
     ax.set_aspect("equal")
-    if ctx is not None:
+    if ctx is not None and _env_bool("TERRABOX_OSM_DISPLAY_BASEMAP", False):
         try:
             ctx.add_basemap(ax, crs=area_gdf.crs.to_string(), source=ctx.providers.CartoDB.Positron)
         except Exception:

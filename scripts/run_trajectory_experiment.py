@@ -251,6 +251,31 @@ def load_tasks_from_file(path: str) -> list[dict]:
     return tasks
 
 
+def load_saved_results(results_dir: Path, task_order: list[dict]) -> list[dict]:
+    """Load all saved per-task results in task-file order.
+
+    `results/<task_id>.json` is the source of truth for resumed/parallel runs.
+    Derived files (report.json and trajectories*.jsonl) must be rebuilt from this
+    directory instead of the current process' in-memory batch.
+    """
+    order = {
+        str(task.get("task_id") or task.get("id") or f"task_{i}"): i
+        for i, task in enumerate(task_order)
+    }
+    rows: list[dict] = []
+    for path in results_dir.glob("*.json"):
+        try:
+            row = json.load(open(path))
+        except Exception:
+            log.warning("Skipping unreadable result file: %s", path)
+            continue
+        if isinstance(row, dict):
+            row.setdefault("task_id", path.stem)
+            rows.append(row)
+    rows.sort(key=lambda r: (order.get(str(r.get("task_id")), len(order)), str(r.get("task_id"))))
+    return rows
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Agent setup (reuses core infra from test_single_task_3modes.py)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -845,10 +870,20 @@ def cmd_rollout(args):
             f"time={result.get('time', 0):.1f}s"
         )
 
+    # Rebuild derived outputs from the complete results/ directory. This keeps
+    # report.json and trajectories*.jsonl correct after --resume, sharded runs,
+    # or partial backfills.
+    derived_results = load_saved_results(results_dir, all_tasks)
+    derived_success_count = sum(1 for r in derived_results if r.get("success"))
+    derived_total_tokens = {
+        k: sum((r.get("tokens") or {}).get(k, 0) for r in derived_results)
+        for k in total_tokens
+    }
+
     # Write consolidated trajectory JSONL (compact version for evolution)
     traj_path = out_dir / "trajectories.jsonl"
     with open(traj_path, "w") as f:
-        for r in results:
+        for r in derived_results:
             traj = {
                 "task_id": r["task_id"],
                 "source": r.get("source", "unknown"),
@@ -870,7 +905,7 @@ def cmd_rollout(args):
     # Write full trajectory JSONL (with complete conversation history)
     full_traj_path = out_dir / "trajectories_full.jsonl"
     with open(full_traj_path, "w") as f:
-        for r in results:
+        for r in derived_results:
             traj = {
                 "task_id": r["task_id"],
                 "source": r.get("source", "unknown"),
@@ -900,18 +935,19 @@ def cmd_rollout(args):
         "mode": args.mode,
         "task_file": args.task_file,
         "created_at": datetime.now().isoformat(timespec="seconds"),
-        "total_tasks": len(results),
-        "success_count": success_count,
-        "success_rate": success_count / len(results) if results else 0,
-        "total_tokens": total_tokens,
-        "avg_f1": sum(r.get("metrics", {}).get("f1", 0) for r in results) / len(results) if results else 0,
-        "status_distribution": dict(Counter(r.get("status", "unknown") for r in results)),
+        "total_tasks": len(derived_results),
+        "success_count": derived_success_count,
+        "success_rate": derived_success_count / len(derived_results) if derived_results else 0,
+        "total_tokens": derived_total_tokens,
+        "avg_f1": sum(r.get("metrics", {}).get("f1", 0) for r in derived_results) / len(derived_results) if derived_results else 0,
+        "status_distribution": dict(Counter(r.get("status", "unknown") for r in derived_results)),
         "unique_tools_called": sorted(set(
-            t for r in results for t in r.get("tool_calls_deduped", [])
+            t for r in derived_results for t in r.get("tool_calls_deduped", [])
         )),
         "filter_settings": filter_kwargs,
         "skip_stats": dict(skip_stats),
         "evolution_method": args.evolution_method or None,
+        "derived_from_results": True,
     }
     report_path = out_dir / "report.json"
     with open(report_path, "w") as f:
@@ -921,10 +957,10 @@ def cmd_rollout(args):
     print(f"\n{'='*70}")
     print(f"  ROLLOUT COMPLETE: {args.experiment}")
     print(f"{'='*70}")
-    print(f"  Tasks:       {len(results)}")
-    print(f"  Success:     {success_count} ({report['success_rate']:.1%})")
+    print(f"  Tasks:       {len(derived_results)}")
+    print(f"  Success:     {derived_success_count} ({report['success_rate']:.1%})")
     print(f"  Avg F1:      {report['avg_f1']:.3f}")
-    print(f"  Total tokens: {total_tokens}")
+    print(f"  Total tokens: {derived_total_tokens}")
     print(f"  Status: {report['status_distribution']}")
     print(f"  Unique tools called: {len(report['unique_tools_called'])}")
     print(f"\n  Output:")

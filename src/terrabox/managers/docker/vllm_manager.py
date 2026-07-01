@@ -54,6 +54,7 @@ class VLLMDockerManager(BaseServiceManager):
     MIN_IMAGE_MODEL_LEN = int(os.environ.get("VLM_MIN_IMAGE_MODEL_LEN", "16384"))
     MAX_MODEL_LEN = MIN_IMAGE_MODEL_LEN
     GPU_MEMORY_UTILIZATION = 0.8
+    MIN_FREE_MIB = int(os.environ.get("VLM_MIN_FREE_MIB", "22000"))
     LIMIT_MM_PER_PROMPT = os.environ.get("VLM_LIMIT_MM_PER_PROMPT", "")
     SKIP_MM_PROFILING = os.environ.get("VLM_SKIP_MM_PROFILING", "").strip().lower() in {"1", "true", "yes", "on"}
     MAX_NUM_SEQS = int(os.environ["VLM_MAX_NUM_SEQS"]) if os.environ.get("VLM_MAX_NUM_SEQS") else None
@@ -122,6 +123,8 @@ class VLLMDockerManager(BaseServiceManager):
             cls.MAX_MODEL_LEN = int(os.environ["VLM_MAX_MODEL_LEN"])
         if os.environ.get("VLM_GPU_MEMORY_UTILIZATION"):
             cls.GPU_MEMORY_UTILIZATION = float(os.environ["VLM_GPU_MEMORY_UTILIZATION"])
+        if os.environ.get("VLM_MIN_FREE_MIB"):
+            cls.MIN_FREE_MIB = int(os.environ["VLM_MIN_FREE_MIB"])
         if os.environ.get("VLM_LIMIT_MM_PER_PROMPT"):
             cls.LIMIT_MM_PER_PROMPT = os.environ["VLM_LIMIT_MM_PER_PROMPT"]
         if os.environ.get("VLM_SKIP_MM_PROFILING"):
@@ -176,7 +179,7 @@ class VLLMDockerManager(BaseServiceManager):
             base_port=cls.PORT,
             internal_port=8000,
             gpu_count=int(cls.TENSOR_PARALLEL_SIZE),
-            min_free_mib=16384,
+            min_free_mib=cls.MIN_FREE_MIB,
             fallback_gpu_devices=cls.GPU_DEVICES,
             gpu_env_var="VLM_GPU_DEVICES",
             exclude_manager_cls=cls,
@@ -191,11 +194,14 @@ class VLLMDockerManager(BaseServiceManager):
             "docker", "run", "-d",
             "--name", cls.CONTAINER_NAME,
             *labels_for_lease(lease),
-            # --gpus all exposes all GPUs to the container; CUDA_VISIBLE_DEVICES then
-            # restricts which ones CUDA actually uses (works even with --gpus all,
-            # unlike NVIDIA_VISIBLE_DEVICES which --gpus all overrides).
-            "--gpus", "all",
-            "-e", f"CUDA_VISIBLE_DEVICES={lease.gpu_devices}",
+            # Expose only the leased host GPU(s). Relying on `--gpus all` plus
+            # CUDA_VISIBLE_DEVICES is not stable across NVIDIA Docker runtime
+            # mappings: the process can still see a full container-local device
+            # set and warm up on cuda:0, colliding with the agent LLM.
+            "--gpus", f"device={lease.gpu_devices}",
+            "-e", "CUDA_VISIBLE_DEVICES=0" if "," not in lease.gpu_devices else (
+                "CUDA_VISIBLE_DEVICES=" + ",".join(str(i) for i, _ in enumerate(lease.gpu_devices.split(",")))
+            ),
             "-p", f"{lease.port}:{lease.internal_port}",
             "-v", f"{cls.MODEL_PATH}:/model:ro",
             "-v", f"{cls.DATA_MOUNT_HOST}:{cls.DATA_MOUNT_HOST}",

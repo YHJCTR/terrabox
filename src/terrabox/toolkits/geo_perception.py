@@ -6,6 +6,8 @@ Advanced AI perception tools including Multi-image VLM analysis.
 
 import json
 import ast
+import contextlib
+import fcntl
 import logging
 import os
 import base64
@@ -33,6 +35,82 @@ from ..managers import (
 logger = logging.getLogger(__name__)
 
 # --- Helpers ---
+
+_SERVICE_LOCK_NAMES = {
+    "vlm": "vlm",
+    "sam2": "sam2",
+    "remotesam": "remotesam",
+    "remoteclip": "remoteclip",
+    "strip-rcnn": "strip-rcnn",
+    "instructsam": "instructsam",
+    "changeos": "changeos",
+}
+
+
+def _service_name_for_manager(manager: Any) -> str:
+    if manager is vllm_manager:
+        return "vlm"
+    if manager is sam2_manager:
+        return "sam2"
+    if manager is remotesam_manager:
+        return "remotesam"
+    if manager is remoteclip_manager:
+        return "remoteclip"
+    if manager is strip_rcnn_manager:
+        return "strip-rcnn"
+    if manager is instructsam_manager:
+        return "instructsam"
+    if manager is changeos_manager:
+        return "changeos"
+    return str(getattr(manager, "__class__", type(manager)).__name__).lower()
+
+
+def _service_lock_timeout_seconds(service: str) -> int:
+    specific = os.environ.get(f"TERRABOX_SERVICE_LOCK_TIMEOUT_{service.upper().replace('-', '_')}")
+    if specific:
+        return int(specific)
+    return int(os.environ.get("TERRABOX_SERVICE_LOCK_TIMEOUT_SECONDS", "1800"))
+
+
+@contextlib.contextmanager
+def _service_call_lock(service: str):
+    """Cross-process lock for GPU service inference calls.
+
+    A warm service can keep GPU memory allocated while idle, so free memory is
+    not a reliable availability signal. The lock serializes actual calls across
+    parallel rollout processes while keeping the agent's visible tool catalog
+    unchanged.
+    """
+    if not _env_bool("TERRABOX_SERVICE_CALL_LOCKS", True):
+        yield
+        return
+
+    name = _SERVICE_LOCK_NAMES.get(service, service).replace("/", "_")
+    lock_dir = Path(os.environ.get("TERRABOX_SERVICE_LOCK_DIR", "tmp/service_locks"))
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{name}.lock"
+    timeout = _service_lock_timeout_seconds(name)
+    start = time.time()
+
+    with lock_path.open("w") as lock_file:
+        while True:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                waited = time.time() - start
+                if waited >= 1:
+                    logger.info("Acquired %s service lock after %.1fs", name, waited)
+                break
+            except BlockingIOError:
+                elapsed = time.time() - start
+                if timeout > 0 and elapsed >= timeout:
+                    raise TimeoutError(f"Timed out waiting {timeout}s for {name} service lock")
+                if int(elapsed) % 30 == 0:
+                    logger.info("Waiting for %s service lock (%.0fs elapsed)", name, elapsed)
+                time.sleep(2)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 def _get_image_path(arguments: dict) -> str:
     """Extract image path from arguments, trying multiple key names."""
@@ -82,6 +160,34 @@ def _easyocr_gpu_setting() -> bool | str:
         except ValueError:
             pass
     return f"cuda:{target}"
+
+
+_OCR_LANGUAGE_ALIASES = {
+    "zh": "ch_sim",
+    "zh-cn": "ch_sim",
+    "zh_hans": "ch_sim",
+    "zh-hans": "ch_sim",
+    "cn": "ch_sim",
+    "chinese": "ch_sim",
+    "simplified_chinese": "ch_sim",
+    "zh-tw": "ch_tra",
+    "zh_hant": "ch_tra",
+    "zh-hant": "ch_tra",
+    "traditional_chinese": "ch_tra",
+}
+
+
+def _normalize_ocr_languages(languages: Any) -> list[str]:
+    """Accept common LLM language aliases while preserving EasyOCR codes."""
+    if isinstance(languages, str):
+        languages = [languages]
+    normalized: list[str] = []
+    for lang in languages or ["en"]:
+        key = str(lang).strip().lower().replace(" ", "_")
+        if not key:
+            continue
+        normalized.append(_OCR_LANGUAGE_ALIASES.get(key, key))
+    return normalized or ["en"]
 
 
 def _max_perception_long_side() -> int:
@@ -209,26 +315,29 @@ def _reduced_vlm_output_budget(error_text: str) -> int | None:
 
 def _call_service(manager, url: str, payload: dict, timeout: int = 120) -> dict:
     """Start *manager* if not running, POST to *url*, return parsed JSON or error dict."""
+    service = _service_name_for_manager(manager)
     try:
-        manager.start_service()
-    except Exception as e:
-        if _is_cuda_oom_text(str(e)):
-            _stop_tool_service_after_call(manager)
-            return _tool_oom_response(str(e))
-        return {"status": "error", "message": f"Failed to start service: {e}"}
-    try:
-        resp = requests.post(url, json=payload, timeout=timeout, proxies={"http": None, "https": None})
-        if resp.status_code == 200:
-            return resp.json()
-        if _is_cuda_oom_text(resp.text):
-            return _tool_oom_response(f"API error {resp.status_code}: {resp.text}")
-        return {"status": "error", "message": f"API error {resp.status_code}: {resp.text}"}
+        with _service_call_lock(service):
+            try:
+                manager.start_service()
+            except Exception as e:
+                if _is_cuda_oom_text(str(e)):
+                    _stop_tool_service_after_call(manager)
+                    return _tool_oom_response(str(e))
+                return {"status": "error", "message": f"Failed to start service: {e}"}
+            try:
+                resp = requests.post(url, json=payload, timeout=timeout, proxies={"http": None, "https": None})
+                if resp.status_code == 200:
+                    return resp.json()
+                if _is_cuda_oom_text(resp.text):
+                    return _tool_oom_response(f"API error {resp.status_code}: {resp.text}")
+                return {"status": "error", "message": f"API error {resp.status_code}: {resp.text}"}
+            finally:
+                _stop_tool_service_after_call(manager)
     except Exception as e:
         if _is_cuda_oom_text(str(e)):
             return _tool_oom_response(str(e))
         return {"status": "error", "message": f"Connection failed: {e}"}
-    finally:
-        _stop_tool_service_after_call(manager)
 
 
 def _is_cuda_oom_text(text: str) -> bool:
@@ -378,6 +487,27 @@ def _extract_remotesam_bboxes(result: Any) -> list[dict[str, Any]]:
     return bboxes
 
 
+def _extract_mask_pixel_counts(result_summary: dict[str, Any]) -> list[int]:
+    """Return positive-pixel counts from mask-like RemoteSAM summary fields."""
+    if not isinstance(result_summary, dict):
+        return []
+
+    counts: list[int] = []
+    fallback_counts: list[int] = []
+    for key, value in result_summary.items():
+        if not isinstance(value, dict) or "positive_pixels" not in value:
+            continue
+        try:
+            count = int(value["positive_pixels"])
+        except Exception:
+            continue
+        fallback_counts.append(count)
+        key_l = str(key).lower()
+        if "mask" in key_l or "seg" in key_l:
+            counts.append(count)
+    return counts or fallback_counts
+
+
 # --- Handlers ---
 
 def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
@@ -440,11 +570,17 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
         max_tokens = 8192
     
     try:
-        vllm_manager.start_service()
+        lock_ctx = _service_call_lock("vlm")
+        lock_ctx.__enter__()
     except Exception as e:
-        return {"status": "error", "message": f"Failed to start AI Service: {str(e)}"}
+        return {"status": "error", "message": f"Failed to acquire VLM service lock: {str(e)}"}
 
     try:
+        try:
+            vllm_manager.start_service()
+        except Exception as e:
+            return {"status": "error", "message": f"Failed to start AI Service: {str(e)}"}
+
         try:
             message_content = [{"type": "text", "text": prompt}]
 
@@ -520,6 +656,7 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
         return {"status": "error", "message": f"Connection failed: {str(e)}"}
     finally:
         _stop_tool_service_after_call(vllm_manager)
+        lock_ctx.__exit__(None, None, None)
 
 
 
@@ -544,9 +681,40 @@ def sam2_segment_handler(arguments: Dict[str, Any], context: Any, account: Any) 
         rs_args["task_type"] = "referring"
         rs_args["sentence"] = str(text).strip()
         out = remotesam_handler(rs_args, context, account)
-        if isinstance(out, dict) and out.get("status") != "error":
-            out["note"] = f"text-targeted segmentation of '{text}' via RemoteSAM (positive_pixels = object pixel area)"
-        return out
+        if not isinstance(out, dict) or out.get("status") == "error":
+            return out
+
+        result_summary = out.get("result_summary") or {}
+        pixel_counts = _extract_mask_pixel_counts(result_summary)
+        total_pixels = int(sum(pixel_counts)) if pixel_counts else None
+        flag = arguments.get("flag", True)
+        per_object = flag if isinstance(flag, bool) else True
+        output_value: Any
+        if total_pixels is None:
+            output_value = "pixel count unavailable; see artifact_path"
+        elif per_object:
+            output_value = pixel_counts
+        else:
+            output_value = total_pixels
+
+        compact = {
+            "status": "success",
+            "output": str(output_value),
+            "text": str(output_value),
+            "artifact_path": out.get("artifact_path"),
+            "result_summary": result_summary,
+            "bboxes": out.get("bboxes", []),
+            "result_keys": out.get("result_keys", []),
+            "pixel_counts": pixel_counts,
+            "positive_pixels": total_pixels,
+            "count": len(pixel_counts),
+            "flag": per_object,
+            "message": (
+                f"Text-targeted segmentation of '{text}' completed. "
+                "Full mask is saved in artifact_path; the inline result is compact."
+            ),
+        }
+        return compact
 
     clean_path = _resolve_image_path(arguments)
     service_path, preprocessing = _prepare_perception_image(clean_path, context)
@@ -874,13 +1042,6 @@ def _instructsam_via_service(arguments: Dict[str, Any], context: Any, account: A
     the host VLM (port ~9000); nobody used to start it, so counting silently
     returned 0. We now ensure that backend is up before calling the service.
     """
-    # Bring up the counting backend the InstructSAM service depends on.
-    try:
-        vllm_manager.start_service()
-    except Exception as e:
-        return {"status": "error",
-                "message": f"Failed to start InstructSAM counting backend: {_hide_backend(str(e))}"}
-
     clean_path = _resolve_image_path(arguments)
     service_path, preprocessing = _prepare_perception_image(clean_path, context)
     # Accept the OpenEarthAgent TextToBbox arg names too (`text`, `top1`).
@@ -888,11 +1049,21 @@ def _instructsam_via_service(arguments: Dict[str, Any], context: Any, account: A
                    or arguments.get("object") or "objects in the image")
     top1 = bool(arguments.get("top1", False))
 
-    result = _call_service(
-        instructsam_manager, f"{instructsam_manager.API_URL}/segment",
-        {"image_path": service_path, "text_prompt": text_prompt},
-        timeout=int(os.environ.get("INSTRUCTSAM_TOOL_TIMEOUT", "300")),
-    )
+    # InstructSAM's service kernel calls the host VLM during counting. Hold the
+    # VLM inference lock for the whole InstructSAM call so parallel rollout
+    # streams do not concurrently hit the same warm VLM container.
+    with _service_call_lock("vlm"):
+        try:
+            vllm_manager.start_service()
+        except Exception as e:
+            return {"status": "error",
+                    "message": f"Failed to start InstructSAM counting backend: {_hide_backend(str(e))}"}
+
+        result = _call_service(
+            instructsam_manager, f"{instructsam_manager.API_URL}/segment",
+            {"image_path": service_path, "text_prompt": text_prompt},
+            timeout=int(os.environ.get("INSTRUCTSAM_TOOL_TIMEOUT", "300")),
+        )
     if result.get("status") == "error":
         return result
 
@@ -992,12 +1163,18 @@ def _instructsam_via_vlm(arguments: Dict[str, Any], context: Any, account: Any) 
     )
 
     try:
-        vllm_manager.start_service()
+        lock_ctx = _service_call_lock("vlm")
+        lock_ctx.__enter__()
     except Exception as e:
-        # Keep the backend opaque to the agent: surface as an InstructSAM error.
-        return {"status": "error", "message": f"Failed to start InstructSAM service: {_hide_backend(str(e))}"}
+        return {"status": "error", "message": f"Failed to acquire InstructSAM service lock: {_hide_backend(str(e))}"}
 
     try:
+        try:
+            vllm_manager.start_service()
+        except Exception as e:
+            # Keep the backend opaque to the agent: surface as an InstructSAM error.
+            return {"status": "error", "message": f"Failed to start InstructSAM service: {_hide_backend(str(e))}"}
+
         try:
             b64_str = _encode_image_to_base64(service_path)
         except Exception as e:
@@ -1032,6 +1209,7 @@ def _instructsam_via_vlm(arguments: Dict[str, Any], context: Any, account: Any) 
         content = response.json()["choices"][0]["message"]["content"]
     finally:
         _stop_tool_service_after_call(vllm_manager)
+        lock_ctx.__exit__(None, None, None)
 
     parsed = _parse_vlm_grounding_bboxes(content)
 
@@ -1218,9 +1396,7 @@ def add_text_handler(arguments: Dict[str, Any], context: Any, account: Any) -> D
 def ocr_extract_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """Extract text from an image using EasyOCR."""
     image_path = _resolve_image_path(arguments)
-    languages = arguments.get("languages", ["en"])
-    if isinstance(languages, str):
-        languages = [languages]
+    languages = _normalize_ocr_languages(arguments.get("languages", ["en"]))
 
     gpu_setting = _easyocr_gpu_setting()
     timeout = int(os.environ.get("TERRABOX_OCR_TIMEOUT", "180"))
@@ -1555,7 +1731,7 @@ def setup(registrar):
         ToolSpec(
             slug="geo_perception.sam2_segment",
             name="SAM2 Segmentation",
-            description="Segment objects in a satellite image and return their pixel regions/areas. Provide a 'text' target (e.g. 'vehicles') to segment just that object class (returns its positive-pixel area, ideal for 'sum the pixel areas of X'); omit 'text' for class-agnostic full-image segmentation. Returns {output, count, bboxes:[{x1,y1,x2,y2}]} (and a positive_pixels summary when text-targeted).",
+            description="OEA SegmentObjectPixels-compatible segmentation. Provide a 'text' target (e.g. 'vehicles' or 'roundabout') to segment that object and return pixel counts, ideal for area-from-pixels questions. With flag=false returns the total positive-pixel count; with flag=true returns per-object pixel counts when available. Full masks are saved as artifacts, not returned inline. Omit 'text' only for class-agnostic full-image segmentation. Returns {output, text, positive_pixels, pixel_counts, artifact_path, bboxes}.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1563,8 +1739,8 @@ def setup(registrar):
                         "type": "string",
                         "description": "Image to segment. Frontend uploads the image; backend resolves the local file path."
                     },
-                    "text": {"type": "string", "description": "Object class to segment (e.g., 'vehicles'). Strongly recommended — gives object-specific pixels."},
-                    "flag": {"type": "boolean", "description": "Optional mode flag."}
+                    "text": {"type": "string", "description": "Object name/description to segment (e.g., 'vehicles' or 'roundabout'). Strongly recommended for object-specific pixel counts."},
+                    "flag": {"type": "boolean", "description": "If true, return per-object pixel counts when available. If false, return the total pixel count. Default: true."}
                 },
                 "required": ["image"]
             },
