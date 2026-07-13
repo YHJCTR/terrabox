@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -235,3 +236,115 @@ def test_metric_viewer_discovers_adapter_owned_agentdojo_group(tmp_path, monkeyp
     assert [ref.name for ref in refs] == [group.name]
     assert refs[0].kind == "base"
     assert refs[0].prompt_path == group / "active_system_message.txt"
+
+
+def test_agentdojo_job_does_not_skip_incomplete_complete_status(tmp_path):
+    from terrabox.evolution.promptevo.adapters.agentdojo import pipeline
+
+    output_dir = tmp_path / "experiments"
+    adapter_dir = output_dir / "group" / "workspace_clean"
+    (adapter_dir / "runs").mkdir(parents=True)
+    (adapter_dir / "run_status.json").write_text(json.dumps({"status": "complete"}), encoding="utf-8")
+    _write_result(adapter_dir / "runs", user_task="user_task_0")
+
+    class Runner:
+        def __init__(self):
+            self.output_dir = str(output_dir)
+            self.called = 0
+
+        def run(self, *args, **kwargs):
+            self.called += 1
+            _write_result(adapter_dir / "runs", user_task="user_task_1")
+            (adapter_dir / "run_status.json").write_text(
+                json.dumps({"status": "complete", "returncode": 0}), encoding="utf-8"
+            )
+            return str(adapter_dir)
+
+    runner = Runner()
+    result = pipeline._run_job(
+        runner,
+        "group",
+        {
+            "name": "workspace_clean",
+            "suite": "workspace",
+            "attack": None,
+            "injection_tasks": [],
+            "expected_results": 2,
+        },
+        "prompt",
+        9200,
+    )
+
+    assert result == str(adapter_dir)
+    assert runner.called == 1
+    status = json.loads((adapter_dir / "run_status.json").read_text(encoding="utf-8"))
+    assert status["actual_results"] == status["expected_results"] == 2
+
+
+def test_agentdojo_runner_records_timeout_status(tmp_path, monkeypatch):
+    from terrabox.evolution.promptevo.adapters.agentdojo import core
+
+    def fake_run(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, 5)
+
+    monkeypatch.setattr(core.subprocess, "run", fake_run)
+    agentdojo_root = tmp_path / "agentdojo"
+    (agentdojo_root / "src" / "agentdojo" / "data").mkdir(parents=True)
+    runner = core.AgentDojoRolloutRunner(
+        agentdojo_root=str(agentdojo_root),
+        output_dir=str(tmp_path / "experiments"),
+        check_dependencies=False,
+    )
+
+    try:
+        runner.run("prompt", experiment="timeout", timeout=5)
+    except RuntimeError as exc:
+        assert "timed out" in str(exc)
+    else:
+        raise AssertionError("timeout should fail the AgentDojo job")
+    status = json.loads(
+        (tmp_path / "experiments" / "timeout" / "run_status.json").read_text(encoding="utf-8")
+    )
+    assert status["status"] == "failed"
+    assert status["reason"] == "timeout"
+
+
+def test_agentdojo_pipeline_reuses_saved_stage_prompts(tmp_path, monkeypatch):
+    from terrabox.evolution.promptevo.adapters.agentdojo import pipeline
+
+    output_dir = tmp_path / "experiments"
+    stage1_record = output_dir / "stage1"
+    stage2_record = output_dir / "stage2"
+    stage1_record.mkdir(parents=True)
+    stage2_record.mkdir(parents=True)
+    stage1_prompt = tmp_path / "stage1.txt"
+    stage2_prompt = tmp_path / "stage2.txt"
+    stage1_prompt.write_text("stage1", encoding="utf-8")
+    stage2_prompt.write_text("stage2", encoding="utf-8")
+    (stage1_record / "stage1_proposal.json").write_text(
+        json.dumps({"version": "s1", "prompt_path": str(stage1_prompt)}), encoding="utf-8"
+    )
+    (stage2_record / "stage2_contrastive.json").write_text(
+        json.dumps({"version": "s2", "prompt_path": str(stage2_prompt)}), encoding="utf-8"
+    )
+
+    assert pipeline.optimize_stage1("base", "s1", "stage1", output_dir=str(output_dir)) == str(stage1_prompt)
+    assert pipeline.optimize_stage2(
+        "base", "stage1", "s1", "s2", "stage2", output_dir=str(output_dir)
+    ) == str(stage2_prompt)
+
+
+def test_agentdojo_rollout_lock_rejects_duplicate_pipeline(tmp_path, monkeypatch):
+    from terrabox.evolution.promptevo.adapters.agentdojo import pipeline
+
+    monkeypatch.setattr(pipeline, "ROLLOUT_LOCK_PATH", tmp_path / "agentdojo.lock")
+    first = pipeline._acquire_rollout_lock()
+    try:
+        try:
+            pipeline._acquire_rollout_lock()
+        except RuntimeError as exc:
+            assert "already running" in str(exc)
+        else:
+            raise AssertionError("duplicate AgentDojo rollout lock should fail")
+    finally:
+        pipeline._release_rollout_lock(first)

@@ -7,6 +7,7 @@ PromptEvo stage transitions.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import random
@@ -44,6 +45,7 @@ MODEL_PATH = "/data1/yuhongjie2/Earth-Agent/llm/qwen/3_8B"
 DEFAULT_ATTACK = "important_instructions"
 NO_THINK_PATCH = "terrabox.evolution.promptevo.adapters.agentdojo.qwen_no_think"
 GPU_LANES = ((0, 9200), (1, 9201), (2, 9202), (3, 9203))
+ROLLOUT_LOCK_PATH = Path(__file__).resolve().parents[6] / "tmp" / "agentdojo_rollout.lock"
 
 
 def experiment_dir(name: str, output_dir: str = DEFAULT_AGENTDOJO_EXPERIMENTS_DIR) -> str:
@@ -125,6 +127,43 @@ def _container_name(stage: str, lane: str, gpu: int, port: int) -> str:
 def _stop_container(name: str) -> None:
     subprocess.run(["docker", "stop", "-t", "2", name], capture_output=True)
     subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+
+def _agentdojo_container_names() -> list[str]:
+    proc = subprocess.run(
+        ["docker", "ps", "-a", "--format", "{{.Names}}"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"failed to list Docker containers: {proc.stderr.strip()}")
+    return [name for name in proc.stdout.splitlines() if name.startswith("agentdojo-qwen3-")]
+
+
+def _cleanup_stale_agentdojo_containers() -> None:
+    for name in _agentdojo_container_names():
+        print(f"[{time.strftime('%F %T')}] removing stale AgentDojo container {name}", flush=True)
+        _stop_container(name)
+
+
+def _acquire_rollout_lock():
+    ROLLOUT_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    handle = ROLLOUT_LOCK_PATH.open("w")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        handle.close()
+        raise RuntimeError("another AgentDojo rollout pipeline is already running") from exc
+    handle.write(f"pid={os.getpid()} started={time.strftime('%F %T')}\n")
+    handle.flush()
+    return handle
+
+
+def _release_rollout_lock(handle) -> None:
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
 
 
 def build_vllm_command(stage: str, lane: str, gpu: int, port: int, model_path: str = MODEL_PATH) -> list[str]:
@@ -224,8 +263,20 @@ def _run_job(
 ) -> str:
     experiment = f"{group}/{job['name']}"
     status_path = Path(experiment_dir(experiment, runner.output_dir), "run_status.json")
+    expected_results = int(job["expected_results"])
     if _read_status(status_path) == "complete":
-        return str(status_path.parent)
+        actual_results = _job_result_count(status_path.parent)
+        if actual_results == expected_results:
+            return str(status_path.parent)
+        _write_json(
+            status_path,
+            {
+                "status": "failed",
+                "reason": "incomplete_results",
+                "expected_results": expected_results,
+                "actual_results": actual_results,
+            },
+        )
     config = AgentDojoRunConfig(
         suite=str(job["suite"]),
         model="vllm_parsed",
@@ -236,13 +287,37 @@ def _run_job(
         max_workers=1,
         force_rerun=False,
     )
-    return runner.run(
+    adapter_dir = runner.run(
         prompt,
         experiment=experiment,
         run_config=config,
         env={"LOCAL_LLM_PORT": str(port)},
         timeout=24 * 60 * 60,
     )
+    actual_results = _job_result_count(Path(adapter_dir))
+    if actual_results != expected_results:
+        _write_json(
+            status_path,
+            {
+                "status": "failed",
+                "reason": "incomplete_results",
+                "expected_results": expected_results,
+                "actual_results": actual_results,
+            },
+        )
+        raise RuntimeError(
+            f"AgentDojo job {experiment} produced {actual_results}/{expected_results} valid results"
+        )
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    status.update({"expected_results": expected_results, "actual_results": actual_results})
+    _write_json(status_path, status)
+    return adapter_dir
+
+
+def _job_result_count(adapter_dir: Path) -> int:
+    runs_dir = adapter_dir / "runs"
+    metrics = AgentDojoMetricProvider(results_path_fn=lambda _exp: str(runs_dir)).aggregate("job")
+    return int(metrics.get("n") or 0)
 
 
 def _run_lane(
@@ -323,9 +398,11 @@ def rollout_group(
             "jobs": jobs,
         },
     )
-    _write_json(status_path, {"status": "starting", "stage": stage, "prompt_version": prompt_version})
+    rollout_lock = _acquire_rollout_lock()
     containers: list[str] = []
     try:
+        _cleanup_stale_agentdojo_containers()
+        _write_json(status_path, {"status": "starting", "stage": stage, "prompt_version": prompt_version})
         for gpu, port in GPU_LANES:
             containers.append(_start_server(stage, f"lane{gpu}", gpu, port, model_path))
         queue: Queue = Queue()
@@ -351,8 +428,26 @@ def rollout_group(
                 results.update(future.result())
         results_root = agentdojo_adapter_results_path(group, output_dir)
         metrics = AgentDojoMetricProvider(results_path_fn=lambda _exp: results_root).aggregate(group)
+        final_statuses = {
+            job["name"]: _read_status(root / job["name"] / "run_status.json")
+            for job in jobs
+        }
+        expected_results = int(check.get("expected_results") or 0)
+        actual_results = int(metrics.get("n") or 0)
+        if any(value != "complete" for value in final_statuses.values()) or actual_results != expected_results:
+            raise RuntimeError(
+                "AgentDojo group is incomplete: "
+                f"results={actual_results}/{expected_results}, statuses={final_statuses}"
+            )
         _write_json(root / "metrics_summary.json", metrics)
-        status = {"status": "complete", "stage": stage, "prompt_version": prompt_version, "jobs": results}
+        status = {
+            "status": "complete",
+            "stage": stage,
+            "prompt_version": prompt_version,
+            "jobs": results,
+            "expected_results": expected_results,
+            "actual_results": actual_results,
+        }
         _write_json(status_path, status)
         return status
     except Exception as exc:
@@ -361,6 +456,7 @@ def rollout_group(
     finally:
         for name in containers:
             _stop_container(name)
+        _release_rollout_lock(rollout_lock)
 
 
 def _sample_stage1_traces(results_dir: str, seed: int = 42) -> str:
@@ -387,6 +483,17 @@ def optimize_stage1(
     provider: str = "longcat",
     output_dir: str = DEFAULT_AGENTDOJO_EXPERIMENTS_DIR,
 ) -> str:
+    record = Path(experiment_dir(record_group, output_dir))
+    proposal_path = record / "stage1_proposal.json"
+    if proposal_path.is_file():
+        try:
+            saved = json.loads(proposal_path.read_text(encoding="utf-8"))
+            prompt_path = Path(str(saved.get("prompt_path") or ""))
+            if saved.get("version") == version and prompt_path.is_file():
+                print(f"[{time.strftime('%F %T')}] reusing AgentDojo Stage1 prompt {prompt_path}", flush=True)
+                return str(prompt_path)
+        except (OSError, ValueError, TypeError):
+            pass
     base_results = agentdojo_adapter_results_path(base_group, output_dir)
     store = AgentDojoPromptStore()
     base_prompt = store.load("base")
@@ -406,7 +513,6 @@ def optimize_stage1(
         proposal.revised_prompt,
         {"proposal": proposal.to_dict(), "scores": scores, "base_group": base_group},
     )
-    record = Path(experiment_dir(record_group, output_dir))
     record.mkdir(parents=True, exist_ok=True)
     _write_json(
         record / "stage1_proposal.json",
@@ -424,6 +530,17 @@ def optimize_stage2(
     provider: str = "longcat",
     output_dir: str = DEFAULT_AGENTDOJO_EXPERIMENTS_DIR,
 ) -> str:
+    record = Path(experiment_dir(record_group, output_dir))
+    contrastive_path = record / "stage2_contrastive.json"
+    if contrastive_path.is_file():
+        try:
+            saved = json.loads(contrastive_path.read_text(encoding="utf-8"))
+            prompt_path = Path(str(saved.get("prompt_path") or ""))
+            if saved.get("version") == stage2_version and prompt_path.is_file():
+                print(f"[{time.strftime('%F %T')}] reusing AgentDojo Stage2 prompt {prompt_path}", flush=True)
+                return str(prompt_path)
+        except (OSError, ValueError, TypeError):
+            pass
     base_results = agentdojo_adapter_results_path(base_group, output_dir)
     stage1_results = agentdojo_adapter_results_path(stage1_group, output_dir)
     store = AgentDojoPromptStore()
@@ -453,10 +570,9 @@ def optimize_stage2(
         result.revised_prompt,
         {"result": result.to_dict(), "base_group": base_group, "stage1_group": stage1_group},
     )
-    record = Path(experiment_dir(record_group, output_dir))
     record.mkdir(parents=True, exist_ok=True)
     _write_json(
-        record / "stage2_contrastive.json",
+        contrastive_path,
         {"version": stage2_version, "prompt_path": prompt_path, "result": result.to_dict()},
     )
     return prompt_path

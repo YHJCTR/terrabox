@@ -82,8 +82,8 @@ PYTHONPATH=src /data/yhj/miniconda3/envs/unsloth/bin/python \
   -m terrabox.evolution.promptevo.adapters.agentdojo.pipeline preflight
 ```
 
-At the time this adapter was prepared, the local checkout and Qwen3 model were
-present, but `unsloth` was missing:
+The local checkout and Qwen3 model are present. The packages that were absent
+from the read-only `unsloth` environment are:
 
 - `cohere`
 - `deepdiff`
@@ -94,7 +94,8 @@ packages are required even for a local Qwen run. Because this server's conda
 site-packages may be read-only, the adapter also supports an isolated dependency
 layer at `tmp/agentdojo_site_packages/` (override with
 `TERRABOX_AGENTDOJO_SITE_PACKAGES`). Preflight, inventory probes, and rollout
-subprocesses add that path automatically. The adapter writes a structured
+subprocesses add that path automatically. These packages are now installed in
+that isolated layer and formal preflight passes. The adapter writes a structured
 `preflight.json`/blocked `pipeline_status.json` instead of starting GPUs when
 dependencies are missing.
 
@@ -130,6 +131,13 @@ PYTHONPATH=src /data/yhj/miniconda3/envs/unsloth/bin/python \
 The pipeline uses `force_rerun=False`. Existing upstream JSON files are the
 checkpoint; rerunning the same group skips completed tasks and phases. Every
 rollout invocation owns its four vLLM containers and removes them in `finally`.
+It also verifies every job's valid result count and the stage-wide total before
+writing `pipeline_status=complete`; a successful CLI exit with missing JSON is
+recorded as `incomplete_results` and retried. `stdout.log` and `stderr.log` are
+written live, timeout/launcher failures write `run_status.json`, and a file lock
+prevents two AgentDojo pipelines from sharing the four lanes. Stage1/Stage2
+proposal JSON files are resumable checkpoints, so a watchdog restart does not
+repeat paid prompt optimization after a prompt has already been saved.
 
 ## Experiment layout
 

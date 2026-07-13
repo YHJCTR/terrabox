@@ -22,7 +22,16 @@ without modifying that checkout.
 - Experiment groups live under `agentdojo/experiments/<group>/`; prompt versions
   live under `evolution_store/promptevo/agentdojo/versions/`.
 - Runs must be resumable (`force_rerun=False`) and must stop their own vLLM
-  containers in `finally`.
+  containers in `finally`. A job is complete only when its valid result count
+  exactly matches `expected_results`; CLI return code 0 alone is insufficient.
+  A group is complete only when all 39 job statuses are complete and the stage
+  total matches the preflight total (currently 1081).
+- Long jobs stream stdout/stderr directly to experiment-local log files. Timeout
+  and launcher failures must write `run_status.json`, so watchdog retries never
+  depend on an empty terminal or an in-memory subprocess buffer.
+- Only one AgentDojo rollout may own the four GPU lanes. Keep the cross-process
+  `tmp/agentdojo_rollout.lock`, clean only stale `agentdojo-qwen3-*` containers
+  after acquiring it, and never stop unrelated Tau2 or user containers.
 - Before any smoke/full run, execute the pipeline `preflight`. Missing upstream
   dependencies are a blocker and must be reported, not bypassed with mock data.
 - If the conda environment is read-only, install missing AgentDojo-only packages
@@ -30,7 +39,8 @@ without modifying that checkout.
   `PYTHONPATH` automatically. Do not fall back to `/home/*/.local`.
 - Stage1 must sample both security and utility failures. Stage2 must compare the
   same Base/Stage1 task IDs and explicitly protect security while improving
-  utility.
+  utility. Existing `stage1_proposal.json` and `stage2_contrastive.json` are
+  paid-API checkpoints and must be reused on watcher restart.
 - Keep `AGENTS.md`, `CLAUDE.md`, this adapter README, the shared adapter README,
   and `EXPERIMENT_TODO.md` synchronized when changing scope, metrics, provider,
   GPU layout, or output paths.

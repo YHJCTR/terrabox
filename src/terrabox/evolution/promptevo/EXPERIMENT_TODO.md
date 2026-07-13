@@ -156,7 +156,8 @@
   - 实验结果统一保存到 `src/terrabox/evolution/promptevo/adapters/agentdojo/experiments/<group>/`，prompt 版本保存到 `evolution_store/promptevo/agentdojo/versions/`；metricViewer 已按 `agentdojo` 场景发现顶层实验组。
   - 已完成纯离线合成测试：clean/attack 判定、稳定 task id、tool call/result 关联、resume CLI、GPU 钉卡/Hermes 参数和 metricViewer 发现均通过；没有启动正式 AgentDojo benchmark，也没有调用付费 API。
   - `cohere`、`deepdiff`、`google-genai` 已隔离安装到 `tmp/agentdojo_site_packages/`，不污染 `unsloth` 环境；adapter 会自动加入该目录。正式 preflight 已通过，识别到 4 个 suite 和每阶段 `1081` 条结果。
-  - 当前没有代码或依赖阻塞；等待 Tau2 Stage1/Stage2 完成后启动四卡 smoke 和正式 rollout。Codex 沙箱内直接 `nvidia-smi` 不可用，但 Docker daemon 已验证能够分配 GPU。
+  - 当前没有代码或依赖阻塞；等待 Tau2 Stage1/Stage2 完成后启动正式 Base。Codex 沙箱内直接 `nvidia-smi` 不可用，但 Docker daemon 已验证能够分配 GPU。
+  - pipeline 已补齐严格完成口径：39 个 job 均须 `complete`，每 job 结果数须匹配预期，stage 总数须为 preflight 的 `1081`；长日志实时落盘，timeout/launcher error 显式写状态，Stage1/Stage2 prompt checkpoint 可复用，四卡 rollout 有跨进程锁并会清理自身残留容器。
 - **待办**:
   - 宿主机 GPU 恢复后重新运行 preflight，并做同一正式配置的最小真实 smoke。
   - 用同一正式配置做最小真实 smoke：至少 1 个 clean user task + 1 个 attacked user/injection pair，确认 Qwen 原生工具调用、上游 evaluator、结果落盘和 GPU 清理。

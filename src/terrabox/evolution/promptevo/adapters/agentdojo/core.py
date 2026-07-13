@@ -651,17 +651,38 @@ class AgentDojoRolloutRunner:
         }
         _write_json(os.path.join(adapter_dir, "run_meta.json"), meta)
 
-        proc = subprocess.run(
-            cmd,
-            cwd=self.agentdojo_root,
-            env=full_env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-        )
-        Path(os.path.join(adapter_dir, "stdout.log")).write_text(proc.stdout, encoding="utf-8")
-        Path(os.path.join(adapter_dir, "stderr.log")).write_text(proc.stderr, encoding="utf-8")
+        stdout_path = os.path.join(adapter_dir, "stdout.log")
+        stderr_path = os.path.join(adapter_dir, "stderr.log")
+        try:
+            with open(stdout_path, "w", encoding="utf-8") as stdout_file, open(
+                stderr_path, "w", encoding="utf-8"
+            ) as stderr_file:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=self.agentdojo_root,
+                    env=full_env,
+                    text=True,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    timeout=timeout,
+                )
+        except subprocess.TimeoutExpired as exc:
+            _write_json(
+                os.path.join(adapter_dir, "run_status.json"),
+                {
+                    "status": "failed",
+                    "reason": "timeout",
+                    "timeout_seconds": timeout,
+                    "error": repr(exc),
+                },
+            )
+            raise RuntimeError(f"AgentDojo run timed out after {timeout}s, see {adapter_dir}") from exc
+        except Exception as exc:
+            _write_json(
+                os.path.join(adapter_dir, "run_status.json"),
+                {"status": "failed", "reason": "launcher_error", "error": repr(exc)},
+            )
+            raise
 
         metrics = AgentDojoMetricProvider(results_path_fn=lambda _exp: runs_dir)
         status = {"status": "complete" if proc.returncode == 0 else "failed", "returncode": proc.returncode}
