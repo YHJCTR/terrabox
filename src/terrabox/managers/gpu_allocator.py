@@ -26,6 +26,49 @@ logger = logging.getLogger(__name__)
 DEFAULT_MIN_FREE_MIB = 4096
 
 
+def _split_devices(value: str) -> list[str]:
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _fallback_from_env(count: int) -> str | None:
+    raw = (
+        os.environ.get("TERRABOX_GPU_FALLBACK_DEVICES")
+        or os.environ.get("TERRABOX_GPU_FALLBACK_DEVICE")
+        or ""
+    ).strip()
+    if not raw:
+        return None
+    devices = _split_devices(raw)
+    if not devices:
+        return None
+    if count <= 1:
+        return devices[0]
+    if len(devices) >= count:
+        return ",".join(devices[:count])
+    return ",".join(devices)
+
+
+def _allowed_devices_from_env() -> set[str] | None:
+    raw = os.environ.get("TERRABOX_GPU_ALLOWED_DEVICES", "").strip()
+    if not raw:
+        return None
+    allowed = set(_split_devices(raw))
+    return allowed or None
+
+
+def _filter_allowed_gpus(gpus: List[dict]) -> List[dict]:
+    allowed = _allowed_devices_from_env()
+    if not allowed:
+        return gpus
+    filtered = [gpu for gpu in gpus if gpu["id"] in allowed]
+    if not filtered:
+        logger.warning(
+            "TERRABOX_GPU_ALLOWED_DEVICES=%r did not match any visible GPU.",
+            ",".join(sorted(allowed)),
+        )
+    return filtered
+
+
 def _query_gpu_free_memory() -> List[dict]:
     """
     Query all GPUs via nvidia-smi.
@@ -95,8 +138,12 @@ def allocate_gpu(
             logger.info(f"GPU override via ${env_var}={val!r}, skipping dynamic allocation.")
             return val.strip()
 
+    env_fallback = _fallback_from_env(1)
+    if env_fallback:
+        fallback = env_fallback
+
     try:
-        gpus = _query_gpu_free_memory()
+        gpus = _filter_allowed_gpus(_query_gpu_free_memory())
     except RuntimeError as e:
         if strict:
             raise
@@ -155,8 +202,12 @@ def allocate_gpus(
             logger.info(f"GPU override via ${env_var}={val!r}, skipping dynamic allocation.")
             return val.strip()
 
+    env_fallback = _fallback_from_env(count)
+    if env_fallback:
+        fallback = env_fallback
+
     try:
-        gpus = _query_gpu_free_memory()
+        gpus = _filter_allowed_gpus(_query_gpu_free_memory())
     except RuntimeError as e:
         if strict:
             raise
@@ -191,7 +242,7 @@ def allocate_gpus(
 def has_free_gpu(min_free_mib: int) -> bool:
     """Return True if at least one GPU has >= min_free_mib MiB of free memory."""
     try:
-        return any(g["free_mib"] >= min_free_mib for g in _query_gpu_free_memory())
+        return any(g["free_mib"] >= min_free_mib for g in _filter_allowed_gpus(_query_gpu_free_memory()))
     except Exception:
         return True  # Cannot query — assume OK; allocate_gpu fallback will handle it
 
@@ -199,7 +250,7 @@ def has_free_gpu(min_free_mib: int) -> bool:
 def has_free_gpus(count: int, min_free_mib: int) -> bool:
     """Return True if at least `count` GPUs each have >= min_free_mib MiB of free memory."""
     try:
-        eligible = [g for g in _query_gpu_free_memory() if g["free_mib"] >= min_free_mib]
+        eligible = [g for g in _filter_allowed_gpus(_query_gpu_free_memory()) if g["free_mib"] >= min_free_mib]
         return len(eligible) >= count
     except Exception:
         return True

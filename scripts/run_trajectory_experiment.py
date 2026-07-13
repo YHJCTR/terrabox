@@ -59,6 +59,8 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 # 与 evolution/ReAct/runner.py 一致),仅在**实验入口**补设默认值,不改任何路径解析逻辑;
 # setdefault → 已显式设置(如 runner 或手动 export)时尊重原值,不覆盖。
 os.environ.setdefault("TERRABOX_ARTIFACT_OUTPUT_DIR", str(REPO_ROOT / "tmp" / "artifacts"))
+os.environ.setdefault("TERRABOX_TOOL_TIMEOUT_OSM_GIS_GET_AREA_BOUNDARY", "240")
+os.environ.setdefault("TERRABOX_TOOL_TIMEOUT_OSM_GIS_ADD_POIS_LAYER", "240")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -280,33 +282,55 @@ def load_saved_results(results_dir: Path, task_order: list[dict]) -> list[dict]:
 # Agent setup (reuses core infra from test_single_task_3modes.py)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def setup_agent(port: int = 9100, use_docker: bool = False, gpu_devices: str = "0", max_iterations: int = 15):
+def setup_agent(
+    port: int = 9100,
+    use_docker: bool = False,
+    gpu_devices: str = "0",
+    max_iterations: int = 15,
+    llm_provider: str = "",
+):
     """Load toolkits, return config and registry."""
     from terrabox.extensions import load_builtin_toolkits
     from terrabox.core.registry import registry
     from terrabox.agent.config import AgentConfig
+    from terrabox.agent.llm_provider import resolve_provider
+
+    provider = resolve_provider(llm_provider or None)
 
     if use_docker:
         os.environ["TERRABOX_USE_DOCKER"] = "true"
-        # Set environment variables for Docker LLM manager
-        os.environ["AGENT_LLM_PORT"] = str(port)
-        agent_gpu_devices = os.environ.get("AGENT_LLM_GPU_DEVICES") or gpu_devices
-        os.environ["AGENT_LLM_GPU_DEVICES"] = agent_gpu_devices
-        gpu_devices = agent_gpu_devices
-        # Ensure model path is set
-        if "AGENT_LLM_MODEL_PATH" not in os.environ:
-            os.environ["AGENT_LLM_MODEL_PATH"] = "/data1/yuhongjie2/Earth-Agent/llm/qwen/3_8B/"
+        if provider.is_local:
+            # Set environment variables for Docker LLM manager. Remote API
+            # providers still use Docker tools, but do not start a local agent
+            # LLM or inherit its GPU/context constraints.
+            os.environ["AGENT_LLM_PORT"] = str(port)
+            agent_gpu_devices = os.environ.get("AGENT_LLM_GPU_DEVICES") or gpu_devices
+            os.environ["AGENT_LLM_GPU_DEVICES"] = agent_gpu_devices
+            gpu_devices = agent_gpu_devices
+            # Ensure model path is set
+            if "AGENT_LLM_MODEL_PATH" not in os.environ:
+                os.environ["AGENT_LLM_MODEL_PATH"] = "/data1/yuhongjie2/Earth-Agent/llm/qwen/3_8B/"
 
     if not registry.list_toolkits():
         load_builtin_toolkits()
 
     log.info(f"Registry: {len(registry.list_toolkits())} toolkits, {len(registry.list_tools())} tools")
+    if provider.is_local:
+        log.info("Agent LLM provider: local")
+    else:
+        log.info("Agent LLM provider: %s (%s @ %s)", provider.name, provider.model, provider.base_url)
 
     config = AgentConfig(
-        use_local_llm=True,
+        use_local_llm=provider.is_local,
         use_docker=use_docker,
         local_llm_port=port,
         local_llm_gpu_devices=gpu_devices,
+        remote_llm_api_base=provider.base_url,
+        remote_llm_api_key=provider.api_key,
+        remote_llm_model=provider.model,
+        # API providers do not use the local vLLM context cap; keep only the
+        # existing ReAct turn cap below.
+        local_llm_max_model_len=(24576 if provider.is_local else 0),
         max_iterations=max_iterations,
         max_retries_on_error=3,
         max_progressive_steps=10,
@@ -715,11 +739,15 @@ def cmd_rollout(args):
     if args.use_docker:
         os.environ.setdefault("TERRABOX_TOOL_SERVICE_SCOPE", "call")
         os.environ.setdefault("TERRABOX_TOOL_MAX_GPUS", "1")
+    # OEA rollouts should expose tool descriptions close to the source
+    # benchmark roles while leaving the live frontend/backend ToolSpecs richer.
+    os.environ.setdefault("TERRABOX_OEA_EXPERIMENT_TOOL_DESCRIPTIONS", "1")
     config, registry = setup_agent(
         port=args.port,
         use_docker=args.use_docker,
         gpu_devices=gpu_devices,
         max_iterations=args.max_iterations,
+        llm_provider=args.llm_provider,
     )
 
     # Determine allowed tools
@@ -1255,6 +1283,12 @@ def main():
                                 "(只针对连接类瞬时错误;上下文超限/选错工具等确定性错误不重试)")
     p_rollout.add_argument("--resume", action="store_true", help="跳过已有结果的任务")
     p_rollout.add_argument("--use-docker", action="store_true", help="使用 Docker 感知服务")
+    p_rollout.add_argument(
+        "--llm-provider",
+        default="",
+        choices=["", "local", "deepseek", "longcat"],
+        help="Agent LLM provider；默认 local/环境变量 TERRABOX_LLM_PROVIDER。外部 API 不启动本地 agent vLLM、不套本地上下文上限，但仍保留 max-iterations 轮次限制。",
+    )
 
     # Filtering
     p_rollout.add_argument("--skip-mock", action="store_true", default=True)

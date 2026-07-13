@@ -3,14 +3,15 @@
 设计不变量:
 - **默认 local**:不设 `TERRABOX_LLM_PROVIDER`(或设为 ``/`local`)时,返回本地 vLLM 客户端,
   行为与接入前**完全一致**——本模块对现有功能零影响,除非显式开启外部 provider。
-- **外部按需**:`TERRABOX_LLM_PROVIDER=deepseek` 才走外部 OpenAI 兼容 API。
-- **密钥只走 env 或 gitignore 的 `agent_config.yaml`**,绝不进提交文件。
+- **外部按需**:`TERRABOX_LLM_PROVIDER=deepseek|longcat` 才走外部 OpenAI 兼容 API。
+- **密钥只走 gitignore 的 `agent_config.yaml` 或 env**,绝不进提交文件。
 - **代理**:外部 API 需走 http_proxy(默认 opener,respect 环境代理);本地服务需 no_proxy=localhost。
 
 用法(解耦:调用方只拿 client,不关心后端):
     from terrabox.agent.llm_provider import make_llm_client
     client = make_llm_client()                 # 默认 local
-    client = make_llm_client("deepseek")       # 外部
+    client = make_llm_client("deepseek")       # 外部 DeepSeek
+    client = make_llm_client("longcat")        # 外部 LongCat
     text = client.call(prompt, system=..., max_tokens=...)
     obj  = client.call_json(prompt, system=...)
 """
@@ -26,16 +27,20 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# DeepSeek 价格(人民币 / 百万 token);如官方调价改这里即可。
+# DeepSeek 官方价格(美元 / 百万 token);如官方调价改这里即可。
 # 含缓存命中/未命中区分(DeepSeek 响应的 usage 会给出 prompt_cache_hit/miss_tokens)。
+# 其它 OpenAI-compatible provider 没有价格表时,只统计 token,不估算费用。
 DEEPSEEK_PRICES = {
+    "deepseek-v4-flash": {"in_hit": 0.0028, "in_miss": 0.14, "out": 0.28},
+    "deepseek-v4-pro": {"in_hit": 0.003625, "in_miss": 0.435, "out": 0.87},
     "deepseek-chat": {"in_hit": 0.5, "in_miss": 2.0, "out": 8.0},
     "deepseek-reasoner": {"in_hit": 1.0, "in_miss": 4.0, "out": 16.0},
 }
 
-# 内置 preset(只放 DeepSeek;不放 OpenAI/gpt)。
+# 内置 preset(只放项目显式接入过的 OpenAI-compatible provider;不放 OpenAI/gpt)。
 _PRESETS = {
-    "deepseek": {"base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat"},
+    "deepseek": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash"},
+    "longcat": {"base_url": "https://api.longcat.chat/openai", "model": "LongCat-2.0"},
 }
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
@@ -56,6 +61,38 @@ def _yaml_get(key: str, default: str = "") -> str:
         return default
 
 
+def _enabled(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "enabled", "enable"}
+
+
+def longcat_thinking_enabled() -> bool:
+    """Opt-in LongCat reasoning mode for controlled experiments.
+
+    Default stays no-think. Set `TERRABOX_LONGCAT_THINKING=enabled` for rollout
+    experiments that intentionally compare LongCat reasoning mode.
+    """
+    return _enabled(os.environ.get("TERRABOX_LONGCAT_THINKING") or _yaml_get("longcat_thinking"))
+
+
+def remote_llm_timeout_seconds() -> int:
+    """Read timeout for external OpenAI-compatible providers.
+
+    Normal rollout calls usually return quickly, but promptevo meta-optimization
+    can ask thinking models for long structured outputs. Keep the historical
+    120s default unless explicitly overridden by env/yaml.
+    """
+
+    raw = (
+        os.environ.get("TERRABOX_REMOTE_LLM_TIMEOUT_SECONDS")
+        or _yaml_get("remote_llm_timeout_seconds")
+        or "120"
+    )
+    try:
+        return max(30, int(raw))
+    except (TypeError, ValueError):
+        return 120
+
+
 @dataclass
 class ProviderSpec:
     name: str
@@ -74,13 +111,13 @@ def resolve_provider(provider: Optional[str] = None) -> ProviderSpec:
 
     preset = _PRESETS.get(name, {})
     base_url = (os.environ.get("TERRABOX_LLM_API_BASE")
-                or preset.get("base_url")
                 or _yaml_get(f"{name}_api_base")
-                or _yaml_get("remote_llm_api_base"))
+                or _yaml_get("remote_llm_api_base")
+                or preset.get("base_url"))
     model = (os.environ.get("TERRABOX_LLM_MODEL")
-             or preset.get("model")
              or _yaml_get(f"{name}_model")
-             or _yaml_get("remote_llm_model"))
+             or _yaml_get("remote_llm_model")
+             or preset.get("model"))
     api_key = (os.environ.get("TERRABOX_LLM_API_KEY")
                or _yaml_get(f"{name}_api_key")
                or _yaml_get("remote_llm_api_key"))
@@ -94,8 +131,8 @@ def resolve_provider(provider: Optional[str] = None) -> ProviderSpec:
 
 @dataclass
 class CostTracker:
-    """累计外部 API 的 token 与人民币花费(可观测,不阻断)。"""
-    model: str = "deepseek-chat"
+    """累计外部 API 的 token 与美元花费(可观测,不阻断)。"""
+    model: str = "deepseek-v4-flash"
     in_hit: int = 0
     in_miss: int = 0
     out: int = 0
@@ -106,6 +143,9 @@ class CostTracker:
         # DeepSeek 提供 prompt_cache_hit/miss_tokens;没有则全算未命中。
         hit = usage.get("prompt_cache_hit_tokens")
         miss = usage.get("prompt_cache_miss_tokens")
+        if hit is None and miss is None and "cache_read_tokens" in usage:
+            hit = usage.get("cache_read_tokens") or 0
+            miss = (usage.get("prompt_tokens") or 0) - hit
         if hit is None and miss is None:
             self.in_miss += usage.get("prompt_tokens", 0)
         else:
@@ -114,20 +154,30 @@ class CostTracker:
         self.out += usage.get("completion_tokens", 0)
 
     @property
-    def cny(self) -> float:
-        p = DEEPSEEK_PRICES.get(self.model, DEEPSEEK_PRICES["deepseek-chat"])
+    def usd(self) -> float:
+        p = DEEPSEEK_PRICES.get(self.model)
+        if p is None:
+            return 0.0
         return (self.in_hit * p["in_hit"] + self.in_miss * p["in_miss"]
                 + self.out * p["out"]) / 1_000_000
 
+    @property
+    def cny(self) -> float:
+        """Backward-compatible alias; value is USD, kept only for old callers."""
+        return self.usd
+
     def summary(self) -> str:
+        price = "价格未知" if self.model not in DEEPSEEK_PRICES else f"累计 ≈ ${self.usd:.4f}"
         return (f"[花费] {self.calls} 次调用 | input 命中 {self.in_hit:,} / 未命中 {self.in_miss:,}"
-                f" | output {self.out:,} | 累计 ≈ ¥{self.cny:.4f}")
+                f" | output {self.out:,} | {price} ({self.model})")
 
 
-def estimate_cny(input_tokens: int, output_tokens: int, model: str = "deepseek-chat",
+def estimate_cny(input_tokens: int, output_tokens: int, model: str = "deepseek-v4-flash",
                  cache_hit_ratio: float = 0.0) -> float:
-    """跑前预估(给定 token 量与假设命中率)。"""
-    p = DEEPSEEK_PRICES.get(model, DEEPSEEK_PRICES["deepseek-chat"])
+    """跑前预估美元花费(函数名保留兼容旧调用)。"""
+    p = DEEPSEEK_PRICES.get(model)
+    if p is None:
+        return 0.0
     hit = input_tokens * cache_hit_ratio
     miss = input_tokens * (1 - cache_hit_ratio)
     return (hit * p["in_hit"] + miss * p["in_miss"] + output_tokens * p["out"]) / 1_000_000
@@ -146,19 +196,39 @@ class RemoteChatClient:
     def call(self, prompt: str, system: Optional[str] = None, max_tokens: int = 512) -> str:
         messages = ([{"role": "system", "content": system}] if system else []) + \
                    [{"role": "user", "content": prompt}]
-        body = json.dumps({
+        payload = {
             "model": self.spec.model, "messages": messages,
             "max_tokens": max_tokens, "temperature": self.temperature, "stream": False,
-        }).encode()
+        }
+        # DeepSeek V4 / LongCat can default to thinking mode. Answer judging should
+        # behave like OEA's non-reasoning gpt-4o-mini judge, so disable thinking by
+        # default for providers that support the OpenAI-compatible `thinking` knob.
+        if self.spec.name == "deepseek" and self.spec.model.startswith("deepseek-v4-"):
+            payload["thinking"] = {"type": "disabled"}
+        if self.spec.name == "longcat" and not longcat_thinking_enabled():
+            payload["thinking"] = {"type": "disabled"}
+        elif self.spec.name == "longcat":
+            payload["thinking"] = {"type": "enabled"}
+        body = json.dumps(payload).encode()
         req = urllib.request.Request(
             self.spec.base_url + "/chat/completions", data=body,
             headers={"Content-Type": "application/json",
                      "Authorization": f"Bearer {self.spec.api_key}"})
-        with urllib.request.urlopen(req, timeout=120) as r:  # 默认 opener → 用代理
+        with urllib.request.urlopen(req, timeout=remote_llm_timeout_seconds()) as r:  # 默认 opener → 用代理
             data = json.loads(r.read().decode())
         if data.get("usage"):
             self.cost.add(data["usage"])
-        return _strip_think(data["choices"][0]["message"]["content"])
+        choice = data["choices"][0]
+        message = choice.get("message") or {}
+        content = message.get("content")
+        if content is None:
+            content = choice.get("text") or data.get("content") or ""
+        if not content and message.get("reasoning_content"):
+            raise RuntimeError(
+                "Provider returned reasoning_content but empty content; "
+                "try disabling thinking or increasing max_tokens."
+            )
+        return _strip_think(str(content))
 
     def call_json(self, prompt: str, system: Optional[str] = None, max_tokens: int = 1024):
         raw = self.call(prompt, system=system, max_tokens=max_tokens)
@@ -173,5 +243,7 @@ def make_llm_client(provider: Optional[str] = None, *, cost: Optional[CostTracke
     if spec.is_local:
         from ..evolution.shared.llm_client import EvolutionLLMClient
         return EvolutionLLMClient()
+    if cost is not None:
+        cost.model = spec.model
     logger.info(f"使用外部 LLM provider: {spec.name} ({spec.model} @ {spec.base_url})")
     return RemoteChatClient(spec, cost=cost)

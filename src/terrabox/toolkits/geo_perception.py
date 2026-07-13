@@ -46,6 +46,15 @@ _SERVICE_LOCK_NAMES = {
     "changeos": "changeos",
 }
 
+_SERVICE_GPU_ENV = {
+    "sam2": "SAM2_GPU_DEVICES",
+    "remotesam": "REMOTESAM_GPU_DEVICES",
+    "remoteclip": "REMOTECLIP_GPU_DEVICES",
+    "strip-rcnn": "STRIP_RCNN_GPU_DEVICES",
+    "instructsam": "INSTRUCTSAM_GPU_DEVICES",
+    "changeos": "CHANGEOS_GPU_DEVICES",
+}
+
 
 def _service_name_for_manager(manager: Any) -> str:
     if manager is vllm_manager:
@@ -72,6 +81,33 @@ def _service_lock_timeout_seconds(service: str) -> int:
     return int(os.environ.get("TERRABOX_SERVICE_LOCK_TIMEOUT_SECONDS", "1800"))
 
 
+def _safe_lock_fragment(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip()).strip("_") or "default"
+
+
+def _service_lock_name(service: str) -> str:
+    base = _SERVICE_LOCK_NAMES.get(service, service).replace("/", "_")
+
+    if base == "vlm":
+        # Multiple rollout flows may run independent VLM services on different
+        # ports/GPUs. Lock the concrete endpoint/lane, not the generic service,
+        # so shared lock directories do not unnecessarily serialize P0 and P1.
+        lane = (
+            os.environ.get("VLM_PORT")
+            or os.environ.get("VLLM_API_URL")
+            or os.environ.get("VLM_GPU_DEVICES")
+        )
+        return f"{base}_{_safe_lock_fragment(lane)}" if lane else base
+
+    gpu_env = _SERVICE_GPU_ENV.get(base)
+    lane = os.environ.get(gpu_env, "") if gpu_env else ""
+    if not lane:
+        lane = os.environ.get("TERRABOX_GPU_FALLBACK_DEVICE", "") or os.environ.get(
+            "TERRABOX_GPU_FALLBACK_DEVICES", ""
+        )
+    return f"{base}_gpu_{_safe_lock_fragment(lane)}" if lane else base
+
+
 @contextlib.contextmanager
 def _service_call_lock(service: str):
     """Cross-process lock for GPU service inference calls.
@@ -85,11 +121,11 @@ def _service_call_lock(service: str):
         yield
         return
 
-    name = _SERVICE_LOCK_NAMES.get(service, service).replace("/", "_")
+    name = _service_lock_name(service)
     lock_dir = Path(os.environ.get("TERRABOX_SERVICE_LOCK_DIR", "tmp/service_locks"))
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / f"{name}.lock"
-    timeout = _service_lock_timeout_seconds(name)
+    timeout = _service_lock_timeout_seconds(_SERVICE_LOCK_NAMES.get(service, service))
     start = time.time()
 
     with lock_path.open("w") as lock_file:
@@ -318,6 +354,7 @@ def _call_service(manager, url: str, payload: dict, timeout: int = 120) -> dict:
     service = _service_name_for_manager(manager)
     try:
         with _service_call_lock(service):
+            requested_api_url = getattr(manager, "API_URL", None)
             try:
                 manager.start_service()
             except Exception as e:
@@ -325,6 +362,17 @@ def _call_service(manager, url: str, payload: dict, timeout: int = 120) -> dict:
                     _stop_tool_service_after_call(manager)
                     return _tool_oom_response(str(e))
                 return {"status": "error", "message": f"Failed to start service: {e}"}
+            # Some managers allocate a dynamic host port when the requested port is
+            # already in use. Rebuild the URL after start_service() so callers do
+            # not accidentally POST to the stale base URL of another service.
+            current_api_url = getattr(manager, "API_URL", None)
+            if (
+                isinstance(requested_api_url, str)
+                and isinstance(current_api_url, str)
+                and current_api_url != requested_api_url
+                and url.startswith(requested_api_url)
+            ):
+                url = current_api_url + url[len(requested_api_url):]
             try:
                 resp = requests.post(url, json=payload, timeout=timeout, proxies={"http": None, "https": None})
                 if resp.status_code == 200:

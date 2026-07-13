@@ -77,7 +77,7 @@ no_proxy=localhost,127.0.0.1 NO_PROXY=localhost,127.0.0.1 \
 
 `eval-source` 会启动真实 Terrabox rollout，仍建议用 `unsloth` 环境（默认 `--python-bin /home/yuhongjie/miniconda3/envs/unsloth/bin/python`）。
 
-本机代理注意：MemRL 原方法本身不要求外网代理；如果 LLM 和 embedding 都是本地 OpenAI-compatible 服务，整个实验应走 localhost。问题是 Python HTTP 客户端会自动读取 shell 里的 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY`，而本机曾出现 `ALL_PROXY=socks5://127.0.0.7897` 这类非法代理值，`memos` import 时会被 `ollama/httpx` 读取并直接报错。跑本地模型时建议清掉代理变量，只保留本地绕过：
+本机代理注意：MemRL 原方法本身不要求外网代理；如果 LLM 和 embedding 都是本地 OpenAI-compatible 服务，整个实验应走 localhost。问题是 Python HTTP 客户端会自动读取 shell 里的 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY`，而迁移服务器时可能残留无效的 localhost 代理，`memos` import 时会被 `ollama/httpx` 读取并直接报错。跑本地模型时建议清掉代理变量，只保留本地绕过：
 
 ```bash
 env -u ALL_PROXY -u all_proxy \

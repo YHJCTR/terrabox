@@ -42,6 +42,7 @@ class AgentLLMDockerManager(BaseServiceManager):
     TENSOR_PARALLEL_SIZE = "1"
     DOCKER_IMAGE = "terrabox/agent-llm:latest"
     MAX_MODEL_LEN = "24576"
+    GPU_MEMORY_UTILIZATION = os.environ.get("AGENT_LLM_GPU_MEMORY_UTILIZATION", "0.90")
     _lease = None
 
     def __new__(cls):
@@ -157,7 +158,7 @@ class AgentLLMDockerManager(BaseServiceManager):
             "--port", "8000",
             "--tensor-parallel-size", cls.TENSOR_PARALLEL_SIZE,
             "--max-model-len", cls.MAX_MODEL_LEN,
-            "--gpu-memory-utilization", "0.85",
+            "--gpu-memory-utilization", cls.GPU_MEMORY_UTILIZATION,
             "--enforce-eager",
             # Required for LangChain/LangGraph tool calling (tool_choice="auto")
             "--enable-auto-tool-choice",

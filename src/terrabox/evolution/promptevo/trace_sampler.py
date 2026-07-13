@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import random
 
+from .text_utils import strip_think
+
 
 def _msg_type(m: dict) -> str:
     return (m.get("type") or m.get("role") or "").lower()
@@ -37,14 +39,14 @@ def _render_one(traj: dict, max_tool_chars: int, max_think_chars: int) -> str:
             lines.append(f"User: {str(m.get('content') or '')[:300]}")
         elif _is_ai(m):
             step += 1
-            think = str(m.get("content") or "").replace("\n", " ")[:max_think_chars]
+            think = strip_think(str(m.get("content") or "")).replace("\n", " ")[:max_think_chars]
             calls = m.get("tool_calls") or []
             if calls:
                 call_str = "; ".join(
                     f"{(c.get('name') or '').replace('__', '.')}({', '.join((c.get('args') or {}).keys())})"
                     for c in calls
                 )
-                lines.append(f"[{step}] Assistant think: {think}\n      -> CALL {call_str}")
+                lines.append(f"[{step}] Assistant visible text: {think}\n      -> CALL {call_str}")
             else:
                 lines.append(f"[{step}] Assistant (no tool call): {think}")
         elif _is_tool(m):

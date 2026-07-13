@@ -10,6 +10,7 @@ from typing import Callable, Optional
 
 from .interfaces import Trace, TaskMetric
 from .schemas import PairedCase
+from .text_utils import strip_think
 
 _DIMS = ["tool_f1", "perception", "operation", "logic", "gis"]
 
@@ -21,7 +22,7 @@ def default_render(trace: Trace, budget_chars: int = 1600) -> str:
     for s in trace.steps:
         if s.role == "assistant":
             step += 1
-            think = s.text.replace("\n", " ")[:160]
+            think = strip_think(s.text).replace("\n", " ")[:160]
             if s.tool:
                 args = ",".join((s.args or {}).keys())
                 lines.append(f"[{step}] {s.tool}({args}){' [ERROR]' if s.errored else ''}  «{think}»")

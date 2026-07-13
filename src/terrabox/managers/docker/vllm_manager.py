@@ -65,6 +65,20 @@ class VLLMDockerManager(BaseServiceManager):
     )
     _lease = None
 
+    @classmethod
+    def _sync_container_base_for_port(cls):
+        """Keep concurrent VLM processes on different pinned ports isolated.
+
+        External-API three-flow rollout runs two perception streams in separate
+        Python processes. They can safely share the same service type, but not
+        the same fixed container base/name. Otherwise one stream may stop or
+        rebuild the other's still-loading VLM container.
+        """
+        suffix = "" if int(cls.PORT) == 9000 else f"-{int(cls.PORT)}"
+        cls.CONTAINER_BASE = f"terrabox-vllm{suffix}"
+        if cls._lease is None or not cls.CONTAINER_NAME.startswith(cls.CONTAINER_BASE):
+            cls.CONTAINER_NAME = cls.CONTAINER_BASE
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
@@ -117,10 +131,12 @@ class VLLMDockerManager(BaseServiceManager):
             cls.GPU_DEVICES = os.environ["VLM_GPU_DEVICES"]
         if os.environ.get("VLM_TENSOR_PARALLEL_SIZE"):
             cls.TENSOR_PARALLEL_SIZE = str(int(os.environ["VLM_TENSOR_PARALLEL_SIZE"]))
-        if os.environ.get("VLM_MIN_IMAGE_MODEL_LEN"):
-            cls.MIN_IMAGE_MODEL_LEN = int(os.environ["VLM_MIN_IMAGE_MODEL_LEN"])
         if os.environ.get("VLM_MAX_MODEL_LEN"):
             cls.MAX_MODEL_LEN = int(os.environ["VLM_MAX_MODEL_LEN"])
+            if not os.environ.get("VLM_MIN_IMAGE_MODEL_LEN"):
+                cls.MIN_IMAGE_MODEL_LEN = cls.MAX_MODEL_LEN
+        if os.environ.get("VLM_MIN_IMAGE_MODEL_LEN"):
+            cls.MIN_IMAGE_MODEL_LEN = int(os.environ["VLM_MIN_IMAGE_MODEL_LEN"])
         if os.environ.get("VLM_GPU_MEMORY_UTILIZATION"):
             cls.GPU_MEMORY_UTILIZATION = float(os.environ["VLM_GPU_MEMORY_UTILIZATION"])
         if os.environ.get("VLM_MIN_FREE_MIB"):
@@ -135,6 +151,7 @@ class VLLMDockerManager(BaseServiceManager):
             cls.MAX_NUM_BATCHED_TOKENS = int(os.environ["VLM_MAX_NUM_BATCHED_TOKENS"])
         if os.environ.get("DATA_MOUNT_HOST"):
             cls.DATA_MOUNT_HOST = os.environ["DATA_MOUNT_HOST"]
+        cls._sync_container_base_for_port()
 
     @classmethod
     def _extra_engine_args(cls):
@@ -253,6 +270,7 @@ class VLLMDockerManager(BaseServiceManager):
             pass
 
         cls._apply_env_overrides()
+        cls._sync_container_base_for_port()
         cls._ensure_image_context_len()
 
         if cls.is_running():

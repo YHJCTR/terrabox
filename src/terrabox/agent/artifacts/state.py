@@ -7,7 +7,7 @@ from typing import Any
 
 
 FILE_PARAM_MARKERS = ("path", "gpkg", "image", "raster", "file")
-OUTPUT_PARAM_NAMES = {"output_path", "result_path", "preview_path", "artifact_path"}
+OUTPUT_PARAM_NAMES = {"output_path", "result_path", "preview_path", "out_file", "artifact_path"}
 _KNOWN_FILE_SUFFIX_RE = re.compile(
     r"\.(gpkg|tif|tiff|png|jpg|jpeg|json|geojson|csv|txt)$",
     re.IGNORECASE,

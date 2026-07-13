@@ -307,8 +307,85 @@ def _tool_description(spec) -> str:
     return "\n".join(part for part in parts if part)
 
 
+def _oea_experiment_descriptions_enabled() -> bool:
+    return os.environ.get("TERRABOX_OEA_EXPERIMENT_TOOL_DESCRIPTIONS", "").lower() in {"1", "true", "yes"}
+
+
+_OEA_EXPERIMENT_SCHEMA_PROPERTY_DESCRIPTIONS: dict[str, dict[str, str]] = {
+    "geo_perception.vlm_analyze": {
+        "images": (
+            "One or more aerial/satellite image paths for whole-image scene description only. "
+            "For object localization, counting, segmentation, OCR, region attributes, measurements, "
+            "or change detection, use the dedicated tools instead."
+        ),
+        "image": (
+            "Single aerial/satellite image path for whole-image scene description only. "
+            "Do not use this field to answer object count, location, region attribute, mask, measurement, "
+            "OCR, or change-detection questions."
+        ),
+        "prompt": (
+            "Optional focus for the whole-image description. This is not a general visual QA interface; "
+            "if the user asks for objects, counts, boxes, regions, headings, colors, condition, pixels, "
+            "text, or changes, call the specialized tool."
+        ),
+        "max_tokens": (
+            "Maximum response budget for whole-image description output. Keep the default unless a short "
+            "scene description is enough; this parameter does not make VLM suitable for counting, "
+            "localization, region-attribute, segmentation, OCR, measurement, or change-detection tasks."
+        ),
+    },
+    "geo_perception.instructsam": {
+        "image": "Image path. Input example: image plus text='swimming pool' or text='red truck'.",
+        "text": "Target object/region to localize. Output includes bounding boxes/confidences/count-like detections.",
+        "text_prompt": "Target object/region to localize. Output includes bounding boxes/confidences/count-like detections.",
+        "prompt": "Target object/region to localize. Prefer this over VLM for open-vocabulary object grounding.",
+        "top1": "Set true when the task asks for one specific object/region; false when multiple instances may be needed.",
+    },
+    "geo_perception.count_given_object": {
+        "image": "Image path.",
+        "text": "Object class/name to count. Output is a count and detected objects.",
+        "object": "Object class/name to count. Output is a count and detected objects.",
+        "object_name": "Object class/name to count. Output is a count and detected objects.",
+        "bbox": "Optional region/bounding box to restrict counting.",
+    },
+    "geo_perception.region_attribute_description": {
+        "image": "Image path.",
+        "bbox": "Bounding box/region for the localized object. Use after localization when the question asks condition, heading, color, symmetry, or other attributes.",
+        "region": "Region or bounding box for the localized object.",
+        "attribute": "Specific attribute to inspect, such as color, damage, condition, orientation, heading, or visible state.",
+        "prompt": "Attribute question for the specified region; do not use whole-image VLM when a localized region is required.",
+        "question": "Attribute question for the specified region; do not use whole-image VLM when a localized region is required.",
+    },
+    "geo_perception.sam2_segment": {
+        "image": "Image path.",
+        "text": "Target object to segment. Output is compact pixel-count/mask artifact information.",
+        "flag": "Whether per-object pixel counts are requested when available.",
+    },
+}
+
+
+def _schema_for_agent(slug: str, schema: dict[str, Any]) -> dict[str, Any]:
+    if not _oea_experiment_descriptions_enabled():
+        return schema
+    overrides = _OEA_EXPERIMENT_SCHEMA_PROPERTY_DESCRIPTIONS.get(slug)
+    if not overrides:
+        return schema
+    patched = dict(schema)
+    properties = {
+        name: dict(prop)
+        for name, prop in (schema.get("properties") or {}).items()
+        if isinstance(prop, dict)
+    }
+    for name, description in overrides.items():
+        if name in properties:
+            properties[name]["description"] = description
+    patched["properties"] = properties
+    return patched
+
+
 def _json_schema_to_pydantic(slug: str, schema: dict[str, Any]):
     """Dynamically build a Pydantic model from a JSON Schema properties block."""
+    schema = _schema_for_agent(slug, schema)
     properties = schema.get("properties", {})
     required = set(schema.get("required", []))
 
@@ -344,6 +421,68 @@ def _make_tool_func(slug: str, user, pre_execute_validator=None):
     return _call
 
 
+_OEA_EXPERIMENT_TOOL_DESCRIPTIONS: dict[str, str] = {
+    # Keep the live product ToolSpec rich, but make OEA-style rollouts see
+    # narrower descriptions that match the source benchmark's tool roles.
+    "geo_perception.vlm_analyze": (
+        "Generate a detailed natural-language description of the given aerial "
+        "or satellite image. Use this for whole-image visual description only; "
+        "use dedicated tools for object localization, counting, segmentation, "
+        "change detection, OCR, or region-specific attribute checks."
+    ),
+    "geo_perception.instructsam": (
+        "Locate object(s) in an image from a natural-language description and "
+        "return bounding boxes/confidences. Set top1=true when only the best "
+        "matching object is needed."
+    ),
+    "geo_perception.count_given_object": (
+        "Count instances of a named object in an image, optionally within a bbox "
+        "region. Provide the object name in text/object."
+    ),
+    "geo_perception.region_attribute_description": (
+        "Describe a specific attribute of an object or region in an image, such "
+        "as color, condition, structure, heading, or visible state. Provide a "
+        "bbox/region when the question refers to a localized object."
+    ),
+    "geo_perception.sam2_segment": (
+        "Segment the specified object in an image and return pixel-count "
+        "information. Use this when area-from-pixels or mask size is needed; "
+        "provide the target object in text."
+    ),
+    "geo_perception.strip_rcnn_detect": (
+        "Detect remote-sensing objects from the DOTA-style object set such as "
+        "planes, ships, storage tanks, courts, bridges, vehicles, harbors, "
+        "roundabouts, fields, and pools. For open-vocabulary localization, use "
+        "the text-guided localization tool instead."
+    ),
+    "osm_gis.display_on_map": (
+        "Render selected GeoPackage vector layer(s), such as boundary, POIs, or "
+        "distance lines, to a PNG map. Use after the required layers have been "
+        "created in the GeoPackage."
+    ),
+    "osm_gis.display_on_geotiff": (
+        "Render selected GeoPackage vector layer(s) directly over a GeoTIFF and "
+        "save the overlay image/raster."
+    ),
+    "osm_gis.add_index_layer": (
+        "Compute an NDVI/NDBI/NBR layer for the AOI stored in a GeoPackage for a "
+        "given year and optional month, then save the raster layer to the same "
+        "GeoPackage."
+    ),
+    "osm_gis.get_bbox_from_raster": (
+        "Get the bounding box of a GeoTIFF raster."
+    ),
+}
+
+
+def _description_for_agent(spec) -> str:
+    if _oea_experiment_descriptions_enabled():
+        override = _OEA_EXPERIMENT_TOOL_DESCRIPTIONS.get(spec.slug)
+        if override:
+            return override
+    return _tool_description(spec)
+
+
 def build_langchain_tools(user, slugs: Optional[list[str]] = None, pre_execute_validator=None) -> list[StructuredTool]:
     """
     Wrap every tool registered in CoreRegistry as a LangChain StructuredTool.
@@ -369,7 +508,7 @@ def build_langchain_tools(user, slugs: Optional[list[str]] = None, pre_execute_v
             func=_make_tool_func(spec.slug, user, pre_execute_validator=pre_execute_validator),
             # LangChain tool names must not contain dots
             name=spec.slug.replace(".", "__"),
-            description=_tool_description(spec),
+            description=_description_for_agent(spec),
             args_schema=args_schema,
         )
         tools.append(lc_tool)

@@ -36,7 +36,8 @@ class ContrastiveUpdater:
     def update(self, ver_a: str, ver_b: str, exp_a: str, exp_b: str,
                new_version: str, dev_task_ids: Optional[list[str]] = None,
                n_candidates: int = 3, max_success_drop: float = 0.005,
-               objective: Optional[str] = None) -> UpdateResult:
+               objective: Optional[str] = None, max_tokens: int = 3500,
+               diagnose_max_tokens: int = 2500) -> UpdateResult:
         # objective=None → 用 optimizer 的默认通用兜底(不预设优化某个具体指标)
         prompt_a = self.prompts.load(ver_a)
         prompt_b = self.prompts.load(ver_b)
@@ -54,12 +55,25 @@ class ContrastiveUpdater:
         # 2) 多批归因(降方差);指标方向交给 specs+LLM 判断,框架不假设负=退步
         from .contrastive_optimizer import _DEFAULT_OBJECTIVE
         obj = objective or _DEFAULT_OBJECTIVE
-        attributions = self.optimizer.diagnose(prompt_a, prompt_b, agg_a, agg_b, cases,
-                                               metric_specs=specs, objective=obj)
+        attributions = self.optimizer.diagnose(
+            prompt_a,
+            prompt_b,
+            agg_a,
+            agg_b,
+            cases,
+            metric_specs=specs,
+            objective=obj,
+            max_tokens=diagnose_max_tokens,
+        )
 
         # 3) best-of-N 候选
-        candidates = self.optimizer.propose_candidates(prompt_b, attributions, n=n_candidates,
-                                                       objective=obj)
+        candidates = self.optimizer.propose_candidates(
+            prompt_b,
+            attributions,
+            n=n_candidates,
+            objective=obj,
+            max_tokens=max_tokens,
+        )
         if not candidates:
             return UpdateResult(accepted=False, new_version=new_version, revised_prompt=prompt_b,
                                 diagnosis=attributions, candidates_tried=0,
@@ -78,11 +92,13 @@ class ContrastiveUpdater:
             reason = (f"dev success {dev_before.get('success_rate'):.3f}->{best_after.get('success_rate'):.3f}"
                       f" {'接受' if accepted else '拒绝'}")
         else:
-            # 无 runner:选"改动最克制"的候选,标记未验证(需后续 rollout 验证)
-            best = min(candidates, key=lambda c: len(c["revised_prompt"]))
+            # No runner/dev set: use lightweight static selection, then require
+            # an external rollout before accepting the prompt.
+            best, static_scores = self.optimizer.choose_candidate(prompt_b, candidates)
+            best["static_candidate_scores"] = static_scores
             best_after = {}; dev_before = agg_b
             accepted = False
-            reason = "无 RolloutRunner,仅产出候选;需 rollout 验证后再接受(标记 pending)"
+            reason = "No RolloutRunner/dev set; selected one candidate by static checks. Rollout validation is still required."
 
         if accepted:
             self.prompts.save(new_version, best["revised_prompt"],

@@ -9,6 +9,7 @@ import httpx
 from langchain_openai import ChatOpenAI
 
 from .config import AgentConfig
+from .llm_provider import longcat_thinking_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -50,12 +51,29 @@ def get_llm(config: AgentConfig) -> ChatOpenAI:
         )
     else:
         logger.info(f"Using remote LLM: {config.remote_llm_model} via {config.remote_llm_api_base}")
+        extra_kwargs = {}
+        model_lower = (config.remote_llm_model or "").lower()
+        base_lower = (config.remote_llm_api_base or "").lower()
+        if (
+            "longcat" in model_lower
+            or "longcat" in base_lower
+            or model_lower.startswith("deepseek-v4-")
+        ):
+            # Remote API rollout should keep the same turn cap as local, but
+            # should not emit reasoning content into the agent loop.
+            if "longcat" in model_lower or "longcat" in base_lower:
+                extra_kwargs["extra_body"] = {
+                    "thinking": {"type": "enabled" if longcat_thinking_enabled() else "disabled"}
+                }
+            else:
+                extra_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
         return ChatOpenAI(
             base_url=config.remote_llm_api_base,
             api_key=config.remote_llm_api_key,
             model=config.remote_llm_model,
             temperature=0.7,
             streaming=True,    # enable SSE token streaming from remote API
+            **extra_kwargs,
         )
 
 

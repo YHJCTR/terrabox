@@ -41,6 +41,24 @@ def build_rollout_env(
     env["AGENT_LLM_GPU_DEVICES"] = str(agent_gpu)
     env.setdefault("TERRABOX_USE_DOCKER", "true")
     env.setdefault("TERRABOX_TOOL_SERVICE_SCOPE", "call")
+    env.setdefault("TERRABOX_SERVICE_CALL_LOCKS", "1")
+    env.setdefault("TERRABOX_SERVICE_LOCK_TIMEOUT_SECONDS", "1800")
+    env.setdefault("TERRABOX_SERVICE_LOCK_DIR", str(REPO_ROOT / "tmp" / "service_locks"))
+    # OCR is cheap enough on CPU and otherwise competes with VLM/InstructSAM for
+    # GPU memory. Keep it off GPU in rollout environments unless explicitly
+    # overridden by the caller.
+    env.setdefault("TERRABOX_OCR_USE_GPU", "0")
+    # Text-targeted sam2_segment routes through RemoteSAM and often cold-starts a
+    # model service; the default 120s outer tool timeout can kill it while the
+    # inner service call is still allowed to run for 300s.
+    env.setdefault("TERRABOX_TOOL_TIMEOUT_GEO_PERCEPTION_SAM2_SEGMENT", "420")
+    env.setdefault("TERRABOX_TOOL_TIMEOUT_GEO_PERCEPTION_REMOTESAM", "420")
+    env.setdefault("REMOTESAM_TOOL_TIMEOUT", "360")
+    # OSM geocoding/Overpass calls are network-bound and can legitimately exceed
+    # 120s on migrated hosts. Keep the longer timeout scoped to the two external
+    # query tools instead of raising the global tool timeout.
+    env.setdefault("TERRABOX_TOOL_TIMEOUT_OSM_GIS_GET_AREA_BOUNDARY", "240")
+    env.setdefault("TERRABOX_TOOL_TIMEOUT_OSM_GIS_ADD_POIS_LAYER", "240")
     # fixdata + VLM-backed instructsam require aliases OFF (otherwise the old
     # Calculator/Solver/Plot→ipython aliases re-enter and shadow compute.*).
     # Default to off; callers can still override by exporting the env var.
@@ -52,6 +70,7 @@ def build_rollout_env(
         "STRIP_RCNN_GPU_DEVICES",
         "INSTRUCTSAM_GPU_DEVICES",
         "REMOTECLIP_GPU_DEVICES",
+        "CHANGEOS_GPU_DEVICES",
     ):
         env[key] = str(tool_gpu)
 
@@ -86,17 +105,28 @@ def build_rollout_env(
             mlen = str(int(vlm_max_model_len) if vlm_max_model_len else 4096)
             env["VLM_MAX_MODEL_LEN"] = mlen
             env["VLM_MIN_IMAGE_MODEL_LEN"] = mlen
-            env.setdefault("VLM_GPU_MEMORY_UTILIZATION", "0.92")
+            env.setdefault("VLM_GPU_MEMORY_UTILIZATION", "0.88")
+            env.setdefault("VLM_MAX_NUM_SEQS", "4")
         all_gpus = []
         for g in [str(agent_gpu), str(tool_gpu), *vlm_list]:
             if g not in all_gpus:
                 all_gpus.append(g)
         env["CUDA_VISIBLE_DEVICES"] = ",".join(all_gpus)
+        service_gpus = []
+        for g in [str(tool_gpu), *vlm_list]:
+            if g not in service_gpus:
+                service_gpus.append(g)
+        env["TERRABOX_GPU_ALLOWED_DEVICES"] = ",".join(service_gpus)
+        env["TERRABOX_GPU_FALLBACK_DEVICE"] = str(tool_gpu)
+        env["TERRABOX_GPU_FALLBACK_DEVICES"] = ",".join(service_gpus)
     else:
-        env["TERRABOX_TOOL_GPU_DEVICES"] = str(tool_gpu)
         env["VLM_GPU_DEVICES"] = str(tool_gpu)
-        env.setdefault("TERRABOX_TOOL_MAX_GPUS", "1")
+        env.pop("TERRABOX_TOOL_GPU_DEVICES", None)
+        env.pop("TERRABOX_TOOL_MAX_GPUS", None)
         env["CUDA_VISIBLE_DEVICES"] = f"{agent_gpu},{tool_gpu}"
+        env["TERRABOX_GPU_ALLOWED_DEVICES"] = str(tool_gpu)
+        env["TERRABOX_GPU_FALLBACK_DEVICE"] = str(tool_gpu)
+        env["TERRABOX_GPU_FALLBACK_DEVICES"] = str(tool_gpu)
     return env
 
 

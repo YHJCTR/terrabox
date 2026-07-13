@@ -1,9 +1,11 @@
 """Content-addressed result cache for slow, deterministic tools.
 
-Targets the only genuinely slow tools in the OEA toolset:
+Targets the genuinely slow, cache-safe tools in the OEA toolset:
   * GPU perception models (instructsam / sam2 / strip_rcnn / vlm_analyze / ...):
     each call otherwise pays docker cold-start + model load + inference.
-  * osm_gis.* network calls (Overpass / Nominatim / OSRM / STAC): network-bound.
+  * selected read-only/standalone OSM helpers. OSM tools that mutate a shared
+    GeoPackage are intentionally NOT cached, because restoring an old .gpkg
+    artifact can stale or overwrite downstream layers in multi-step GIS tasks.
 (compute.* and the CPU drawing tools are sub-second → not cached; bing_search has
 its own .db cache → left as-is.)
 
@@ -25,7 +27,7 @@ have returned, just faster) and does not change tool-F1.
 
 Env:
   TERRABOX_TOOL_RESULT_CACHE       "0"/"false"/"off" disables (default ON)
-  TERRABOX_TOOL_RESULT_CACHE_DIR   default ~/.verl_cache/tool_result_cache
+  TERRABOX_TOOL_RESULT_CACHE_DIR   default <repo>/cache/tool_result_cache
   TERRABOX_TOOL_RESULT_CACHE_SLUGS comma list to override the default allowlist
 """
 from __future__ import annotations
@@ -42,13 +44,20 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Args that say WHERE to write output, not WHAT to compute → excluded from the key.
-_OUTPUT_KEYS = {"artifact_path", "output_path", "result_path", "preview_path", "gpkg"}
+_OUTPUT_KEYS = {"artifact_path", "output_path", "result_path", "preview_path", "out_file", "gpkg"}
 
 _PERCEPTION = {
     "geo_perception.ocr_extract", "geo_perception.vlm_analyze",
     "geo_perception.region_attribute_description", "geo_perception.instructsam",
     "geo_perception.change_os_detect", "geo_perception.strip_rcnn_detect",
     "geo_perception.sam2_segment", "geo_perception.count_given_object",
+}
+
+_OSM_SAFE = {
+    # Standalone read-only raster metadata extraction. Chain-mutating gpkg tools
+    # (get_area_boundary/add_pois_layer/compute_route_dist/add_index_layer/
+    # compute_index_change/display_*) are excluded by default.
+    "osm_gis.get_bbox_from_raster",
 }
 
 # Markers that mean the result is a failure → never cache (else retry hits a frozen error).
@@ -71,14 +80,16 @@ def _enabled() -> bool:
 
 def _cache_dir() -> Path:
     v = os.environ.get("TERRABOX_TOOL_RESULT_CACHE_DIR", "").strip()
-    return Path(os.path.expanduser(v)) if v else (Path.home() / ".verl_cache" / "tool_result_cache")
+    if v:
+        return Path(os.path.expanduser(v))
+    return Path(__file__).resolve().parents[3] / "cache" / "tool_result_cache"
 
 
 def _slug_allowed(slug: str) -> bool:
     override = os.environ.get("TERRABOX_TOOL_RESULT_CACHE_SLUGS", "").strip()
     if override:
         return slug in {s.strip() for s in override.split(",") if s.strip()}
-    return slug in _PERCEPTION or slug.startswith("osm_gis.")
+    return slug in _PERCEPTION or slug in _OSM_SAFE
 
 
 def _file_hash(path: str) -> str | None:

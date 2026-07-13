@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+from contextlib import contextmanager
+import fcntl
 import inspect
 import json
 import logging
@@ -32,8 +34,8 @@ from .runtime import get_runtime
 
 logger = logging.getLogger(__name__)
 
-_PATH_KEYS = {"artifact_path", "output_path", "result_path", "path", "image_path", "preview_path", "gpkg"}
-_OUTPUT_PATH_KEYS = {"artifact_path", "output_path", "result_path", "preview_path"}
+_PATH_KEYS = {"artifact_path", "output_path", "result_path", "path", "image_path", "preview_path", "out_file", "gpkg"}
+_OUTPUT_PATH_KEYS = {"artifact_path", "output_path", "result_path", "preview_path", "out_file"}
 _INPUT_PATH_KEYS = _PATH_KEYS - _OUTPUT_PATH_KEYS
 _ARTIFACT_INDEX_LOCK = threading.Lock()
 _PATH_SUFFIXES = (
@@ -235,6 +237,19 @@ def _artifact_index_path() -> str | None:
     return os.path.join(artifact_dir, "artifact_index.json")
 
 
+@contextmanager
+def _artifact_index_file_lock(path: str):
+    """Cross-process lock for shared artifact indexes written by parallel flows."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    lock_path = f"{path}.lock"
+    with open(lock_path, "a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def _is_url_or_placeholder(value: str) -> bool:
     lowered = value.lower()
     return (
@@ -292,7 +307,7 @@ def _save_artifact_index(data: dict[str, Any]) -> None:
     if not path:
         return
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp_path = f"{path}.tmp"
+    tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp_path, path)
@@ -309,35 +324,43 @@ def _record_artifact_alias(
     if not resolved:
         return
     resolved_abs = resolved if os.path.isabs(resolved) else os.path.abspath(resolved)
+    path = _artifact_index_path()
+    if not path:
+        return
     with _ARTIFACT_INDEX_LOCK:
-        index = _load_artifact_index()
-        aliases = index.setdefault("aliases", {})
-        if requested:
-            aliases[requested] = resolved_abs
-            aliases[os.path.normpath(requested)] = resolved_abs
-            aliases[os.path.basename(requested)] = resolved_abs
-        aliases[resolved_abs] = resolved_abs
-        aliases[os.path.basename(resolved_abs)] = resolved_abs
-        artifacts = index.setdefault("artifacts", [])
-        record = {
-            "tool": slug,
-            "key": key,
-            "source": source,
-            "path": resolved_abs,
-            "requested_path": requested,
-            "exists": os.path.exists(resolved_abs),
-            "size_bytes": os.path.getsize(resolved_abs) if os.path.exists(resolved_abs) else None,
-            "recorded_at": time.time(),
-        }
-        artifacts.append(record)
-        _save_artifact_index(index)
+        with _artifact_index_file_lock(path):
+            index = _load_artifact_index()
+            aliases = index.setdefault("aliases", {})
+            if requested:
+                aliases[requested] = resolved_abs
+                aliases[os.path.normpath(requested)] = resolved_abs
+                aliases[os.path.basename(requested)] = resolved_abs
+            aliases[resolved_abs] = resolved_abs
+            aliases[os.path.basename(resolved_abs)] = resolved_abs
+            artifacts = index.setdefault("artifacts", [])
+            record = {
+                "tool": slug,
+                "key": key,
+                "source": source,
+                "path": resolved_abs,
+                "requested_path": requested,
+                "exists": os.path.exists(resolved_abs),
+                "size_bytes": os.path.getsize(resolved_abs) if os.path.exists(resolved_abs) else None,
+                "recorded_at": time.time(),
+            }
+            artifacts.append(record)
+            _save_artifact_index(index)
 
 
 def _lookup_artifact_alias(value: str) -> str | None:
     if not value:
         return None
+    path = _artifact_index_path()
+    if not path:
+        return None
     with _ARTIFACT_INDEX_LOCK:
-        aliases = _load_artifact_index().get("aliases", {})
+        with _artifact_index_file_lock(path):
+            aliases = _load_artifact_index().get("aliases", {})
     for key in (value, os.path.normpath(value), os.path.basename(value)):
         resolved = aliases.get(key)
         if isinstance(resolved, str) and os.path.exists(resolved):
@@ -345,20 +368,42 @@ def _lookup_artifact_alias(value: str) -> str | None:
     return None
 
 
-def _redirect_relative_output_path(slug: str, key: str, value: str) -> tuple[str, dict[str, Any] | None]:
+def _repo_tmp_dir() -> str:
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    return os.path.join(repo_root, "tmp")
+
+
+def _is_under_dir(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([os.path.abspath(path), os.path.abspath(root)]) == os.path.abspath(root)
+    except ValueError:
+        return False
+
+
+def _redirect_output_path(slug: str, key: str, value: str) -> tuple[str, dict[str, Any] | None]:
     artifact_dir = _managed_artifact_dir()
-    if not artifact_dir or not value or _is_url_or_placeholder(value) or os.path.isabs(value):
+    if not artifact_dir or not value or _is_url_or_placeholder(value):
         return value, None
-    safe_rel = _safe_relative_path(value)
+
+    if os.path.isabs(value):
+        allowed_roots = (artifact_dir, _repo_tmp_dir())
+        if any(_is_under_dir(value, root) for root in allowed_roots):
+            return value, None
+        safe_rel = _safe_relative_path(value.lstrip(os.sep))
+        kind = "absolute_output_redirect"
+    else:
+        safe_rel = _safe_relative_path(value)
+        kind = "output_redirect"
+
     subdir = _artifact_subdir_for(key, safe_rel)
     resolved = os.path.join(artifact_dir, subdir, safe_rel)
     os.makedirs(os.path.dirname(resolved), exist_ok=True)
-    _record_artifact_alias(requested=value, resolved=resolved, key=key, source="output_redirect", slug=slug)
+    _record_artifact_alias(requested=value, resolved=resolved, key=key, source=kind, slug=slug)
     return resolved, {
         "param": key,
         "requested": value,
         "resolved": resolved,
-        "kind": "output_redirect",
+        "kind": kind,
     }
 
 
@@ -488,7 +533,7 @@ def _prepare_artifact_paths(slug: str, arguments: dict[str, Any]) -> tuple[dict[
 
         lowered = key.lower()
         if lowered in _OUTPUT_PATH_KEYS:
-            new_value, resolution = _redirect_relative_output_path(slug, key, value)
+            new_value, resolution = _redirect_output_path(slug, key, value)
         elif _is_input_path_like(key, value):
             new_value, resolution = _resolve_input_artifact_alias(slug, key, value)
             if not resolution:

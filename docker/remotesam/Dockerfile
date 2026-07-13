@@ -75,7 +75,8 @@ WORKDIR /app
 COPY server.py /app/docker_server.py
 
 ENV REMOTESAM_CHECKPOINT="/checkpoints/swin_base_patch4_window12_384_22k.pth"
-ENV REMOTESAM_USE_EPOC="true"
+ENV REMOTESAM_BERT_PATH="/checkpoints/bert-base-uncased"
+ENV REMOTESAM_USE_EPOC="false"
 
 EXPOSE 9004
 CMD ["python3", "/app/docker_server.py"]

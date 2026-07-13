@@ -5,8 +5,10 @@
 两者同接口 `.call()`)。调用方通过 `agent.llm_provider.make_llm_client(provider)` 自由选择。
 
 - 评分规则复用作者的 `EVAL_PROMPT`(数值 ±10% 容差、语义等价、"数值题答 unknown→0")。
-- 结果按 `hash(question, ground_truth, predicted)` **磁盘缓存**,跨实验答案没变即复用,边际成本≈0。
-- 可选 `numeric_match`:单数字答案用代码 ±10% 直接判,免 LLM(省钱)。
+- 结果按 `hash(question, ground_truth, predicted)` **磁盘缓存**。正式 CLI 会把缓存放在实验目录
+  `judge_cache/<provider>/`;本模块默认兜底使用仓库内 `cache/answer_judge_cache/`,不写 home。
+- 送 judge 前会移除预测答案里的 `<think>...</think>` 推理段,降低 token 成本并避免干扰判分。
+- 可选 `numeric_match`:单数字答案用代码 ±10% 直接判;正式 CLI 默认关闭该快捷路径。
 """
 from __future__ import annotations
 
@@ -64,7 +66,18 @@ You must provide your evaluation strictly in the following format and nothing el
 """
 
 _NUM_RE = re.compile(r"-?\d+\.?\d*")
-_DEFAULT_CACHE = os.path.expanduser("~/.verl_cache/answer_judge_cache")
+_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
+_THINK_START_RE = re.compile(r"<think\b[^>]*>", re.IGNORECASE)
+_THINK_END_RE = re.compile(r"</think>", re.IGNORECASE)
+_ANSWER_MARKER_RE = re.compile(
+    r"(\*\*Answer:\*\*|Answer:|Final Answer:|The answer is|Result:)",
+    re.IGNORECASE,
+)
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
+_DEFAULT_CACHE = os.environ.get(
+    "TERRABOX_ANSWER_JUDGE_CACHE_DIR",
+    os.path.join(_REPO_ROOT, "cache", "answer_judge_cache"),
+)
 
 
 def extract_numbers(text: str) -> list[float]:
@@ -75,6 +88,29 @@ def extract_numbers(text: str) -> list[float]:
         except ValueError:
             pass
     return out
+
+
+def strip_think(text: str) -> str:
+    """Remove model reasoning tags before answer judging without modifying raw rollout files."""
+    raw = str(text or "")
+    cleaned = _THINK_BLOCK_RE.sub("", raw)
+
+    # If a model emitted an unclosed <think>, keep the explicit final answer when
+    # there is a clear marker; otherwise drop the unfinished reasoning tail.
+    while True:
+        m = _THINK_START_RE.search(cleaned)
+        if not m:
+            break
+        tail = cleaned[m.end():]
+        marker = _ANSWER_MARKER_RE.search(tail)
+        if marker:
+            cleaned = cleaned[:m.start()] + tail[marker.start():]
+        else:
+            cleaned = cleaned[:m.start()]
+            break
+
+    cleaned = _THINK_END_RE.sub("", cleaned).strip()
+    return cleaned
 
 
 def numeric_match(ground_truth: str, predicted: str, tol: float = 0.10) -> Optional[float]:
@@ -92,14 +128,7 @@ def numeric_match(ground_truth: str, predicted: str, tol: float = 0.10) -> Optio
 
 
 def _extract_score(text: str) -> float:
-    """从 judge 输出抠出 Score(优先 JSON,失败回退首个数字),对齐作者 extract_score。"""
-    try:
-        m = re.search(r"\{.*\}", text, re.DOTALL)
-        if m:
-            obj = json.loads(m.group())
-            return float(obj.get("Score", obj.get("score", 0.0)))
-    except Exception:
-        pass
+    """从 judge 输出抠出 Score,对齐 OEA 作者 extract_score。"""
     before = text.split("Justification")[0]
     m = re.search(r"[-+]?\d*\.\d+|\d+", before)
     try:
@@ -128,7 +157,16 @@ class AnswerJudge:
         """返回 {score, source, justification}。source: cache|numeric|llm。"""
         if not predicted:
             return {"score": 0.0, "source": "empty", "justification": "no prediction"}
-        gt, pred = str(ground_truth), str(predicted)
+        gt, pred_raw = str(ground_truth), str(predicted)
+        pred = strip_think(pred_raw)
+        sanitized = pred != pred_raw
+        if not pred:
+            return {
+                "score": 0.0,
+                "source": "empty",
+                "justification": "no prediction after stripping think content" if sanitized else "no prediction",
+                "prediction_sanitized": sanitized,
+            }
 
         if self.use_cache:
             kp = self._key(question, gt, pred)
@@ -146,9 +184,15 @@ class AnswerJudge:
                 self._save(question, gt, pred, res)
                 return res
 
-        prompt = f"Question: {question}\nGround Truth Answer: {gt}\nPredicted Answer: {pred}\n"
-        raw = self.client.call(prompt, system=EVAL_PROMPT, max_tokens=200)
-        res = {"score": _extract_score(raw), "source": "llm", "justification": raw[:300]}
+        prompt = f"{EVAL_PROMPT}\n\nQuestion: {question}\nGround Truth Answer: {gt}\nPredicted Answer: {pred}\n"
+        raw = self.client.call(prompt, max_tokens=150)
+        res = {
+            "score": _extract_score(raw),
+            "source": "llm",
+            "evaluation": raw,
+            "justification": raw[:300],
+            "prediction_sanitized": sanitized,
+        }
         self._save(question, gt, pred, res)
         return res
 

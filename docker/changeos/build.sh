@@ -18,8 +18,8 @@ cd "$(dirname "$0")"
 TAG="${1:-terrabox/changeos:latest}"
 
 echo "Building $TAG ..."
-# --network=host so the host proxy (127.0.0.1:7897) is reachable from RUN steps;
-# without it, 127.0.0.1 would point at the build container itself.
+# --network=host lets docker build reach any explicitly configured host proxy;
+# without it, a localhost proxy would point at the build container itself.
 docker build \
     --network=host \
     --build-arg http_proxy="${http_proxy:-}" \

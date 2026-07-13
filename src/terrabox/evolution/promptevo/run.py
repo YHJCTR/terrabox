@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from dataclasses import asdict
 
 from .weakness_miner import mine_weaknesses, summarize
 from .trace_sampler import sample_traces
@@ -45,8 +46,12 @@ def _cmd_propose(args):
         print(f"(待优化 base 来自文件: {args.base_prompt_file}, {len(base)} 字)")
     else:
         base = PromptAugmenter.BASE_SYSTEM
-    optimizer = PromptOptimizer(max_growth_ratio=args.max_growth_ratio)
-    proposal = optimizer.propose(base, trace_text)
+    from terrabox.agent.llm_provider import make_llm_client
+    optimizer = PromptOptimizer(
+        llm_client=make_llm_client(args.provider),
+        max_growth_ratio=args.max_growth_ratio,
+    )
+    proposal = optimizer.propose(base, trace_text, max_tokens=args.max_tokens)
     if proposal is None:
         print("LLM 改写失败(返回空或非法 JSON)。")
         return
@@ -67,6 +72,79 @@ def _cmd_propose(args):
         with open(args.out, "w") as f:
             json.dump(proposal.to_dict(), f, ensure_ascii=False, indent=2)
         print(f"\n提案已存: {args.out}")
+
+
+def _cmd_contrastive(args):
+    """Formal Stage2: compare base/stage1 rollouts, then write a candidate prompt."""
+    from terrabox.agent.llm_provider import make_llm_client
+
+    from .adapters_terrabox import (
+        TerraboxMetricProvider,
+        TerraboxPromptStore,
+        TerraboxTrajectorySource,
+        is_transient_trace,
+    )
+    from .contrastive_optimizer import ContrastiveOptimizer
+    from .loop import ContrastiveUpdater
+
+    prompts = TerraboxPromptStore(args.versions_dir)
+    traces = TerraboxTrajectorySource()
+    metrics = TerraboxMetricProvider()
+    optimizer = ContrastiveOptimizer(llm=make_llm_client(args.provider))
+    updater = ContrastiveUpdater(
+        prompts,
+        traces,
+        metrics,
+        optimizer=optimizer,
+        skip_filter=is_transient_trace,
+    )
+    result = updater.update(
+        args.ver_a,
+        args.ver_b,
+        args.exp_a,
+        args.exp_b,
+        args.new_version,
+        n_candidates=args.n_candidates,
+        objective=args.objective or None,
+        max_tokens=args.max_tokens,
+        diagnose_max_tokens=args.diagnose_max_tokens,
+    )
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    prompt_path = os.path.abspath(os.path.join(args.out_dir, f"{args.new_version}.txt"))
+    with open(prompt_path, "w", encoding="utf-8") as f:
+        f.write(result.revised_prompt.strip() + "\n")
+
+    meta = {
+        "provider": args.provider,
+        "ver_a": args.ver_a,
+        "ver_b": args.ver_b,
+        "exp_a": args.exp_a,
+        "exp_b": args.exp_b,
+        "new_version": args.new_version,
+        "prompt_path": prompt_path,
+        "accepted": result.accepted,
+        "reason": result.reason,
+        "candidates_tried": result.candidates_tried,
+        "dev_before": result.dev_before,
+        "dev_after": result.dev_after,
+        "diagnosis": [
+            a.to_dict() if hasattr(a, "to_dict") else asdict(a)
+            for a in (result.diagnosis or [])
+        ],
+    }
+    meta_path = os.path.abspath(os.path.join(args.out_dir, f"{args.new_version}.meta.json"))
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    print("=== Stage2 contrastive 已生成候选提示词 ===")
+    print(f"prompt: {prompt_path}")
+    print(f"meta:   {meta_path}")
+    print(f"reason: {result.reason}")
+    print("\n=== 用它跑 react ===")
+    print(f"export TERRABOX_REACT_SYSTEM_PROMPT_FILE={prompt_path}")
+    print("python scripts/run_trajectory_experiment.py rollout --mode standard \\")
+    print("    --task-file <你的任务文件> --experiment promptevo_" + args.new_version + " ...")
 
 
 def _cmd_accept(args):
@@ -116,10 +194,34 @@ def main():
     pp.add_argument("--n-failed", type=int, default=8, help="采样多少条失败轨迹给 LLM 读")
     pp.add_argument("--n-success", type=int, default=2, help="搭配多少条成功轨迹做对照")
     pp.add_argument("--max-growth-ratio", type=float, default=1.5, help="改写后体量超过原文此倍数则标记不够克制")
+    pp.add_argument("--max-tokens", type=int, default=3500,
+                    help="提示词优化 LLM 输出 token 上限；thinking provider 建议调高，如 12000/16000")
+    pp.add_argument("--provider", default="local", choices=["local", "deepseek", "longcat"],
+                    help="优化提示词用的 LLM provider；默认 local，可用 deepseek/longcat")
     pp.add_argument("--base-prompt-file", default="",
                     help="待优化的 base 提示词 txt(默认用代码内置 BASE_SYSTEM;可指向任意版本如坏提示词)")
     pp.add_argument("--out", default="")
     pp.set_defaults(func=_cmd_propose)
+
+    pc = sub.add_parser("contrastive", help="Stage2: 用 base/stage1 配对结果做对比式提示词优化")
+    pc.add_argument("--provider", default="local", choices=["local", "deepseek", "longcat"],
+                    help="Stage2 优化用的 LLM provider")
+    pc.add_argument("--versions-dir", default="evolution_store/promptevo/terrabox/versions",
+                    help="base/stage1 提示词版本目录；base/original 会自动用内置提示词")
+    pc.add_argument("--ver-a", required=True, help="对照提示词版本，如 base")
+    pc.add_argument("--ver-b", required=True, help="当前提示词版本，如 stage1_xxx")
+    pc.add_argument("--exp-a", required=True, help="ver-a 对应 rollout 实验名")
+    pc.add_argument("--exp-b", required=True, help="ver-b 对应 rollout 实验名")
+    pc.add_argument("--new-version", required=True, help="生成的新版本名")
+    pc.add_argument("--n-candidates", type=int, default=3, help="best-of-N 候选数量")
+    pc.add_argument("--max-tokens", type=int, default=3500,
+                    help="Stage2 候选生成 LLM 输出 token 上限；thinking provider 建议调高")
+    pc.add_argument("--diagnose-max-tokens", type=int, default=2500,
+                    help="Stage2 归因诊断 LLM 输出 token 上限；thinking provider 建议调高")
+    pc.add_argument("--objective", default="", help="可选优化目标；默认用通用地理 agent 目标")
+    pc.add_argument("--out-dir", default="tmp/promptevo/stage2",
+                    help="Stage2 候选提示词和 meta 输出目录")
+    pc.set_defaults(func=_cmd_contrastive)
 
     pa = sub.add_parser("accept"); pa.add_argument("--proposal", required=True)
     pa.add_argument("--name", default="v1", help="版本名(多版本并存,如 v1/v2/strict)")

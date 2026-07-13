@@ -30,6 +30,19 @@ def test_osm_proxy_context_sets_and_restores_osmnx_requests_kwargs(monkeypatch):
     assert fake_ox.settings.requests_kwargs == {"headers": {"User-Agent": "keep"}}
 
 
+def test_osm_proxy_context_defaults_to_direct_requests(monkeypatch):
+    fake_ox = _FakeOsmnx()
+    monkeypatch.delenv("TERRABOX_OSM_HTTP_PROXY", raising=False)
+    monkeypatch.delenv("TERRABOX_OSM_HTTPS_PROXY", raising=False)
+
+    with osm_gis._osm_proxy_context(fake_ox):
+        assert fake_ox.settings.requests_kwargs["proxies"]["http"] is None
+        assert fake_ox.settings.requests_kwargs["proxies"]["https"] is None
+        assert fake_ox.settings.requests_kwargs["headers"] == {"User-Agent": "keep"}
+
+    assert fake_ox.settings.requests_kwargs == {"headers": {"User-Agent": "keep"}}
+
+
 def test_get_area_boundary_enters_osm_proxy_context(monkeypatch):
     fake_ox = _FakeOsmnx()
     monkeypatch.setenv("TERRABOX_OSM_HTTP_PROXY", "http://127.0.0.1:7890")

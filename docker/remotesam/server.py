@@ -6,7 +6,9 @@ Docker-aware Flask server for RemoteSAM, analogous to docker/sam2/server.py.
 Environment variables:
   REMOTESAM_CHECKPOINT  Path to checkpoint inside container
                         (default: /checkpoints/swin_base_patch4_window12_384_22k.pth)
-  REMOTESAM_USE_EPOC    Enable EPOC contour refinement (default: "true")
+  REMOTESAM_BERT_PATH   Local bert-base-uncased directory inside container
+                        (default: /checkpoints/bert-base-uncased)
+  REMOTESAM_USE_EPOC    Enable EPOC contour refinement (default: "false")
 
 Volume mounts expected at runtime:
   -v /your/pretrained_weights:/checkpoints:ro
@@ -34,11 +36,47 @@ CHECKPOINT = os.environ.get(
     "REMOTESAM_CHECKPOINT",
     "/checkpoints/swin_base_patch4_window12_384_22k.pth",
 )
-USE_EPOC = os.environ.get("REMOTESAM_USE_EPOC", "true").lower() == "true"
+BERT_PATH = os.environ.get("REMOTESAM_BERT_PATH", "/checkpoints/bert-base-uncased")
+USE_EPOC = os.environ.get("REMOTESAM_USE_EPOC", "false").lower() == "true"
+
+
+def _patch_local_bert_path():
+    """Force RemoteSAM hardcoded bert-base-uncased loads to local checkpoint files."""
+    try:
+        import args as remotesam_args
+        import transformers
+    except Exception:
+        traceback.print_exc()
+        return
+
+    if not os.path.isdir(BERT_PATH):
+        print(f"RemoteSAM local BERT path not found: {BERT_PATH}")
+        return
+
+    original_get_parser = remotesam_args.get_parser
+
+    def get_parser_with_local_bert():
+        parser = original_get_parser()
+        parser.set_defaults(ck_bert=BERT_PATH, bert_tokenizer=BERT_PATH)
+        return parser
+
+    remotesam_args.get_parser = get_parser_with_local_bert
+
+    original_tokenizer_from_pretrained = transformers.BertTokenizer.from_pretrained
+
+    def local_tokenizer_from_pretrained(name_or_path, *args, **kwargs):
+        if name_or_path == "bert-base-uncased":
+            name_or_path = BERT_PATH
+            kwargs.setdefault("local_files_only", True)
+        return original_tokenizer_from_pretrained(name_or_path, *args, **kwargs)
+
+    transformers.BertTokenizer.from_pretrained = local_tokenizer_from_pretrained
+    print(f"RemoteSAM BERT path: {BERT_PATH}")
 
 print(f"Loading RemoteSAM from {CHECKPOINT} ...")
 print(f"EPOC refinement enabled: {USE_EPOC}")
 try:
+    _patch_local_bert_path()
     _base_model = init_demo_model(CHECKPOINT, DEVICE)
     model = RemoteSAM(_base_model, DEVICE, use_EPOC=USE_EPOC)
     print("RemoteSAM Ready!")

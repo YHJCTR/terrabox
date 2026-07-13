@@ -5,61 +5,116 @@
 1. **开放式自发现**:不给 LLM 任何预设的失败标签/统计;问题由它从原始日志里看出来,
    这样能发现我们没预想到的协议缺陷,也更符合"由 LLM 自行设计"的目标。
 2. **领域无关**:这段"指挥 LLM 优化提示词"的元提示词不含任何遥感/地理/具体工具的字眼,
-   换成 code agent、金融 agent 等任意工具型 agent 都能直接用。
+   换成 code agent、金融 agent、对话式 agent 等任意 agent 场景都能直接用。
 
 反膨胀:用"保持克制、最小改动、禁任务专属内容"来约束(不写死行数/字数),改写后做
 体量增幅检查仅作软提示。
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from .schemas import PromptEdit, PromptProposal
+from .candidate_selection import choose_static_candidate, score_static_candidates
 
 
 _OPTIMIZER_SYSTEM = (
-    "You are an expert at designing system prompts (behavioral protocols) for "
-    "tool-using LLM agents. From execution logs you diagnose whether recurring "
-    "failures are caused by an underspecified system prompt, and you improve the "
-    "prompt with GENERAL, domain-agnostic rules."
+    "You are an expert at designing concise system prompts for LLM agents. "
+    "You distinguish prompt-fixable behavior from model/data/evaluator limits, "
+    "and you make only low-regression-risk, general prompt edits."
 )
 
-_META_PROMPT = """你将看到一个工具型 LLM agent 当前使用的【静态系统提示词】,以及它在若干任务上的【执行日志】(含每一步的思考、工具调用与工具返回)。
+_META_PROMPT_BODY = """You will see the current static system prompt used by an LLM agent, plus a small set of execution logs from tasks where it was used. The logs may include reasoning, replies, plans, searches, tool/API/code calls, observations, or final answers.
 
-你的任务分两步:
-第一步 诊断:仔细阅读日志,**自己归纳**出 agent 反复出现的、**很可能是因为静态系统提示词没写好**而导致的行为问题(而不是模型能力不足或工具本身的故障)。不要依赖任何预设的问题清单,完全靠你从日志里观察。注意两类都要查:(a)**缺失**——提示词没约束到位、少了某条规则;(b)**有害/冲突**——提示词里**已有的某条指令本身就在诱导这些不良行为**,或与另一条指令自相矛盾。后一类同样要诊断出来,并在改写时直接删除或重写那条有害/冲突的指令。
-第二步 改写:修改这份静态系统提示词,使其能从根本上、系统性地避免你诊断出的这些问题。
+Your job is to make a conservative improvement to the static prompt. Fix only problems that are clearly likely to improve through prompt wording, and avoid changes that could break tasks that already work.
 
-================ 当前静态系统提示词 ================
+First decide whether each problem is suitable for a prompt fix:
+- Suitable: unstable output format, weak instruction following, missing checks, ignoring provided context or interface constraints, inventing information, or rewriting values without a reason.
+- Suitable: returning no action/answer when the prompt, task context, and provided interface clearly contain enough information to produce the required output.
+- Not suitable: missing information, need for new external knowledge or retrieval ability, evaluator requirements that cannot be inferred from the logs, model capability limits, or environment/tool failures.
+
+Only edit the prompt for problems that are suitable and low risk. If there is not enough evidence, keep the new prompt very close to the original.
+Prefer narrow additions over rewriting existing sentences. If the original prompt already contains an output format, example, placeholder, or context insertion anchor, keep it exactly unless the logs prove that specific text is harmful. If the prompt ends with a context insertion anchor, place any new static rule before that anchor, not after it.
+Treat the current prompt as a working contract, not as a rough draft. Most good edits should add one general guardrail or refine one phrase while preserving the rest of the contract.
+
+================ Current Static Prompt ================
 {base_prompt}
 
-================ 执行日志(节选若干条,工具返回已截断) ================
+================ Execution Logs ================
 {trace_text}
 {metric_block}
-================ 必须遵守的约束(非常重要) ================
-1. 只增加/修改**通用的行为规则**——即对"一类情况"都成立、换一个全新任务甚至全新领域也照样有用的规则。
-2. **禁止**写入与具体任务或具体领域绑定的内容:某个任务的解法、固定的工具调用顺序/workflow、任何示例或样例输入输出、任何具体实体名(人名/地名/文件名/领域术语)。判据:一条规则若只对你在日志里见到的那几个任务有用,就不要写。
-3. **保持克制**:尽量在原提示词基础上做**最小改动**——能改写或合并已有规则,就不要新增;不要因为个别日志案例而堆砌冗长的特例。改完后的提示词应当仍然紧凑、清晰,不要显著变长。
-4. 每一处改动都要说明它对应你在第一步诊断出的哪个问题。
-5. 保持原提示词的语言与风格;结构尽量沿用,但**允许删除或重组**日志证明有害或自相矛盾的条款——"保持结构"不应成为保留有害内容的理由。
+================ Rules ================
+1. Add or modify only general behavior rules: rules that should still help in a new task or domain.
+2. Do not add task-specific content: no specific tool names, API names, entity names, fixed solutions, fixed action sequences, or new examples copied from the logs.
+3. Preserve the original output contract and useful instructions. Make the smallest change that can plausibly fix the issue. Prefer adding one short rule to replacing a whole paragraph.
+4. Avoid strong words such as "always", "must", or "strictly" unless the logs show that such a constraint is low risk.
+5. For fields, values, or answers taken from context, prefer general rules such as: do not invent information, do not rewrite provided values without a reason, and preserve the information given in the task.
+6. Preserve the original prompt structure unless it is clearly harmful: section names, input/output placeholders, format examples, dynamic-context anchors, and multiline layout.
+7. Do not weaken an existing exact output format rule. If format failures exist, add a clarifying rule next to the original contract rather than replacing the contract.
+8. When logs show both format failures and value-matching failures, avoid fixes that improve format by increasing value rewriting. Add a value-preservation condition if needed.
+9. Do not add a new permission to skip output, return nothing, or emit an empty output unless the original prompt already allowed it.
+10. Do not remove an existing requirement unless you explicitly identify that exact requirement as harmful and low-risk to remove.
+11. If logs show avoidable empty/no-op outputs, prefer a general rule like: when the task context and provided interface make the required output clear, produce that output rather than a blank or unrelated response.
+12. When adding such an action/answer rule, pair it with a context-fidelity rule: use only information supported by the task context, and preserve provided values unless the prompt already allows normalization.
+13. If no low-risk prompt fix is supported by the logs, return a prompt that is nearly unchanged.
+14. Do not append static rules after a trailing dynamic-context anchor. Keep the anchor as the final line if it was final in the original prompt.
+15. A good general action-completeness rule does not name a domain. Prefer concrete-but-general wording like: when the user asks for an operation, lookup, computation, status, update, or other result and a matching interface is available, use that interface to produce the required structured output.
+"""
 
-================ 输出格式(严格 JSON,不要多余文字) ================
+_META_PROMPT = _META_PROMPT_BODY + """
+================ Output Format ================
+Return strict JSON only:
 {{
   "diagnosis": [
-    {{"issue": "你归纳的问题(一句话)",
-      "evidence": "日志里支持该问题的现象",
-      "prompt_gap": "原提示词为什么没能防住它"}}
+    {{"issue": "one-sentence problem",
+      "evidence": "what in the logs supports this",
+      "prompt_gap": "why the current prompt failed to prevent it",
+      "fixability": "prompt_fixable|not_prompt_fixable_or_high_risk|uncertain",
+      "regression_risk": "low|medium|high"}}
   ],
   "edits": [
     {{"op": "add|modify|remove",
-      "target": "被改/删的原文片段(add 时填所属位置)",
-      "new_text": "新文本(remove 时为空)",
-      "addresses": "对应上面哪个 issue",
-      "generality_note": "为什么这条规则通用、换领域也成立"}}
+      "target": "the original text being changed, or where to add the new text",
+      "new_text": "new text, empty for remove",
+      "addresses": "which diagnosis item this edit addresses",
+      "generality_note": "why this rule is general and should transfer to other tasks"}}
   ],
-  "revised_prompt": "改写后的完整静态系统提示词",
-  "rationale": "一句话总结这次改了什么、针对哪些问题"
+  "revised_prompt": "the full revised static prompt",
+  "rationale": "one-sentence summary of what changed and why"
 }}
+"""
+
+_MULTI_CANDIDATE_PROMPT = _META_PROMPT_BODY + """
+
+Generate {n} different conservative candidates. Each candidate must follow the same rules above.
+
+Use distinct edit styles:
+- Candidate 1: context fidelity. Keep the original text nearly intact and add one general rule about preserving provided values/facts and not adding unsupported fields.
+- Candidate 2: interface-use completeness. Add one general rule that says: when the user asks for an operation, lookup, computation, status, update, or other result and a matching interface is available, use that interface to produce the required structured output rather than leaving it blank or unrelated.
+- Candidate 3 and later: combined conservative rule. Combine interface-use completeness with context fidelity in one short sentence.
+
+For every candidate:
+- Preserve all section headers, placeholders, format examples, and trailing dynamic-context anchors exactly unless a specific one is proven harmful.
+- If the original prompt's final line is a dynamic-context anchor, it must remain the final line. Insert new static rules before it.
+- Do not shorten the prompt by deleting existing constraints merely to make it cleaner.
+- Do not replace a concrete format rule with a looser paraphrase.
+- The revised prompt must be the full static prompt, not a patch or summary.
+
+Do not use JSON for this multi-candidate response. Use this exact plain-text
+format so prompt text can contain quotes safely:
+
+<candidate id="1">
+<diagnosis>
+one or two short bullets
+</diagnosis>
+<rationale>
+one sentence
+</rationale>
+<revised_prompt>
+full revised static prompt
+</revised_prompt>
+</candidate>
 """
 
 
@@ -86,15 +141,83 @@ class PromptOptimizer:
         metric_block: **可选**的绝对指标块(默认空 = 行为与改前完全一致,纯开放式自发现)。
         想喂指标时传入 `_fmt_metric_summary(agg, agg, specs)` 之类的渲染文本即可。
         """
-        block = (f"\n================ 当前实验指标(绝对值,供参考哪个维度本就弱;方向见简介) ================\n"
+        block = (f"\n================ Current Metrics (for context; metric directions are described) ================\n"
                  f"{metric_block}\n") if metric_block.strip() else ""
         prompt = _META_PROMPT.format(base_prompt=base_prompt, trace_text=trace_text,
                                      metric_block=block)
         data = self.llm.call_json(prompt, system=_OPTIMIZER_SYSTEM, max_tokens=max_tokens)
+        return self._proposal_from_data(base_prompt, data)
+
+    def propose_candidates(
+        self,
+        base_prompt: str,
+        trace_text: str,
+        n: int = 3,
+        max_tokens: int = 3500,
+        metric_block: str = "",
+    ) -> list[PromptProposal]:
+        """Generate multiple first-stage candidates.
+
+        This is still lightweight: it only makes additional LLM calls and does
+        not run the target agent. Use `propose_best` to select one candidate by
+        static text checks before launching any expensive rollout.
+        """
+
+        candidates: list[PromptProposal] = []
+        if n > 1:
+            block = (f"\n================ Current Metrics (for context; metric directions are described) ================\n"
+                     f"{metric_block}\n") if metric_block.strip() else ""
+            prompt = _MULTI_CANDIDATE_PROMPT.format(
+                base_prompt=base_prompt,
+                trace_text=trace_text,
+                metric_block=block,
+                n=n,
+            )
+            raw = self.llm.call(prompt, system=_OPTIMIZER_SYSTEM, max_tokens=max_tokens * max(1, n))
+            candidates.extend(self._parse_text_candidates(base_prompt, raw))
+            if candidates:
+                return candidates[:n]
+        for _ in range(max(1, n)):
+            proposal = self.propose(
+                base_prompt,
+                trace_text,
+                max_tokens=max_tokens,
+                metric_block=metric_block,
+            )
+            if proposal is not None:
+                candidates.append(proposal)
+        return candidates
+
+    def _parse_text_candidates(self, base_prompt: str, raw: str) -> list[PromptProposal]:
+        out: list[PromptProposal] = []
+        blocks = re.findall(r"<candidate\b[^>]*>(.*?)</candidate>", raw or "", flags=re.DOTALL | re.IGNORECASE)
+        for block in blocks:
+            prompt_match = re.search(r"<revised_prompt>(.*?)</revised_prompt>", block, flags=re.DOTALL | re.IGNORECASE)
+            if not prompt_match:
+                continue
+            revised = prompt_match.group(1).strip()
+            if not revised:
+                continue
+            rationale_match = re.search(r"<rationale>(.*?)</rationale>", block, flags=re.DOTALL | re.IGNORECASE)
+            diagnosis_match = re.search(r"<diagnosis>(.*?)</diagnosis>", block, flags=re.DOTALL | re.IGNORECASE)
+            restrained, note = self._check_restraint(base_prompt, revised)
+            out.append(PromptProposal(
+                base_prompt=base_prompt,
+                revised_prompt=revised,
+                edits=[],
+                rationale=(rationale_match.group(1).strip() if rationale_match else ""),
+                diagnosis=[{"text": diagnosis_match.group(1).strip()}] if diagnosis_match else [],
+                restrained=restrained,
+                size_note=note,
+            ))
+        return out
+
+    def _proposal_from_data(self, base_prompt: str, data) -> Optional[PromptProposal]:
         if not isinstance(data, dict) or "revised_prompt" not in data:
             return None
-
         revised = str(data["revised_prompt"]).strip()
+        if not revised:
+            return None
         edits = []
         for e in data.get("edits", []):
             if not isinstance(e, dict):
@@ -106,7 +229,6 @@ class PromptOptimizer:
                 addresses=str(e.get("addresses", "")),
                 generality_note=str(e.get("generality_note", "")),
             ))
-
         restrained, note = self._check_restraint(base_prompt, revised)
         return PromptProposal(
             base_prompt=base_prompt,
@@ -117,3 +239,41 @@ class PromptOptimizer:
             restrained=restrained,
             size_note=note,
         )
+
+    def propose_best(
+        self,
+        base_prompt: str,
+        trace_text: str,
+        n: int = 3,
+        max_tokens: int = 3500,
+        metric_block: str = "",
+    ) -> tuple[Optional[PromptProposal], list[dict]]:
+        """Generate candidates and choose one using text-only checks."""
+
+        proposals = self.propose_candidates(
+            base_prompt,
+            trace_text,
+            n=n,
+            max_tokens=max_tokens,
+            metric_block=metric_block,
+        )
+        if not proposals:
+            return None, []
+        raw_candidates = [
+            {
+                "revised_prompt": proposal.revised_prompt,
+                "proposal": proposal,
+            }
+            for proposal in proposals
+        ]
+        all_scores = [score.to_dict() for score in score_static_candidates(base_prompt, raw_candidates, stage="stage1")]
+        try:
+            best, scores = choose_static_candidate(
+                base_prompt,
+                raw_candidates,
+                stage="stage1",
+                min_score=4.0,
+            )
+        except ValueError as exc:
+            return None, [{"error": str(exc), "scores": all_scores}]
+        return best["proposal"], [score.to_dict() for score in scores]

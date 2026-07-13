@@ -7,11 +7,12 @@ Set TERRABOX_USE_DOCKER=true to activate this manager via geo_perception.py impo
 Volume mounts:
   -v /data1:/data1                             image files (same path inside container)
   -v ${REMOTESAM_CHECKPOINT_HOST}:/checkpoints:ro  pretrained_weights directory
-  -v ${HF_CACHE_HOST}:/root/.cache/huggingface:ro  HuggingFace model cache
+  -v ${HF_CACHE_HOST}:/root/.cache/huggingface:ro  optional HuggingFace model cache
 
 Note: The image clones RemoteSAM source from GitHub at build time (no host source mount needed).
-      bert-base-uncased and the EPOC model must be present in the HF cache; TRANSFORMERS_OFFLINE=1
-      prevents network download attempts inside the container.
+      bert-base-uncased is loaded from /checkpoints/bert-base-uncased by default,
+      so migrated servers do not depend on ~/.cache/huggingface containing BERT.
+      EPOC is disabled by default unless REMOTESAM_USE_EPOC=1 is explicitly set.
 
 Build image first:
   cd docker/remotesam && docker build -t terrabox/remotesam:latest .
@@ -45,6 +46,12 @@ class RemoteSAMDockerManager(BaseServiceManager):
     CHECKPOINT_HOST = os.environ.get("REMOTESAM_CHECKPOINT_HOST", "")
     DATA_MOUNT_HOST = os.environ.get("DATA_MOUNT_HOST", "/data1")
     HF_CACHE_HOST   = os.environ.get("HF_CACHE_HOST", os.path.expanduser("~/.cache/huggingface"))
+    BERT_PATH       = os.environ.get("REMOTESAM_BERT_PATH", "/checkpoints/bert-base-uncased")
+    USE_EPOC        = os.environ.get("REMOTESAM_USE_EPOC", "false")
+    SERVER_HOST     = os.environ.get(
+        "REMOTESAM_SERVER_HOST",
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../..", "docker/remotesam/server.py")),
+    )
     _lease = None
 
     def __new__(cls):
@@ -105,12 +112,15 @@ class RemoteSAMDockerManager(BaseServiceManager):
             "-v", f"{cls.DATA_MOUNT_HOST}:{cls.DATA_MOUNT_HOST}",
             # Mount pretrained_weights as /checkpoints (source code is baked into the image)
             "-v", f"{cls.CHECKPOINT_HOST}:/checkpoints:ro",
+            "-v", f"{cls.SERVER_HOST}:/app/docker_server.py:ro",
             # Mount HuggingFace cache so bert-base-uncased and EPOC model are available offline
             "-v", f"{cls.HF_CACHE_HOST}:/root/.cache/huggingface:ro",
             # Force offline mode — prevents transformers from trying to reach HuggingFace Hub
             "-e", "TRANSFORMERS_OFFLINE=1",
             "-e", "HF_DATASETS_OFFLINE=1",
             "-e", "REMOTESAM_CHECKPOINT=/checkpoints/swin_base_patch4_window12_384_22k.pth",
+            "-e", f"REMOTESAM_BERT_PATH={cls.BERT_PATH}",
+            "-e", f"REMOTESAM_USE_EPOC={cls.USE_EPOC}",
             cls.DOCKER_IMAGE,
         ]
 
@@ -131,6 +141,9 @@ class RemoteSAMDockerManager(BaseServiceManager):
             d = load_raw_yaml()
             if "remotesam_checkpoint_host" in d: cls.CHECKPOINT_HOST = str(d["remotesam_checkpoint_host"])
             if "remotesam_gpu_devices"     in d: cls.GPU_DEVICES     = str(d["remotesam_gpu_devices"])
+            if "remotesam_bert_path"       in d: cls.BERT_PATH       = str(d["remotesam_bert_path"])
+            if "remotesam_use_epoc"        in d: cls.USE_EPOC        = str(d["remotesam_use_epoc"]).lower()
+            if "remotesam_server_host"     in d: cls.SERVER_HOST     = str(d["remotesam_server_host"])
             if "docker_data_mount_host"    in d: cls.DATA_MOUNT_HOST = str(d["docker_data_mount_host"])
             if "remotesam_port"            in d: cls.API_URL         = f"http://127.0.0.1:{int(d['remotesam_port'])}"
         except Exception:
