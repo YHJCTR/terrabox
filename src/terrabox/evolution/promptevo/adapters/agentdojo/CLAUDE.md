@@ -34,6 +34,10 @@ without modifying that checkout.
   after acquiring it, and never stop unrelated Tau2 or user containers.
 - Before any smoke/full run, execute the pipeline `preflight`. Missing upstream
   dependencies are a blocker and must be reported, not bypassed with mock data.
+- Before the first full Base for a configuration, run pipeline `smoke`. It uses
+  GPU0 for one clean user task and one attacked user/injection pair (3 results),
+  validates the same vLLM/Hermes/evaluator/result-count path, writes only under
+  `tmp/agentdojo_smoke/`, and must finish before the 1081-result Base starts.
 - If the conda environment is read-only, install missing AgentDojo-only packages
   into `tmp/agentdojo_site_packages/`; core preflight and runner add it to
   `PYTHONPATH` automatically. Do not fall back to `/home/*/.local`.

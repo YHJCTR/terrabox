@@ -113,6 +113,19 @@ PYTHONPATH=src /data/yhj/miniconda3/envs/unsloth/bin/python \
   --prompt-version base --stage base
 ```
 
+Before the first Base, run the real local smoke after the GPUs are free:
+
+```bash
+PYTHONPATH=src /data/yhj/miniconda3/envs/unsloth/bin/python \
+  -m terrabox.evolution.promptevo.adapters.agentdojo.pipeline smoke \
+  --group qwen3_8b_v1
+```
+
+This starts only GPU0, runs one clean user task plus one attacked
+user/injection pair (three result JSON files including injection-as-user), and
+writes to `tmp/agentdojo_smoke/`. Full Base must not start unless this command
+passes the same strict result-count checks.
+
 After Base is running, the watcher/chain entry waits for all clean and attack
 phases, creates Stage1 with LongCat no-think, runs Stage1, performs Base-vs-
 Stage1 contrastive attribution, creates Stage2, and runs Stage2:

@@ -105,6 +105,8 @@ def test_agentdojo_run_config_is_resumable_and_matches_upstream_cli():
         suite="banking",
         model="vllm_parsed",
         attack="important_instructions",
+        user_tasks=["user_task_0"],
+        injection_tasks=["injection_task_0"],
         modules_to_load=[NO_THINK_PATCH],
     )
     args = config.cli_args("/tmp/results", "system prompt")
@@ -114,6 +116,8 @@ def test_agentdojo_run_config_is_resumable_and_matches_upstream_cli():
     assert "--tool-output-format" not in args
     assert args[args.index("--suite") + 1] == "banking"
     assert args[args.index("--attack") + 1] == "important_instructions"
+    assert args[args.index("--user-task") + 1] == "user_task_0"
+    assert args[args.index("--injection-task") + 1] == "injection_task_0"
     assert args[args.index("--module-to-load") + 1] == NO_THINK_PATCH
 
 

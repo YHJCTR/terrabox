@@ -46,6 +46,7 @@ DEFAULT_ATTACK = "important_instructions"
 NO_THINK_PATCH = "terrabox.evolution.promptevo.adapters.agentdojo.qwen_no_think"
 GPU_LANES = ((0, 9200), (1, 9201), (2, 9202), (3, 9203))
 ROLLOUT_LOCK_PATH = Path(__file__).resolve().parents[6] / "tmp" / "agentdojo_rollout.lock"
+SMOKE_OUTPUT_DIR = Path(__file__).resolve().parents[6] / "tmp" / "agentdojo_smoke"
 
 
 def experiment_dir(name: str, output_dir: str = DEFAULT_AGENTDOJO_EXPERIMENTS_DIR) -> str:
@@ -282,6 +283,7 @@ def _run_job(
         model="vllm_parsed",
         benchmark_version="v1.2.2",
         attack=job["attack"],
+        user_tasks=list(job.get("user_tasks") or []),
         injection_tasks=list(job["injection_tasks"]),
         modules_to_load=[NO_THINK_PATCH],
         max_workers=1,
@@ -318,6 +320,83 @@ def _job_result_count(adapter_dir: Path) -> int:
     runs_dir = adapter_dir / "runs"
     metrics = AgentDojoMetricProvider(results_path_fn=lambda _exp: str(runs_dir)).aggregate("job")
     return int(metrics.get("n") or 0)
+
+
+def smoke(group: str = "qwen3_8b_v1") -> dict[str, Any]:
+    check = preflight()
+    root = Path(SMOKE_OUTPUT_DIR, group)
+    root.mkdir(parents=True, exist_ok=True)
+    status_path = root / "smoke_status.json"
+    if not check["ok"]:
+        status = {"status": "blocked", "preflight": check}
+        _write_json(status_path, status)
+        raise RuntimeError(f"AgentDojo smoke preflight failed: {json.dumps(check, ensure_ascii=False)}")
+
+    suite = "workspace" if "workspace" in check["suite_inventory"] else sorted(check["suite_inventory"])[0]
+    inventory = check["suite_inventory"][suite]
+    user_task = inventory["user_tasks"][0]
+    injection_task = inventory["injection_tasks"][0]
+    jobs = [
+        {
+            "name": f"{suite}_clean_{user_task}",
+            "suite": suite,
+            "attack": None,
+            "user_tasks": [user_task],
+            "injection_tasks": [],
+            "expected_results": 1,
+        },
+        {
+            "name": f"{suite}_attack_{user_task}_{injection_task}",
+            "suite": suite,
+            "attack": DEFAULT_ATTACK,
+            "user_tasks": [user_task],
+            "injection_tasks": [injection_task],
+            "expected_results": 2,
+        },
+    ]
+    if _read_status(status_path) == "complete":
+        if all(
+            _job_result_count(root / job["name"]) == int(job["expected_results"])
+            for job in jobs
+        ):
+            return json.loads(status_path.read_text(encoding="utf-8"))
+    store = AgentDojoPromptStore(
+        system_messages_path=os.path.join(
+            DEFAULT_AGENTDOJO_ROOT, "src", "agentdojo", "data", "system_messages.yaml"
+        )
+    )
+    prompt = store.load("base")
+    rollout_lock = _acquire_rollout_lock()
+    container = ""
+    try:
+        _cleanup_stale_agentdojo_containers()
+        _write_json(
+            status_path,
+            {"status": "starting", "suite": suite, "user_task": user_task, "injection_task": injection_task},
+        )
+        container = _start_server("smoke", "lane0", 0, 9200)
+        runner = AgentDojoRolloutRunner(
+            output_dir=str(SMOKE_OUTPUT_DIR),
+            python_executable=AGENTDOJO_PYTHON,
+            check_dependencies=False,
+        )
+        results = {
+            job["name"]: _run_job(runner, group, job, prompt, 9200)
+            for job in jobs
+        }
+        actual_results = sum(_job_result_count(Path(path)) for path in results.values())
+        if actual_results != 3:
+            raise RuntimeError(f"AgentDojo smoke produced {actual_results}/3 valid results")
+        status = {"status": "complete", "actual_results": actual_results, "jobs": results}
+        _write_json(status_path, status)
+        return status
+    except Exception as exc:
+        _write_json(status_path, {"status": "failed", "error": repr(exc)})
+        raise
+    finally:
+        if container:
+            _stop_container(container)
+        _release_rollout_lock(rollout_lock)
 
 
 def _run_lane(
@@ -611,6 +690,9 @@ def main() -> None:
 
     sub.add_parser("preflight")
 
+    smoke_parser = sub.add_parser("smoke")
+    smoke_parser.add_argument("--group", default="qwen3_8b_v1")
+
     rollout = sub.add_parser("rollout")
     rollout.add_argument("--group", required=True)
     rollout.add_argument("--prompt-version", required=True)
@@ -628,6 +710,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "preflight":
         print(json.dumps(preflight(), ensure_ascii=False, indent=2))
+    elif args.command == "smoke":
+        print(json.dumps(smoke(args.group), ensure_ascii=False, indent=2))
     elif args.command == "rollout":
         result = rollout_group(args.group, args.prompt_version, args.stage, attack=args.attack)
         print(json.dumps(result, ensure_ascii=False, indent=2))
