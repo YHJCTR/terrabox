@@ -42,17 +42,48 @@ def _cache_key(domain: str, sim: dict, assertions: list[str], model: str) -> str
 
 
 def _extract_json_object(raw: str) -> dict[str, Any]:
-    decoder = json.JSONDecoder()
-    for index, char in enumerate(raw or ""):
-        if char != "{":
-            continue
-        try:
-            value, _ = decoder.raw_decode(raw[index:])
-        except json.JSONDecodeError:
-            continue
+    for value in _extract_json_values(raw):
         if isinstance(value, dict):
             return value
     raise ValueError("judge response contains no valid JSON object")
+
+
+def _extract_json_values(raw: str) -> list[Any]:
+    decoder = json.JSONDecoder()
+    values: list[Any] = []
+    index = 0
+    text = raw or ""
+    while index < len(text):
+        starts = [pos for pos in (text.find("{", index), text.find("[", index)) if pos >= 0]
+        if not starts:
+            break
+        start = min(starts)
+        try:
+            value, end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            index = start + 1
+            continue
+        values.append(value)
+        index = start + max(end, 1)
+    if not values:
+        raise ValueError("judge response contains no valid JSON value")
+    return values
+
+
+def _judge_payloads(raw: str) -> list[dict[str, Any]]:
+    values = _extract_json_values(raw)
+    payloads: list[dict[str, Any]] = []
+    row_objects: list[dict[str, Any]] = []
+    for value in values:
+        if isinstance(value, list):
+            payloads.append({"results": value})
+        elif isinstance(value, dict):
+            payloads.append(value)
+            if "index" in value:
+                row_objects.append(value)
+    if len(row_objects) > 1:
+        payloads.insert(0, {"results": row_objects})
+    return payloads
 
 
 def _as_bool(value: Any) -> bool:
@@ -70,7 +101,19 @@ def _as_bool(value: Any) -> bool:
 
 
 def _normalize_checks(data: dict[str, Any], assertions: list[str]) -> list[dict[str, Any]]:
-    rows = data.get("results") if isinstance(data, dict) else None
+    rows = None
+    if isinstance(data, dict):
+        for key in ("results", "evaluations", "checks", "outcomes", "judgments"):
+            if key in data:
+                rows = data[key]
+                break
+        if rows is None and "index" in data:
+            rows = [data]
+        if isinstance(rows, dict):
+            rows = [
+                ({"index": index, **value} if isinstance(value, dict) else {"index": index, "met": value})
+                for index, value in rows.items()
+            ]
     if not isinstance(rows, list):
         raise ValueError("judge response is missing results[]")
     by_index: dict[int, dict[str, Any]] = {}
@@ -128,7 +171,15 @@ def rejudge_results(
     output_root = Path(output_dir).resolve()
     cache_dir = output_root / "judge_cache" / provider
     cache_dir.mkdir(parents=True, exist_ok=True)
-    totals = {"simulations": 0, "judged": 0, "cache_hits": 0, "changed": 0, "files": 0}
+    totals = {
+        "simulations": 0,
+        "judged": 0,
+        "cache_hits": 0,
+        "changed": 0,
+        "files": 0,
+        "skipped_non_scoring": 0,
+        "judge_failures": 0,
+    }
 
     for result_path in _iter_result_paths(str(source_root)):
         path = Path(result_path).resolve()
@@ -149,6 +200,17 @@ def rejudge_results(
             assertions = [str(x) for x in (criteria.get("nl_assertions") or []) if str(x).strip()]
             if not assertions:
                 continue
+            reward_basis = [
+                str(item)
+                for item in (
+                    criteria.get("reward_basis")
+                    or (sim.get("reward_info") or {}).get("reward_basis")
+                    or []
+                )
+            ]
+            if "NL_ASSERTION" not in reward_basis:
+                totals["skipped_non_scoring"] += 1
+                continue
             key = _cache_key(domain, sim, assertions, model)
             cache_path = cache_dir / f"{key}.json"
             if cache_path.exists():
@@ -162,6 +224,7 @@ def rejudge_results(
                     f"{json.dumps(list(enumerate(assertions)), ensure_ascii=False)}"
                 )
                 last_error: Exception | None = None
+                last_raw = ""
                 for attempt in range(retries):
                     try:
                         retry_note = ""
@@ -170,9 +233,16 @@ def rejudge_results(
                                 f"\n\nThe previous response was invalid: {last_error}. "
                                 "Return one compact valid JSON object only."
                             )
-                        raw = client.call(prompt + retry_note, system=_SYSTEM, max_tokens=max_tokens)
-                        data = _extract_json_object(raw)
-                        checks = _normalize_checks(data, assertions)
+                        last_raw = client.call(prompt + retry_note, system=_SYSTEM, max_tokens=max_tokens)
+                        payload_errors = []
+                        for data in _judge_payloads(last_raw):
+                            try:
+                                checks = _normalize_checks(data, assertions)
+                                break
+                            except Exception as payload_exc:
+                                payload_errors.append(str(payload_exc))
+                        else:
+                            raise ValueError("; ".join(payload_errors) or "judge response has no usable payload")
                         _write_json(
                             cache_path,
                             {
@@ -188,7 +258,23 @@ def rejudge_results(
                         if attempt + 1 < retries:
                             time.sleep(2 ** attempt)
                 else:
-                    raise RuntimeError(f"NL rejudge failed for {domain}/{sim.get('task_id')}: {last_error}")
+                    totals["judge_failures"] += 1
+                    failure_key = _sim_task_id(sim, str(path), domain).replace("/", "_").replace(":", "_")
+                    _write_json(
+                        output_root / "judge_failures" / provider / f"{failure_key}.json",
+                        {
+                            "provider": provider,
+                            "model": model,
+                            "domain": domain,
+                            "task_id": sim.get("task_id"),
+                            "trial": sim.get("trial"),
+                            "assertions": assertions,
+                            "error": str(last_error),
+                            "raw_response": last_raw,
+                            "policy": "preserve_original_reward_info",
+                        },
+                    )
+                    continue
             totals["judged"] += 1
             target = copied_sims[index]
             before = float((target.get("reward_info") or {}).get("reward") or 0.0)

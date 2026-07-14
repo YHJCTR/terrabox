@@ -85,6 +85,15 @@ boolean verdicts strictly, retry malformed external responses, and preserve
 successful per-item caches. A single malformed provider response must not force
 already judged tasks to consume API tokens again.
 
+Only send assertions to the external judge when `NL_ASSERTION` participates in
+the task's `reward_basis`. Assertions attached to DB/COMMUNICATE-only tasks do
+not affect the metric and must be counted as `skipped_non_scoring`, not charged
+to the provider. Accept common provider wrappers (`evaluations`, `checks`,
+`outcomes`, `judgments`) and multiple top-level row objects. After retries, a
+remaining malformed response is saved under `judge_failures/` and preserves the
+original reward info instead of blocking every later stage; the summary must
+surface `judge_failures` explicitly.
+
 Qwen rollout stages load four 32k vLLM services sequentially and then run one
 domain per GPU. Keep `--safetensors-load-strategy eager` on this server: lazy
 mmap loading stalled on the nearly full `/data1` disk. Stop every stage-owned

@@ -183,7 +183,12 @@ consume those copies. Multi-domain task keys include the domain
 The external rejudge contract is compact and index-based. It does not ask the
 model to repeat long assertion strings inside JSON, validates boolean verdicts
 strictly, retries malformed responses, and preserves successful per-item
-caches when a chain resumes.
+caches when a chain resumes. Only tasks whose `reward_basis` contains
+`NL_ASSERTION` are sent to the provider; assertions on DB/COMMUNICATE-only tasks
+cannot change reward and are reported as `skipped_non_scoring`. Common wrapper
+keys and multiple top-level row objects are accepted. Exhausted parse retries
+are written to `judge_failures/`, preserve the original reward info, and remain
+visible in `rejudge_summary.json` instead of stopping the complete stage chain.
 
 The rollout configuration remains fixed across stages: Qwen3 8B agent and user,
 one trial, `max_steps=80`, 32k context, one domain per GPU, and offline BM25 for

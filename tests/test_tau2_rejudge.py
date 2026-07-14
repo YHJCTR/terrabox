@@ -28,6 +28,32 @@ def test_normalize_checks_supports_compact_index_format_and_strict_false():
     assert checks[0]["nl_assertion"] == "change the booking"
 
 
+def test_normalize_checks_accepts_common_provider_wrappers_and_index_maps():
+    from terrabox.evolution.promptevo.adapters.tau2_bench.rejudge import _normalize_checks
+
+    assertions = ["first", "second"]
+    wrapped = _normalize_checks(
+        {"evaluations": [{"index": 0, "met": True}, {"index": 1, "met": False}]},
+        assertions,
+    )
+    mapped = _normalize_checks(
+        {"checks": {"0": {"met": True}, "1": {"met": False}}},
+        assertions,
+    )
+
+    assert [row["met"] for row in wrapped] == [True, False]
+    assert [row["met"] for row in mapped] == [True, False]
+
+
+def test_judge_payloads_combines_multiple_top_level_rows():
+    from terrabox.evolution.promptevo.adapters.tau2_bench.rejudge import _judge_payloads, _normalize_checks
+
+    raw = '{"index":0,"met":true}\n{"index":1,"met":false}'
+    checks = _normalize_checks(_judge_payloads(raw)[0], ["first", "second"])
+
+    assert [row["met"] for row in checks] == [True, False]
+
+
 def test_normalize_checks_rejects_missing_or_non_boolean_verdicts():
     from terrabox.evolution.promptevo.adapters.tau2_bench.rejudge import _normalize_checks
 
@@ -76,3 +102,56 @@ def test_tau2_pipeline_reuses_existing_rejudge_results(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "experiment_dir", lambda _: str(source))
 
     assert pipeline.rejudge_group("base") == str(results)
+
+
+def test_tau2_rejudge_skips_assertions_outside_reward_basis(tmp_path):
+    from terrabox.evolution.promptevo.adapters.tau2_bench.rejudge import rejudge_results
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "results.json").write_text(
+        json.dumps(
+            {
+                "info": {"environment_info": {"domain_name": "airline"}},
+                "tasks": [
+                    {
+                        "id": "20",
+                        "evaluation_criteria": {
+                            "nl_assertions": ["The booking was made."],
+                            "reward_basis": ["DB", "COMMUNICATE"],
+                        },
+                    }
+                ],
+                "simulations": [
+                    {
+                        "task_id": "20",
+                        "trial": 0,
+                        "messages": [{"role": "assistant", "content": "No booking was made."}],
+                        "reward_info": {
+                            "reward": 0.0,
+                            "reward_basis": ["DB", "COMMUNICATE"],
+                            "reward_breakdown": {"DB": 0.0, "COMMUNICATE": 1.0},
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class NoCallClient:
+        def call(self, *args, **kwargs):
+            raise AssertionError("non-scoring assertion must not call the judge")
+
+    summary = rejudge_results(
+        str(source),
+        str(tmp_path / "output"),
+        client=NoCallClient(),
+        provider="longcat",
+        model="LongCat-2.0",
+    )
+
+    assert summary["simulations"] == 1
+    assert summary["judged"] == 0
+    assert summary["skipped_non_scoring"] == 1
+    assert summary["judge_failures"] == 0

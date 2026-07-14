@@ -138,6 +138,7 @@
   - Stage2 实验/Prompt 版本: `tau2_qwen3_8b_stage2_20260713`。
   - 自动链路: Base 完成并释放四卡 -> LongCat2 no-think 离线重评 Base NL assertions -> Stage1 优化/四域 rollout -> 重评 Stage1 -> Base vs Stage1 配对式 Stage2 优化/四域 rollout -> 重评 Stage2。
   - LongCat 重评结果独立保存在各实验组的 `rejudged_longcat/`，不覆盖 tau2 原始结果；Stage1/Stage2 优化均读取重评口径。
+  - LongCat 只重评 `reward_basis` 含 `NL_ASSERTION` 的任务；airline 的 50 条 assertions 不参与 reward，因此跳过。非标准 JSON wrapper 会兼容解析，最终失败会记录到 `judge_failures/` 并保留原 reward，不再阻断 Stage2。
 - **待办**:
   - 从 Stage1 rollout 继续，再衔接 Stage1 重评、Stage2 优化和 Stage2 rollout。Codex 沙箱内直接 `nvidia-smi` 看不到 `/dev/nvidia*`，但 Docker GPU smoke 已确认宿主机 GPU0 可用；后续以 Docker 服务健康为准。
   - 维持 `max_model_len=32768`；超过窗口或发生单任务 OOM 时记录该任务失败并继续，不为少量长任务提升到 40k。
