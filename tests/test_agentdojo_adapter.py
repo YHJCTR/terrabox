@@ -103,7 +103,7 @@ def test_agentdojo_run_config_is_resumable_and_matches_upstream_cli():
 
     config = AgentDojoRunConfig(
         suite="banking",
-        model="vllm_parsed",
+        model="VLLM_PARSED",
         attack="important_instructions",
         user_tasks=["user_task_0"],
         injection_tasks=["injection_task_0"],
@@ -216,7 +216,7 @@ def test_agentdojo_runner_uses_absolute_terrabox_pythonpath(tmp_path, monkeypatc
     runner.run(
         "System prompt",
         experiment="sample",
-        run_config=core.AgentDojoRunConfig(suite="workspace", model="vllm_parsed"),
+        run_config=core.AgentDojoRunConfig(suite="workspace", model="VLLM_PARSED"),
     )
 
     python_paths = captured["env"]["PYTHONPATH"].split(os.pathsep)

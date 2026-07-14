@@ -9,7 +9,8 @@ without modifying that checkout.
   and an `important_instructions` attack phase. Four Qwen lanes dynamically
   consume 4 clean jobs plus one disjoint job per injection task; do not regress
   to fixed suite-to-GPU pinning because workspace dominates the workload.
-- Local Qwen3 8B uses AgentDojo provider `vllm_parsed` with vLLM Hermes native
+- Local Qwen3 8B uses AgentDojo CLI provider `VLLM_PARSED` (result pipeline name
+  `vllm_parsed`) with vLLM Hermes native
   tool parsing. The `local` provider is a different regex/text-tag parser and
   must not be substituted silently. Keep the adapter-local `qwen_no_think`
   module in every formal run so each request explicitly sends

@@ -56,7 +56,8 @@ task and all user tasks in that suite, so every user/injection pair and every
 injection-as-user diagnostic is produced exactly once.
 
 The agent is Qwen3 8B served by vLLM with native OpenAI tool calls:
-`--model vllm_parsed` plus vLLM's Hermes parser. Do not switch to AgentDojo's
+`--model VLLM_PARSED` (its result directory/pipeline name remains
+`vllm_parsed`) plus vLLM's Hermes parser. Do not switch to AgentDojo's
 `local` provider unless deliberately testing its text-tag/regex tool parser.
 The official CLI is also passed
 `--module-to-load terrabox.evolution.promptevo.adapters.agentdojo.qwen_no_think`.

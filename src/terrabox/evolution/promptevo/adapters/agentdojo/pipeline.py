@@ -280,7 +280,7 @@ def _run_job(
         )
     config = AgentDojoRunConfig(
         suite=str(job["suite"]),
-        model="vllm_parsed",
+        model="VLLM_PARSED",
         benchmark_version="v1.2.2",
         attack=job["attack"],
         user_tasks=list(job.get("user_tasks") or []),
