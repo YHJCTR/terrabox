@@ -8,7 +8,9 @@ import random
 import subprocess
 import time
 import urllib.request
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -32,13 +34,56 @@ MODEL_PATH = "/data1/yuhongjie2/Earth-Agent/llm/qwen/3_8B"
 DOMAINS = (("airline", 0, 9100), ("retail", 1, 9101), ("telecom", 2, 9102), ("banking_knowledge", 3, 9103))
 
 
+@dataclass(frozen=True)
+class Tau2PipelineProfile:
+    name: str
+    domains: tuple[tuple[str, int, int], ...]
+    num_trials: int
+    max_steps: int
+    max_tokens: int
+    user_provider: str | None = None
+    dynamic_chunks: bool = False
+    chunk_size: int = 8
+
+
+PIPELINE_PROFILES = {
+    "legacy4": Tau2PipelineProfile(
+        name="legacy4",
+        domains=DOMAINS,
+        num_trials=1,
+        max_steps=80,
+        max_tokens=512,
+    ),
+    "paper3": Tau2PipelineProfile(
+        name="paper3",
+        domains=DOMAINS[:3],
+        num_trials=4,
+        max_steps=100,
+        max_tokens=2048,
+        user_provider="longcat",
+    ),
+    "stable4": Tau2PipelineProfile(
+        name="stable4",
+        domains=DOMAINS,
+        num_trials=4,
+        max_steps=100,
+        max_tokens=2048,
+        dynamic_chunks=True,
+        chunk_size=8,
+    ),
+}
+
+
 def experiment_dir(name: str) -> str:
     return str(Path(DEFAULT_TAU2_EXPERIMENTS_DIR, name).resolve())
 
 
-def _domain_statuses(group: str) -> dict[str, str]:
+def _domain_statuses(
+    group: str,
+    domains: tuple[tuple[str, int, int], ...] = DOMAINS,
+) -> dict[str, str]:
     out = {}
-    for domain, _, _ in DOMAINS:
+    for domain, _, _ in domains:
         path = Path(experiment_dir(group), f"{domain}_base", "run_status.json")
         if not path.exists():
             out[domain] = "missing"
@@ -50,9 +95,13 @@ def _domain_statuses(group: str) -> dict[str, str]:
     return out
 
 
-def wait_for_group(group: str, poll_seconds: int = 60) -> None:
+def wait_for_group(
+    group: str,
+    poll_seconds: int = 60,
+    domains: tuple[tuple[str, int, int], ...] = DOMAINS,
+) -> None:
     while True:
-        statuses = _domain_statuses(group)
+        statuses = _domain_statuses(group, domains)
         print(f"[{time.strftime('%F %T')}] waiting for {group}: {statuses}", flush=True)
         if all(value == "complete" for value in statuses.values()):
             return
@@ -126,55 +175,423 @@ def _start_server(stage: str, gpu: int, port: int) -> str:
         raise
 
 
-def _run_domain(group: str, prompt: str, domain: str, port: int) -> str:
-    common = {
+def _task_ids_for_domain(domain: str, split: str = "base") -> list[str]:
+    code = (
+        "import json, sys; "
+        "from tau2.runner.helpers import get_tasks; "
+        "print(json.dumps([str(task.id) for task in "
+        "get_tasks(sys.argv[1], task_split_name=sys.argv[2])]))"
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(TAU2_ROOT, "src")) + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.run(
+        [TAU2_PYTHON, "-c", code, domain, split],
+        cwd=TAU2_ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"failed to list tau2 tasks for {domain}: {proc.stderr or proc.stdout}")
+    return list(json.loads(proc.stdout))
+
+
+def _results_json_paths(group: str, domain: str, include_chunks: bool = True) -> list[Path]:
+    paths: list[Path] = []
+    adapter_root = Path(experiment_dir(group))
+    runtime_root = Path("tmp", "tau2_runtime", group)
+    base_rel = Path(f"{domain}_base")
+    candidates = [
+        adapter_root / base_rel / "tau2_results" / "results.json",
+        runtime_root / base_rel / "simulations" / f"promptevo_{group}" / base_rel / "results.json",
+    ]
+    if include_chunks:
+        candidates.extend(sorted((adapter_root / "_chunks").glob(f"{domain}_chunk_*/tau2_results/results.json")))
+        candidates.extend(
+            sorted(
+                (runtime_root / "_chunks").glob(
+                    f"{domain}_chunk_*/simulations/promptevo_{group}/_chunks/{domain}_chunk_*/results.json"
+                )
+            )
+        )
+    seen: set[Path] = set()
+    for path in candidates:
+        resolved = path.resolve()
+        if path.is_file() and resolved not in seen:
+            paths.append(path)
+            seen.add(resolved)
+    return paths
+
+
+def _load_results_json(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"tau2 results must be a JSON object: {path}")
+    data.setdefault("tasks", [])
+    data.setdefault("simulations", [])
+    return data
+
+
+def _sim_key(sim: dict[str, Any]) -> tuple[str, str, str]:
+    task_id = str(sim.get("task_id") or "")
+    trial = str(sim.get("trial") if sim.get("trial") is not None else "")
+    seed = str(sim.get("seed") if sim.get("seed") is not None else "")
+    return (task_id, trial, seed)
+
+
+def _stable_mixed_sort_value(value: Any) -> tuple[int, int | str]:
+    text = str(value if value is not None else "")
+    return (0, int(text)) if text.isdigit() else (1, text)
+
+
+def _completed_trial_counts(group: str, domain: str) -> dict[str, set[tuple[str, str]]]:
+    completed: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    for path in _results_json_paths(group, domain, include_chunks=True):
+        try:
+            data = _load_results_json(path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        for sim in data.get("simulations", []):
+            if not isinstance(sim, dict):
+                continue
+            task_id = str(sim.get("task_id") or "")
+            if not task_id:
+                continue
+            trial = str(sim.get("trial") if sim.get("trial") is not None else "")
+            seed = str(sim.get("seed") if sim.get("seed") is not None else "")
+            completed[task_id].add((trial, seed))
+    return completed
+
+
+def _chunked(values: list[str], size: int) -> list[list[str]]:
+    return [values[i : i + size] for i in range(0, len(values), max(1, size))]
+
+
+def _run_domain_chunk(
+    group: str,
+    prompt: str,
+    domain: str,
+    task_ids: list[str],
+    chunk_index: int,
+    port: int,
+    profile: Tau2PipelineProfile,
+) -> str:
+    experiment = f"{group}/_chunks/{domain}_chunk_{chunk_index:04d}"
+    status_path = Path(experiment_dir(experiment), "run_status.json")
+    if status_path.is_file():
+        try:
+            if json.loads(status_path.read_text(encoding="utf-8")).get("status") == "complete":
+                return str(status_path.parent)
+        except (OSError, ValueError, TypeError):
+            pass
+    agent_args = {
         "temperature": 0.0,
         "api_base": f"http://127.0.0.1:{port}/v1",
         "api_key": "EMPTY",
-        "max_tokens": 512,
+        "max_tokens": profile.max_tokens,
         "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
     }
     config = Tau2RunConfig(
         domain=domain,
         task_split_name="base",
-        num_trials=1,
-        max_steps=80,
+        task_ids=task_ids,
+        num_trials=profile.num_trials,
+        max_steps=profile.max_steps,
         max_concurrency=1,
         max_retries=3,
         timeout=900,
         agent_llm="openai//model",
         user_llm="openai//model",
-        agent_llm_args=dict(common),
-        user_llm_args=dict(common),
+        agent_llm_args=dict(agent_args),
+        user_llm_args=dict(agent_args),
         extra_args=["--retrieval-config", "bm25"] if domain == "banking_knowledge" else [],
     )
     runner = Tau2RolloutRunner(tau2_root=TAU2_ROOT, python_executable=TAU2_PYTHON)
-    return runner.run(prompt, experiment=f"{group}/{domain}_base", run_config=config)
+    return runner.run(prompt, experiment=experiment, run_config=config)
 
 
-def rollout_group(group: str, prompt_version: str, stage: str) -> dict[str, Any]:
-    statuses = _domain_statuses(group)
+def _merge_domain_results(group: str, domain: str, profile: Tau2PipelineProfile) -> str:
+    paths = _results_json_paths(group, domain, include_chunks=True)
+    if not paths:
+        raise RuntimeError(f"no tau2 results found for {group}/{domain}")
+
+    merged: dict[str, Any] | None = None
+    tasks_by_id: dict[str, dict[str, Any]] = {}
+    sims_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for path in paths:
+        data = _load_results_json(path)
+        if merged is None:
+            merged = {
+                "timestamp": data.get("timestamp"),
+                "info": data.get("info"),
+                "tasks": [],
+                "simulations": [],
+                "simulation_index": None,
+            }
+        for task in data.get("tasks", []):
+            if isinstance(task, dict) and task.get("id") is not None:
+                tasks_by_id.setdefault(str(task["id"]), task)
+        for sim in data.get("simulations", []):
+            if not isinstance(sim, dict):
+                continue
+            key = _sim_key(sim)
+            if key[0]:
+                sims_by_key.setdefault(key, sim)
+
+    assert merged is not None
+    task_order = _task_ids_for_domain(domain)
+    merged["tasks"] = [tasks_by_id[task_id] for task_id in task_order if task_id in tasks_by_id]
+    ordered_sims = sorted(
+        sims_by_key.values(),
+        key=lambda sim: (
+            task_order.index(str(sim.get("task_id"))) if str(sim.get("task_id")) in task_order else len(task_order),
+            _stable_mixed_sort_value(sim.get("trial")),
+            _stable_mixed_sort_value(sim.get("seed")),
+        ),
+    )
+    merged["simulations"] = ordered_sims
+
+    adapter_dir = Path(experiment_dir(group), f"{domain}_base")
+    results_dir = adapter_dir / "tau2_results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(results_dir / "results.json", merged)
+    metrics = Tau2MetricProvider(results_path_fn=lambda _exp: str(results_dir))
+    _write_json(adapter_dir / "metrics_summary.json", metrics.aggregate(f"{group}/{domain}_base"))
+    _write_json(
+        adapter_dir / "run_status.json",
+        {
+            "status": "complete",
+            "returncode": 0,
+            "tau2_results": str(results_dir.resolve()),
+            "merged_sources": [str(path) for path in paths],
+            "merged_simulations": len(ordered_sims),
+            "expected_simulations": len(task_order) * profile.num_trials,
+        },
+    )
+    return str(adapter_dir.resolve())
+
+
+def _run_domain(
+    group: str,
+    prompt: str,
+    domain: str,
+    port: int,
+    profile: Tau2PipelineProfile,
+) -> str:
+    agent_args = {
+        "temperature": 0.0,
+        "api_base": f"http://127.0.0.1:{port}/v1",
+        "api_key": "EMPTY",
+        "max_tokens": profile.max_tokens,
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+    }
+    user_llm = "openai//model"
+    user_args = dict(agent_args)
+    run_env: dict[str, str] = {}
+    if profile.user_provider:
+        user_spec = resolve_provider(profile.user_provider)
+        user_llm = f"openai/{user_spec.model}"
+        user_args = {
+            "temperature": 0.0,
+            "api_base": user_spec.base_url,
+            "max_tokens": profile.max_tokens,
+            "extra_body": {"thinking": {"type": "disabled"}},
+        }
+        # Keep provider credentials out of argv, run_meta.json, and tau2 results.
+        run_env["OPENAI_API_KEY"] = user_spec.api_key
+    config = Tau2RunConfig(
+        domain=domain,
+        task_split_name="base",
+        num_trials=profile.num_trials,
+        max_steps=profile.max_steps,
+        max_concurrency=1,
+        max_retries=3,
+        timeout=900,
+        agent_llm="openai//model",
+        user_llm=user_llm,
+        agent_llm_args=agent_args,
+        user_llm_args=user_args,
+        extra_args=["--retrieval-config", "bm25"] if domain == "banking_knowledge" else [],
+    )
+    runner = Tau2RolloutRunner(tau2_root=TAU2_ROOT, python_executable=TAU2_PYTHON)
+    return runner.run(
+        prompt,
+        experiment=f"{group}/{domain}_base",
+        run_config=config,
+        env=run_env,
+    )
+
+
+def _rollout_group_dynamic_chunks(
+    group: str,
+    prompt_version: str,
+    stage: str,
+    profile: Tau2PipelineProfile,
+) -> dict[str, Any]:
+    statuses = _domain_statuses(group, profile.domains)
+    if all(value == "complete" for value in statuses.values()):
+        return {"group": group, "status": "already_complete", "domains": statuses}
+
+    prompt = Tau2PromptStore(tau2_root=TAU2_ROOT).load(prompt_version)
+    root = Path(experiment_dir(group))
+    root.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        root / "pipeline_status.json",
+        {
+            "status": "starting",
+            "stage": stage,
+            "prompt_version": prompt_version,
+            "profile": asdict(profile),
+            "scheduler": "dynamic_chunks",
+        },
+    )
+
+    jobs: list[tuple[str, list[str], int]] = []
+    chunk_counter = 0
+    for domain, _, _ in profile.domains:
+        all_task_ids = _task_ids_for_domain(domain)
+        completed = _completed_trial_counts(group, domain)
+        remaining = [
+            task_id
+            for task_id in all_task_ids
+            if len(completed.get(task_id, set())) < profile.num_trials
+        ]
+        for chunk in _chunked(remaining, profile.chunk_size):
+            jobs.append((domain, chunk, chunk_counter))
+            chunk_counter += 1
+        print(
+            f"[{time.strftime('%F %T')}] {group}/{domain}: "
+            f"{len(all_task_ids) - len(remaining)}/{len(all_task_ids)} tasks already complete; "
+            f"queued {len(remaining)} tasks in chunks",
+            flush=True,
+        )
+
+    containers: list[str] = []
+    try:
+        for _, gpu, port in profile.domains:
+            containers.append(_start_server(stage, gpu, port))
+
+        from queue import Queue
+
+        queue: Queue[tuple[str, list[str], int]] = Queue()
+        for job in jobs:
+            queue.put(job)
+
+        chunk_results: list[str] = []
+
+        def worker(port: int) -> list[str]:
+            done: list[str] = []
+            while True:
+                try:
+                    domain, task_ids, chunk_index = queue.get_nowait()
+                except Exception:
+                    return done
+                print(
+                    f"[{time.strftime('%F %T')}] lane {port} running "
+                    f"{domain}_chunk_{chunk_index:04d} ({len(task_ids)} tasks)",
+                    flush=True,
+                )
+                try:
+                    done.append(_run_domain_chunk(group, prompt, domain, task_ids, chunk_index, port, profile))
+                finally:
+                    queue.task_done()
+
+        with ThreadPoolExecutor(max_workers=len(profile.domains)) as pool:
+            futures = [pool.submit(worker, port) for _, _, port in profile.domains]
+            for future in as_completed(futures):
+                chunk_results.extend(future.result())
+
+        results = {
+            domain: _merge_domain_results(group, domain, profile)
+            for domain, _, _ in profile.domains
+        }
+        status = {
+            "status": "complete",
+            "stage": stage,
+            "prompt_version": prompt_version,
+            "profile": asdict(profile),
+            "scheduler": "dynamic_chunks",
+            "chunks": len(jobs),
+            "chunk_results": chunk_results,
+            "domains": results,
+        }
+        _write_json(root / "pipeline_status.json", status)
+        return status
+    except Exception as exc:
+        _write_json(
+            root / "pipeline_status.json",
+            {
+                "status": "failed",
+                "stage": stage,
+                "scheduler": "dynamic_chunks",
+                "error": str(exc),
+            },
+        )
+        raise
+    finally:
+        for name in containers:
+            _stop_container(name)
+
+
+def rollout_group(
+    group: str,
+    prompt_version: str,
+    stage: str,
+    profile: Tau2PipelineProfile = PIPELINE_PROFILES["legacy4"],
+) -> dict[str, Any]:
+    if profile.dynamic_chunks:
+        return _rollout_group_dynamic_chunks(group, prompt_version, stage, profile)
+
+    statuses = _domain_statuses(group, profile.domains)
     if all(value == "complete" for value in statuses.values()):
         return {"group": group, "status": "already_complete", "domains": statuses}
     prompt = Tau2PromptStore(tau2_root=TAU2_ROOT).load(prompt_version)
     containers: list[str] = []
     root = Path(experiment_dir(group))
     root.mkdir(parents=True, exist_ok=True)
-    _write_json(root / "pipeline_status.json", {"status": "starting", "stage": stage, "prompt_version": prompt_version})
+    _write_json(
+        root / "pipeline_status.json",
+        {
+            "status": "starting",
+            "stage": stage,
+            "prompt_version": prompt_version,
+            "profile": asdict(profile),
+        },
+    )
     try:
-        for _, gpu, port in DOMAINS:
+        for _, gpu, port in profile.domains:
             containers.append(_start_server(stage, gpu, port))
         results: dict[str, str] = {}
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        with ThreadPoolExecutor(max_workers=len(profile.domains)) as pool:
             futures = {
-                pool.submit(_run_domain, group, prompt, domain, port): domain
-                for domain, _, port in DOMAINS
+                pool.submit(_run_domain, group, prompt, domain, port, profile): domain
+                for domain, _, port in profile.domains
             }
+            print(
+                f"[{time.strftime('%F %T')}] submitted domains: {sorted(futures.values())}",
+                flush=True,
+            )
             for future in as_completed(futures):
                 domain = futures[future]
-                results[domain] = future.result()
+                try:
+                    results[domain] = future.result()
+                except Exception as exc:
+                    print(
+                        f"[{time.strftime('%F %T')}] domain {domain} failed: {exc!r}",
+                        flush=True,
+                    )
+                    raise
                 print(f"[{time.strftime('%F %T')}] {group}/{domain} complete", flush=True)
-        status = {"status": "complete", "stage": stage, "prompt_version": prompt_version, "domains": results}
+        status = {
+            "status": "complete",
+            "stage": stage,
+            "prompt_version": prompt_version,
+            "profile": asdict(profile),
+            "domains": results,
+        }
         _write_json(root / "pipeline_status.json", status)
         return status
     except Exception as exc:
@@ -313,14 +730,15 @@ def chain_after_base(
     stage1_version: str,
     stage2_version: str,
     provider: str = "longcat",
+    profile: Tau2PipelineProfile = PIPELINE_PROFILES["legacy4"],
 ) -> None:
     if provider == "longcat":
         os.environ["TERRABOX_LONGCAT_THINKING"] = "disabled"
-    wait_for_group(base_group)
+    wait_for_group(base_group, domains=profile.domains)
     wait_for_base_cleanup()
     base_rejudged = rejudge_group(base_group, provider)
     optimize_stage1(base_rejudged, stage1_version, experiment_dir(stage1_group), provider)
-    rollout_group(stage1_group, stage1_version, "stage1")
+    rollout_group(stage1_group, stage1_version, "stage1", profile)
     stage1_rejudged = rejudge_group(stage1_group, provider)
     optimize_stage2(
         base_rejudged,
@@ -330,7 +748,7 @@ def chain_after_base(
         experiment_dir(stage2_group),
         provider,
     )
-    rollout_group(stage2_group, stage2_version, "stage2")
+    rollout_group(stage2_group, stage2_version, "stage2", profile)
     rejudge_group(stage2_group, provider)
     print(f"[{time.strftime('%F %T')}] tau2 Base -> Stage1 -> Stage2 chain complete", flush=True)
 
@@ -338,23 +756,33 @@ def chain_after_base(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Tau2 PromptEvo orchestration")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    def add_chain_args(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--base-group", required=True)
+        command.add_argument("--stage1-group", required=True)
+        command.add_argument("--stage2-group", required=True)
+        command.add_argument("--stage1-version", required=True)
+        command.add_argument("--stage2-version", required=True)
+        command.add_argument("--provider", default="longcat", choices=["longcat", "deepseek"])
+        command.add_argument("--profile", default="legacy4", choices=sorted(PIPELINE_PROFILES))
+
     chain = sub.add_parser("chain-after-base")
-    chain.add_argument("--base-group", required=True)
-    chain.add_argument("--stage1-group", required=True)
-    chain.add_argument("--stage2-group", required=True)
-    chain.add_argument("--stage1-version", required=True)
-    chain.add_argument("--stage2-version", required=True)
-    chain.add_argument("--provider", default="longcat", choices=["longcat", "deepseek"])
+    add_chain_args(chain)
+    full = sub.add_parser("full-chain")
+    add_chain_args(full)
     args = parser.parse_args()
-    if args.command == "chain-after-base":
-        chain_after_base(
-            args.base_group,
-            args.stage1_group,
-            args.stage2_group,
-            args.stage1_version,
-            args.stage2_version,
-            args.provider,
-        )
+    profile = PIPELINE_PROFILES[args.profile]
+    if args.command == "full-chain":
+        rollout_group(args.base_group, "base", "base", profile)
+    chain_after_base(
+        args.base_group,
+        args.stage1_group,
+        args.stage2_group,
+        args.stage1_version,
+        args.stage2_version,
+        args.provider,
+        profile,
+    )
 
 
 if __name__ == "__main__":

@@ -52,6 +52,13 @@ These two are enough for first-stage prompt proposal.
   experiment-local prompt overrides and dependency preflight checks intact:
   missing external-project dependencies should produce `run_status.json`
   explaining the blocker, not fake metrics or source-tree edits.
+- `toolbench` exposes a StableToolBench runner for the local
+  `/data1/yuhongjie2/StepTool/stabletoolbench` checkout. It must only override
+  `Prompts.ReAct_prompts.FORMAT_INSTRUCTIONS_SYSTEM_FUNCTION` in the current
+  process before importing the official pipeline; do not edit or copy the
+  external source tree. The formal pipeline may explicitly start the cached API
+  server and per-GPU vLLM lanes, must record those resources in experiment
+  metadata/logs, and must stop resources it started at the end of each stage.
 
 ## Trace rendering
 

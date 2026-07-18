@@ -13,6 +13,7 @@ the most faithful linear trace.
 """
 from __future__ import annotations
 
+import ast
 import csv
 import glob
 import json
@@ -24,6 +25,16 @@ from typing import Any, Iterable, Optional
 
 from ...interfaces import MetricSpec, Step, TaskMetric, Trace
 
+
+DEFAULT_STABLE_TOOLBENCH_ROOT = "/data1/yuhongjie2/StepTool/stabletoolbench"
+DEFAULT_TOOLBENCH_ROOT = "/data1/yuhongjie2/ToolBench"
+DEFAULT_STABLE_TOOLBENCH_PROMPT_PATH = os.path.join(
+    DEFAULT_STABLE_TOOLBENCH_ROOT,
+    "toolbench",
+    "inference",
+    "Prompts",
+    "ReAct_prompts.py",
+)
 
 _ERROR_CODES = {
     1: "hallucinated_function",
@@ -69,6 +80,21 @@ def _safe_load_json(path: str) -> Optional[dict]:
         return data if isinstance(data, dict) else None
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _load_python_string_constant(path: str, name: str) -> str:
+    source = open(path, encoding="utf-8").read()
+    tree = ast.parse(source, filename=path)
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+            continue
+        value = ast.literal_eval(node.value)
+        if not isinstance(value, str):
+            raise ValueError(f"{name} in {path} is not a string")
+        return value.strip()
+    raise ValueError(f"{name} not found in {path}")
 
 
 def _parse_args(value: Any) -> Any:
@@ -297,19 +323,27 @@ class ToolBenchPromptStore:
         self,
         versions_dir: str = "evolution_store/promptevo/toolbench/versions",
         base_prompt_path: str = "",
+        source_prompt_path: str = DEFAULT_STABLE_TOOLBENCH_PROMPT_PATH,
+        source_constant: str = "FORMAT_INSTRUCTIONS_SYSTEM_FUNCTION",
     ):
         self.versions_dir = versions_dir
         self.base_prompt_path = base_prompt_path
+        self.source_prompt_path = source_prompt_path
+        self.source_constant = source_constant
 
     def _path(self, version: str) -> str:
         return os.path.join(self.versions_dir, f"{version}.txt")
 
     def load(self, version: str) -> str:
         if version in ("base", "orig", "original"):
-            if not self.base_prompt_path:
-                raise ValueError("base_prompt_path is required to load the ToolBench base prompt")
-            with open(self.base_prompt_path, encoding="utf-8") as f:
-                return f.read().strip()
+            if self.base_prompt_path:
+                with open(self.base_prompt_path, encoding="utf-8") as f:
+                    return f.read().strip()
+            if self.source_prompt_path:
+                return _load_python_string_constant(self.source_prompt_path, self.source_constant)
+            raise ValueError(
+                "base_prompt_path or source_prompt_path is required to load the ToolBench base prompt"
+            )
         with open(self._path(version), encoding="utf-8") as f:
             return f.read().strip()
 
@@ -538,3 +572,29 @@ def method_from_filename(path: str) -> str:
     """Public helper for callers that need ToolBench method names."""
     return _method_from_path(path)
 
+
+def make_toolbench_components(
+    results_dir: str,
+    *,
+    tool_eval_labels: str = "",
+    base_prompt_path: str = "",
+    source_prompt_path: str = DEFAULT_STABLE_TOOLBENCH_PROMPT_PATH,
+    versions_dir: str = "evolution_store/promptevo/toolbench/versions",
+):
+    """Build ToolBench prompt, trace, and metric adapter components.
+
+    ToolBench rollout is intentionally not launched here. Run ToolBench or
+    StableToolBench with their official pipeline, then point this factory at
+    the saved JSON result directory and optional ToolEval labels.
+    """
+    prompts = ToolBenchPromptStore(
+        versions_dir=versions_dir,
+        base_prompt_path=base_prompt_path,
+        source_prompt_path=source_prompt_path,
+    )
+    traces = ToolBenchTrajectorySource(results_dir_fn=lambda _exp: results_dir)
+    metrics = ToolBenchMetricProvider(
+        results_dir_fn=lambda _exp: results_dir,
+        tool_eval_label_fn=lambda _exp: tool_eval_labels,
+    )
+    return prompts, traces, metrics

@@ -68,6 +68,13 @@ flag; without it the run would not match the Qwen3 no-think condition.
 The agent loop itself remains AgentDojo's upstream `ToolsExecutionLoop` with
 `max_iters=15`; PromptEvo does not alter that tool-call limit.
 
+The same module rebuilds AgentDojo's `TaskResults` forward references for
+Pydantic 2.13 before loading existing JSON. This is required for real resume:
+fresh tasks can run without it, but an interrupted shard otherwise fails while
+reading its already completed results. It also normalizes vLLM generic 400
+context-window errors to `context_length_exceeded`, letting AgentDojo's upstream
+per-sample context-limit fallback record the task as failed and continue.
+
 Primary metrics are clean user-task utility, injection-task utility when those
 objectives are presented legitimately, attacked utility, attacked security,
 attack success rate, conjunction success, and a three-axis `balanced_score`.
@@ -142,16 +149,36 @@ PYTHONPATH=src /data/yhj/miniconda3/envs/unsloth/bin/python \
   --provider longcat
 ```
 
+For new generic meta-prompt experiments, append `--optimizer-version v2` and
+include `metav2` in the group/version names. The default remains v1 for
+backward compatibility; v2 is additive and does not overwrite historical prompt
+versions or experiment directories.
+Stage1 v2 and Stage2 v2 are separate meta prompts: Stage1 v2 diagnoses one
+version's traces and proposes a conservative first edit, while Stage2 v2 uses
+the exact Base-to-Stage1 prompt diff plus paired same-task traces to keep gains
+and narrowly repair regressions.
+
 The pipeline uses `force_rerun=False`. Existing upstream JSON files are the
 checkpoint; rerunning the same group skips completed tasks and phases. Every
 rollout invocation owns its four vLLM containers and removes them in `finally`.
 It also verifies every job's valid result count and the stage-wide total before
 writing `pipeline_status=complete`; a successful CLI exit with missing JSON is
-recorded as `incomplete_results` and retried. `stdout.log` and `stderr.log` are
-written live, timeout/launcher failures write `run_status.json`, and a file lock
-prevents two AgentDojo pipelines from sharing the four lanes. Stage1/Stage2
-proposal JSON files are resumable checkpoints, so a watchdog restart does not
-repeat paid prompt optimization after a prompt has already been saved.
+recorded as `incomplete_results` and retried. If a single sample deterministically
+fails because the local Qwen3 context window is exceeded (`maximum context
+length` / `input tokens`), the adapter writes one failed synthetic result JSON
+for that task (`terrabox_synthetic=true`,
+`terrabox_skip_reason=context_length_exceeded`) and resumes the shard. This keeps
+the formal result honest without truncating inputs or trapping the watcher on one
+overlength task. If upstream AgentDojo's evaluator itself raises while checking
+one already-written sample, the adapter marks that sample
+`terrabox_skip_reason=evaluator_error` and resumes; this includes the case where
+Rich-wrapped stdout no longer exposes a parseable trace marker and the adapter
+must recover from the newest partial result JSON without utility/security
+labels. `stdout.log` and `stderr.log` are written live,
+timeout/launcher failures write `run_status.json`, and a file lock prevents two
+AgentDojo pipelines from sharing the four lanes. Stage1/Stage2 proposal JSON
+files are resumable checkpoints, so a watchdog restart does not repeat paid
+prompt optimization after a prompt has already been saved.
 
 ## Experiment layout
 
@@ -188,6 +215,9 @@ recursively reads its authoritative AgentDojo JSON traces. Legacy upstream
   improve utility without accepting a material security regression.
 - Prompt optimization uses LongCat/DeepSeek only for proposing the static
   prompt. Agent rollout remains local Qwen3 8B for all three stages.
+- Meta-prompt v2 is still domain-neutral: it uses repeated behavior patterns,
+  metric directions, and paired trace evidence, but must not inject suite names,
+  tool names, task IDs, or fixed workflows into the optimized static prompt.
 
 ## Validation completed
 

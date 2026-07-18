@@ -168,11 +168,34 @@ the adapter experiment's `tau2_results/` directory.
 
 ## Three-stage Qwen pipeline
 
-`pipeline.py chain-after-base` is the formal Base -> Stage1 -> Stage2 entry.
-It waits for an existing Base group, rejudges natural-language assertions with
-a fixed external provider, generates the Stage1 prompt, runs all four domains
-with Qwen3 8B, generates Stage2 from paired Base/Stage1 results, and runs the
-final four-domain rollout.
+`pipeline.py chain-after-base` continues from an existing Base group, while
+`pipeline.py full-chain` is the formal Base -> Stage1 -> Stage2 entry. Both
+commands require an explicit experiment group for every stage and accept a
+named rollout profile.
+
+- `legacy4` preserves the first four-domain experiment: local Qwen3 8B agent
+  and user, one trial, `max_steps=80`, `max_tokens=512`, and offline BM25 for
+  banking knowledge.
+- `paper3` is the paper-comparable three-domain setup: airline/retail/telecom,
+  local Qwen3 8B no-think agent, fixed LongCat2 no-think user simulator, four
+  trials, `max_steps=100`, and `max_tokens=2048`. It follows the original
+  domain/trial structure but is not a reproduction of the paper's frontier
+  agent or GPT user-simulator models.
+- `stable4` is the recommended reliable full-run profile: all four domains on
+  GPU0-3, local Qwen3 8B for both agent and user simulator, four trials,
+  `max_steps=100`, and `max_tokens=2048`. The external-user `paper3` profile
+  remains experimental until every submitted domain has created `run_meta.json`
+  and received inference requests, not just passed `/health`.
+  `stable4` uses dynamic chunk scheduling: GPU/port pairs are reusable lanes,
+  tasks are split into small `task_ids` chunks, and early-finished lanes pull
+  more work from the remaining queue. Chunk outputs are merged back into the
+  canonical domain `tau2_results/results.json` with `(task_id, trial, seed)`
+  de-duplication, so do not run multiple processes against the same domain
+  result file directly.
+
+The external user key is loaded from gitignored provider configuration and is
+passed only through the child environment. It must not appear in command-line
+arguments, `run_meta.json`, or copied tau2 result metadata.
 
 LongCat is forced to no-think for judging and prompt optimization. Rejudging
 never overwrites native tau2 output: caches and materialized results live in
@@ -190,9 +213,22 @@ keys and multiple top-level row objects are accepted. Exhausted parse retries
 are written to `judge_failures/`, preserve the original reward info, and remain
 visible in `rejudge_summary.json` instead of stopping the complete stage chain.
 
-The rollout configuration remains fixed across stages: Qwen3 8B agent and user,
-one trial, `max_steps=80`, 32k context, one domain per GPU, and offline BM25 for
-banking knowledge. Stage containers are always released in a `finally` block.
+The selected rollout profile remains fixed across all three stages. Stage
+containers are always released in a `finally` block.
+
+Example paper-comparable full chain:
+
+```bash
+PYTHONPATH=src /data/yhj/miniconda3/envs/unsloth/bin/python -m \
+  terrabox.evolution.promptevo.adapters.tau2_bench.pipeline full-chain \
+  --profile paper3 \
+  --base-group tau2_qwen3_8b_longcat_user_paper3_base_YYYYMMDD \
+  --stage1-group tau2_qwen3_8b_longcat_user_paper3_stage1_YYYYMMDD \
+  --stage2-group tau2_qwen3_8b_longcat_user_paper3_stage2_YYYYMMDD \
+  --stage1-version tau2_qwen3_8b_longcat_user_paper3_stage1_YYYYMMDD \
+  --stage2-version tau2_qwen3_8b_longcat_user_paper3_stage2_YYYYMMDD \
+  --provider longcat
+```
 
 For thinking models such as Qwen3, the runner also strips `<think>...</think>`
 from generated messages before they are appended to tau2 agent/user dialogue

@@ -34,7 +34,9 @@ Directory layout:
 
 - `api_bank/` reads API-Bank lv1/lv2 JSONL conversations and model
   prediction JSONL files in the format used by API-Bank's evaluator.
-- `toolbench/` reads ToolBench rollout JSON files.
+- `toolbench/` reads ToolBench rollout JSON files and includes a
+  StableToolBench runner that applies only an experiment-local ReAct static
+  prompt override before calling the official `qa_pipeline_multithread.py`.
 - `agentdojo/` reads AgentDojo system messages and `runs/**.json` traces;
   it also has an optional official-CLI runner that writes adapter-owned runs.
 - `terrabox/` is the native OEA adapter. It reads Terrabox ReAct rollout

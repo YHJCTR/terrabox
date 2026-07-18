@@ -104,6 +104,52 @@ def test_tau2_pipeline_reuses_existing_rejudge_results(tmp_path, monkeypatch):
     assert pipeline.rejudge_group("base") == str(results)
 
 
+def test_tau2_paper_profile_uses_external_user_without_persisting_key(monkeypatch):
+    from terrabox.evolution.promptevo.adapters.tau2_bench import pipeline
+
+    captured = {}
+
+    class Runner:
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self, prompt, **kwargs):
+            captured.update(kwargs)
+            return "done"
+
+    monkeypatch.setattr(pipeline, "Tau2RolloutRunner", Runner)
+    monkeypatch.setattr(
+        pipeline,
+        "resolve_provider",
+        lambda _provider: type(
+            "Spec",
+            (),
+            {
+                "model": "LongCat-2.0",
+                "base_url": "https://example.test/openai",
+                "api_key": "secret-key",
+            },
+        )(),
+    )
+
+    result = pipeline._run_domain(
+        "group",
+        "prompt",
+        "airline",
+        9100,
+        pipeline.PIPELINE_PROFILES["paper3"],
+    )
+
+    assert result == "done"
+    config = captured["run_config"]
+    assert config.num_trials == 4
+    assert config.max_steps == 100
+    assert config.agent_llm_args["max_tokens"] == 2048
+    assert config.user_llm == "openai/LongCat-2.0"
+    assert "api_key" not in config.user_llm_args
+    assert captured["env"] == {"OPENAI_API_KEY": "secret-key"}
+
+
 def test_tau2_rejudge_skips_assertions_outside_reward_basis(tmp_path):
     from terrabox.evolution.promptevo.adapters.tau2_bench.rejudge import rejudge_results
 

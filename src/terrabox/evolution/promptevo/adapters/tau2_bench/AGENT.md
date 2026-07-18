@@ -74,6 +74,31 @@ uses paired rejudged Base/Stage1 task IDs for Stage2. Multi-domain task IDs must
 remain `domain::task_id::trialN`; basename-only keys collide because every
 domain output is named `results.json`.
 
+Use `pipeline.py full-chain --profile paper3` for the paper-comparable rerun:
+airline/retail/telecom only, Qwen3 8B no-think agent, fixed LongCat2 no-think
+user simulator, four trials, `max_steps=100`, and `max_tokens=2048` on three
+GPU lanes. This matches the original domain/trial structure but is not a model
+reproduction. The older `legacy4` profile preserves the four-domain, one-trial,
+80-step, 512-output-token experiment. External user credentials must stay in
+the child environment and out of argv, run metadata, and copied results.
+
+`stable4` is the recommended reliable full-run profile after the failed
+external-user `paper3` attempt: all four domains run in parallel on GPU0-3,
+both agent and user simulator use the local Qwen3 vLLM lane for that domain,
+four trials, `max_steps=100`, and `max_tokens=2048`. A service that only passes
+`/health` is not a running domain; every submitted domain must create
+`run_meta.json` and receive inference requests before the run is considered
+started.
+
+`stable4` uses dynamic chunk scheduling, not fixed domain-to-GPU scheduling.
+Each GPU/port is a reusable lane; tau2 tasks are split into small `task_ids`
+chunks, and a lane that finishes early immediately pulls another chunk from the
+remaining queue. This avoids wasting a GPU when a short domain finishes before
+longer domains. Chunk outputs are written under `<group>/_chunks/...` and then
+merged back into the canonical `<group>/<domain>_base/tau2_results/results.json`
+with `(task_id, trial, seed)` de-duplication. Do not run multiple processes
+against the same domain `results.json` directly; use the chunk merger.
+
 Restarting the same chain must reuse completed artifacts: a valid
 `rejudged_<provider>/rejudge_summary.json`, `stage1_proposal.json`, or
 `stage2_contrastive.json` is a checkpoint. Do not repeat paid rejudging or prompt
@@ -94,8 +119,8 @@ remaining malformed response is saved under `judge_failures/` and preserves the
 original reward info instead of blocking every later stage; the summary must
 surface `judge_failures` explicitly.
 
-Qwen rollout stages load four 32k vLLM services sequentially and then run one
-domain per GPU. Keep `--safetensors-load-strategy eager` on this server: lazy
+Qwen rollout stages load one 32k vLLM service per selected domain/GPU lane.
+Keep `--safetensors-load-strategy eager` on this server: lazy
 mmap loading stalled on the nearly full `/data1` disk. Stop every stage-owned
 container in `finally`, including failed runs.
 

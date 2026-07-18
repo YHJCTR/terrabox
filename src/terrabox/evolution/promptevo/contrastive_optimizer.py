@@ -98,6 +98,35 @@ Return strict JSON only. The changes list must quote the exact old phrase and ex
     "old_phrase":"exact text before the change","new_phrase":"exact text after the change","why":"why this phrase needed to change"}}]}}
 """
 
+_PROPOSE_V2 = """Create the next static system prompt from the comparison below. This is the second-stage update: the prompt has already been changed once, and your job is to keep verified gains while narrowly repairing regressions found by comparing the same tasks.
+
+================ Objective ================
+{objective}
+
+================ Current Prompt ================
+{prompt_b}
+
+================ What Helped or Hurt ================
+{attributions}
+
+Rules:
+1. Preserve the current prompt by default. Make the smallest edit that keeps demonstrated gains and fixes repeated prompt-fixable regressions.
+2. If a phrase helped some tasks and hurt others, keep the helpful behavior and add a narrow support condition. Do not delete the whole rule.
+3. Fix value/context regressions by requiring supported information and exact copying of provided values unless the interface or prompt requires another representation.
+4. Fix repetition regressions by requiring the agent to inspect the latest observation and change strategy instead of repeating identical failed arguments.
+5. Fix premature stopping by requiring the agent to produce the required result when the task context and available interface clearly support it.
+6. Do not add domain names, tool names, task names, suite names, entities, fixed workflows, or examples from the traces.
+7. Preserve output formats, section headers, placeholders, examples, dynamic-context anchors, and multiline structure.
+8. Do not add permissions to skip output, return nothing, hide uncertainty, or invent missing information.
+9. If the attribution evidence is weak or mostly runtime/tool/data/context-limit related, return a prompt very close to the current prompt.
+10. The revised prompt must be the full static prompt, with all unchanged text copied through exactly.
+
+Return strict JSON only. The changes list must quote the exact old phrase and exact new phrase:
+{{"revised_prompt":"the full next static prompt","rationale":"one-sentence reason for the second-stage change",
+  "changes":[{{"edit_id":"which attribution this addresses","offending_clause":"the phrase judged to cause the issue",
+    "old_phrase":"exact text before the change","new_phrase":"exact text after the change","why":"why this second-stage repair is needed"}}]}}
+"""
+
 _PROPOSE_TEXT = """Create the next static system prompt from the comparison below.
 
 ================ Objective ================
@@ -125,6 +154,87 @@ Rules:
 13. Do not fix value or argument regressions by allowing the model to adjust, correct, infer, or rewrite provided values. Prefer narrower rules such as exact-copying context values, using only information supported by the task/context, and not adding unsupported fields.
 14. If the current prompt improved action/answer completeness, preserve that requirement. Patch regressions by adding a support condition such as "use only supported information" or "do not add unsupported fields", not by weakening the requirement to act.
 15. If value mismatches remain, add a concrete but general copy-fidelity guardrail: copy values exactly as they appear in the provided context unless the original prompt or interface explicitly requires a different representation. Do not paraphrase, change capitalization, add/remove words, replace placeholder-like values, or normalize values only for style.
+
+Do not use JSON. Use this exact plain-text format so prompt text can contain
+quotes safely:
+
+<candidate>
+<rationale>
+one sentence
+</rationale>
+<changes>
+- old: exact old phrase
+  new: exact new phrase
+  why: why this phrase needed to change
+</changes>
+<revised_prompt>
+the full next static prompt
+</revised_prompt>
+</candidate>
+"""
+
+_DIAGNOSE_V2 = """Compare two versions of a static system prompt on the same tasks. Use the actual prompt diff, metric directions, and paired traces to identify which prompt changes transferred well and which changes regressed.
+
+================ New Prompt Version ================
+{prompt_b}
+
+================ Actual Changes from Old to New ================
+{real_diff}
+
+================ Metric Changes: Old -> New ================
+{metric_summary}
+Metric directions differ. Use each metric description and direction to decide whether a change is good or bad.
+
+================ Objective ================
+{objective}
+
+================ Paired Traces: Same Task under Old and New Prompt ================
+{cases}
+
+Task:
+For each important behavior change, do all of the following:
+1. Say what changed in the new traces compared with the old traces.
+2. Quote the exact phrase or clause from the Actual Changes list that most likely caused it.
+3. Mark whether that phrase helped, hurt, or had mixed effects.
+4. Separate prompt-fixable regressions from runtime/tool/data/context limits.
+
+Rules:
+- Use only the listed prompt changes as causes. If the metric movement cannot be tied to an actual diff, put it in unexplained.
+- Do not blame or reward domain content; judge the general behavior caused by the prompt text.
+- A useful completion/action rule should not be removed just because one task regressed. Prefer identifying the harmful subclause or missing support condition.
+- Regressions caused by unsupported invention, value rewriting, repeated failed actions, over-strict refusal, or lost context are prompt-fixable.
+- Regressions caused by missing data, broken tools, external services, evaluator/runtime errors, or context-window limits are not prompt-fixable.
+
+Return strict JSON only:
+{{"attributions":[{{"edit_id":"edit-1","behavior":"behavior change observed in traces",
+  "offending_clause":"exact phrase or clause that caused the behavior",
+  "effect":"help|hurt|mixed",
+  "dims":["affected metric names"],"evidence":"supporting tasks or observations"}}],
+  "unexplained":["metric changes not explained by listed prompt changes"]}}
+"""
+
+_PROPOSE_TEXT_V2 = """Create the next static system prompt from the comparison below.
+
+================ Objective ================
+{objective}
+
+================ Current Prompt ================
+{prompt_b}
+
+================ What Helped or Hurt ================
+{attributions}
+
+Rules:
+1. Preserve the current prompt by default. Make the smallest edit that keeps demonstrated gains and fixes repeated prompt-fixable regressions.
+2. If a phrase helped some tasks and hurt others, keep the helpful behavior and add a narrow support condition. Do not delete the whole rule.
+3. Fix value/context regressions by requiring supported information and exact copying of provided values unless the interface or prompt requires another representation.
+4. Fix repetition regressions by requiring the agent to inspect the latest observation and change strategy instead of repeating identical failed arguments.
+5. Fix premature stopping by requiring the agent to produce the required result when the task context and available interface clearly support it.
+6. Do not add domain names, tool names, task names, suite names, entities, fixed workflows, or examples from the traces.
+7. Preserve output formats, section headers, placeholders, examples, dynamic-context anchors, and multiline structure.
+8. Do not add permissions to skip output, return nothing, hide uncertainty, or invent missing information.
+9. If the attribution evidence is weak or mostly runtime/tool/data/context-limit related, return a prompt very close to the current prompt.
+10. The revised prompt must be the full static prompt, with all unchanged text copied through exactly.
 
 Do not use JSON. Use this exact plain-text format so prompt text can contain
 quotes safely:
@@ -276,11 +386,12 @@ def _fmt_metric_summary(agg_a: dict, agg_b: dict, specs=None) -> str:
 
 
 class ContrastiveOptimizer:
-    def __init__(self, llm: Optional[LLMClient] = None):
+    def __init__(self, llm: Optional[LLMClient] = None, meta_prompt_version: str = "v1"):
         if llm is None:
             from ..shared.llm_client import EvolutionLLMClient
             llm = EvolutionLLMClient()
         self.llm = llm
+        self.meta_prompt_version = meta_prompt_version
 
     def diagnose(self, prompt_a: str, prompt_b: str, agg_a: dict, agg_b: dict,
                  cases: list[PairedCase], n_batches: int = 2,
@@ -300,11 +411,12 @@ class ContrastiveOptimizer:
             ordered_cases[i:i + batch_size]
             for i in range(0, max(1, len(ordered_cases)), batch_size)
         ][:n_batches] or [ordered_cases]
+        template = _DIAGNOSE_V2 if self.meta_prompt_version == "v2" else _DIAGNOSE
         for batch in batches:
             data = self.llm.call_json(
-                _DIAGNOSE.format(prompt_b=prompt_b, real_diff=real_diff,
-                                 metric_summary=metric_summary, objective=objective,
-                                 cases=_fmt_cases(batch)),
+                template.format(prompt_b=prompt_b, real_diff=real_diff,
+                                metric_summary=metric_summary, objective=objective,
+                                cases=_fmt_cases(batch)),
                 system=_SYSTEM, max_tokens=max_tokens)
             if not isinstance(data, dict):
                 continue
@@ -355,18 +467,20 @@ class ContrastiveOptimizer:
             f"- [{a.effect}] {a.edit_ref}  (维度 {a.dims}; 证据 {a.evidence[:160]})"
             for a in attributions) or "(无显著归因)"
         cands = []
+        text_template = _PROPOSE_TEXT_V2 if self.meta_prompt_version == "v2" else _PROPOSE_TEXT
         for _ in range(n):
             data = None
             if hasattr(self.llm, "call"):
                 raw = self.llm.call(
-                    _PROPOSE_TEXT.format(prompt_b=prompt_b, attributions=attr_txt, objective=objective),
+                    text_template.format(prompt_b=prompt_b, attributions=attr_txt, objective=objective),
                     system=_SYSTEM,
                     max_tokens=max_tokens,
                 )
                 data = self._parse_text_candidate(raw)
             if not data:
+                json_template = _PROPOSE_V2 if self.meta_prompt_version == "v2" else _PROPOSE
                 data = self.llm.call_json(
-                    _PROPOSE.format(prompt_b=prompt_b, attributions=attr_txt, objective=objective),
+                    json_template.format(prompt_b=prompt_b, attributions=attr_txt, objective=objective),
                     system=_SYSTEM, max_tokens=max_tokens)
             if isinstance(data, dict) and data.get("revised_prompt"):
                 cands.append(data)

@@ -85,6 +85,60 @@ Return strict JSON only:
 }}
 """
 
+_META_PROMPT_BODY_V2 = """You will see the current static system prompt used by an LLM agent, plus a compact set of execution logs and optional aggregate metrics from tasks where it was used. The logs may include reasoning, replies, plans, searches, tool/API/code calls, observations, or final answers.
+
+Your job is to produce the next version of the static prompt. The new prompt should be general enough to transfer to other tasks that use the same agent interface. Optimize the static instruction only; do not encode task-specific answers, tool names, dataset names, private examples, or fixed workflows.
+
+Work in this order:
+1. Read the current prompt as a contract. Identify the exact behavior it already requires and preserve that contract unless there is direct evidence that one phrase causes regressions.
+2. Separate failures into prompt-fixable and not-prompt-fixable causes.
+   - Prompt-fixable: ignoring explicit instructions, failing to use an available interface when the task clearly requires it, unsupported invention, value rewriting, weak final-answer discipline, avoidable repetition, or stopping before producing a required result.
+   - Not prompt-fixable: missing data, unavailable tools, external service failures, context-window limits, evaluator/runtime bugs, or tasks that require capability not exposed in the interface.
+3. Look for repeated behavior patterns across failures and compare them with successful traces. Prefer one rule that addresses a repeated pattern over several rules that only explain one case.
+4. Make the smallest prompt edit that can plausibly improve the repeated prompt-fixable behavior while keeping successful behavior intact.
+
+================ Current Static Prompt ================
+{base_prompt}
+
+================ Execution Logs ================
+{trace_text}
+{metric_block}
+================ Editing Rules ================
+1. Keep the prompt domain-neutral. Do not mention specific tool names, API names, suite names, entity names, task IDs, file names, or examples from the logs.
+2. Preserve existing output formats, placeholders, dynamic-context anchors, section headers, and examples unless the logs directly prove that exact text is harmful.
+3. Prefer a narrow addition or a short phrase refinement over rewriting the whole prompt.
+4. Do not add broad absolute rules unless they are already implied by the prompt and supported by multiple logs.
+5. If the agent repeated the same failed call or action, add a general rule to inspect the latest observation and change strategy rather than repeating identical arguments.
+6. If the agent invented or rewrote values, add a general context-fidelity rule: use only supported information and copy provided values exactly unless the interface or prompt requires another representation.
+7. If the agent stopped early or returned a blank/unrelated answer, add a general completion rule: when the task and available interface make the required result clear, produce the result instead of stopping.
+8. If the issue is environment/tool/runtime/context limits, do not pretend a prompt can fix it; leave the prompt close to the original.
+9. Keep the revised prompt concise enough to be usable as a static system prompt. Do not turn it into an experiment report.
+10. If no low-risk, repeated, prompt-fixable pattern is visible, return a prompt that is nearly unchanged and explain that restraint in the rationale.
+"""
+
+_META_PROMPT_V2 = _META_PROMPT_BODY_V2 + """
+================ Output Format ================
+Return strict JSON only:
+{{
+  "diagnosis": [
+    {{"issue": "one-sentence behavior pattern",
+      "evidence": "which logs or metrics support it",
+      "prompt_gap": "why the current prompt did not prevent it",
+      "fixability": "prompt_fixable|not_prompt_fixable_or_high_risk|uncertain",
+      "regression_risk": "low|medium|high"}}
+  ],
+  "edits": [
+    {{"op": "add|modify|remove",
+      "target": "the original text being changed, or where to add the new text",
+      "new_text": "new text, empty for remove",
+      "addresses": "which diagnosis item this edit addresses",
+      "generality_note": "why this rule transfers beyond the sampled tasks"}}
+  ],
+  "revised_prompt": "the full revised static prompt",
+  "rationale": "one-sentence summary of the conservative change"
+}}
+"""
+
 _MULTI_CANDIDATE_PROMPT = _META_PROMPT_BODY + """
 
 Generate {n} different conservative candidates. Each candidate must follow the same rules above.
@@ -117,16 +171,49 @@ full revised static prompt
 </candidate>
 """
 
+_MULTI_CANDIDATE_PROMPT_V2 = _META_PROMPT_BODY_V2 + """
+
+Generate {n} different conservative candidates. Each candidate must follow the same rules above and must be a full replacement for the static prompt.
+
+Use distinct edit styles:
+- Candidate 1: minimal repeated-pattern fix. Keep the original almost intact and add or refine one general rule for the most repeated prompt-fixable failure.
+- Candidate 2: context-fidelity and completion. Add one compact rule that preserves provided values and asks the agent to produce the required result when the interface clearly supports it.
+- Candidate 3 and later: repetition-control. Add one compact rule that prevents repeating identical failed actions and requires changing strategy after an observation.
+
+For every candidate:
+- Preserve all section headers, placeholders, format examples, and trailing dynamic-context anchors exactly unless a specific one is proven harmful.
+- If the original prompt's final line is a dynamic-context anchor, it must remain the final line. Insert new static rules before it.
+- Do not delete existing constraints merely to make the prompt cleaner.
+- Do not replace a concrete format rule with a looser paraphrase.
+- The revised prompt must be the full static prompt, not a patch or summary.
+
+Do not use JSON for this multi-candidate response. Use this exact plain-text
+format so prompt text can contain quotes safely:
+
+<candidate id="1">
+<diagnosis>
+one or two short bullets
+</diagnosis>
+<rationale>
+one sentence
+</rationale>
+<revised_prompt>
+full revised static prompt
+</revised_prompt>
+</candidate>
+"""
+
 
 class PromptOptimizer:
     """用 EvolutionLLMClient,基于(原始提示词 + 原始日志)产出一次改写提案。"""
 
-    def __init__(self, llm_client=None, max_growth_ratio: float = 1.5):
+    def __init__(self, llm_client=None, max_growth_ratio: float = 1.5, meta_prompt_version: str = "v1"):
         if llm_client is None:
             from ..shared.llm_client import EvolutionLLMClient
             llm_client = EvolutionLLMClient()
         self.llm = llm_client
         self.max_growth_ratio = max_growth_ratio  # 仅软提示:改写后体量超过原文的此倍数则标记
+        self.meta_prompt_version = meta_prompt_version
 
     def _check_restraint(self, base: str, revised: str) -> tuple[bool, str]:
         ratio = len(revised) / max(1, len(base))
@@ -143,8 +230,9 @@ class PromptOptimizer:
         """
         block = (f"\n================ Current Metrics (for context; metric directions are described) ================\n"
                  f"{metric_block}\n") if metric_block.strip() else ""
-        prompt = _META_PROMPT.format(base_prompt=base_prompt, trace_text=trace_text,
-                                     metric_block=block)
+        template = _META_PROMPT_V2 if self.meta_prompt_version == "v2" else _META_PROMPT
+        prompt = template.format(base_prompt=base_prompt, trace_text=trace_text,
+                                 metric_block=block)
         data = self.llm.call_json(prompt, system=_OPTIMIZER_SYSTEM, max_tokens=max_tokens)
         return self._proposal_from_data(base_prompt, data)
 
@@ -167,7 +255,8 @@ class PromptOptimizer:
         if n > 1:
             block = (f"\n================ Current Metrics (for context; metric directions are described) ================\n"
                      f"{metric_block}\n") if metric_block.strip() else ""
-            prompt = _MULTI_CANDIDATE_PROMPT.format(
+            template = _MULTI_CANDIDATE_PROMPT_V2 if self.meta_prompt_version == "v2" else _MULTI_CANDIDATE_PROMPT
+            prompt = template.format(
                 base_prompt=base_prompt,
                 trace_text=trace_text,
                 metric_block=block,

@@ -125,7 +125,7 @@
   - 正式 text/base 口径约 `375` 个任务：airline `50`、retail `114`、telecom base `114`、banking_knowledge `97`。
   - 历史全量尝试没有形成可复用的完整 Base；早期失败曾由 vLLM 缺少 `--enable-auto-tool-choice --tool-call-parser hermes` 导致，当前 agent LLM manager 已包含这两个参数。
   - `banking_knowledge` 正式服务保持 `max_model_len=32768`；少量请求达到约 34.6k，按明确口径记为隔离的 context/infrastructure failure，不升到 40k 冒整阶段 OOM 风险，也不允许阻断后续任务。Qwen/vLLM 偶发双重 JSON 编码的 tool arguments 已在 bootstrap 做传输层解码。
-  - **当前状态**: Qwen3 8B Base `tau2_qwen3_8b_base_20260713` 已完成 `375/375`，并完成 LongCat2 no-think NL assertion 重评；Stage1 prompt 已生成，Stage1 rollout 尚未启动。
+  - **旧四域三阶段已完成**: Base `tau2_qwen3_8b_base_20260713`、Stage1 `tau2_qwen3_8b_stage1_20260713`、Stage2 `tau2_qwen3_8b_stage2_20260713` 均完成 `375/375`，并完成 LongCat2 no-think NL assertion 重评。该组保留为 Qwen agent + Qwen user、单 trial、80 steps、512 output tokens、Banking BM25 的内部对照。
   - Base 结果目录:
     - `src/terrabox/evolution/promptevo/adapters/tau2_bench/experiments/tau2_qwen3_8b_base_20260713/airline_base/`
     - `src/terrabox/evolution/promptevo/adapters/tau2_bench/experiments/tau2_qwen3_8b_base_20260713/retail_base/`
@@ -133,16 +133,22 @@
     - `src/terrabox/evolution/promptevo/adapters/tau2_bench/experiments/tau2_qwen3_8b_base_20260713/banking_knowledge_base/`
   - Base 统一配置: Qwen3 8B no-think、4 个 domain 分别钉 GPU0-3、`max_model_len=32768`、Hermes tool parser、每 domain concurrency `1`、`max_steps=80`、每任务 timeout `900s`；banking 使用离线 `bm25` retrieval。
   - 可续跑 checkpoint 位于 `tmp/tau2_runtime/tau2_qwen3_8b_base_20260713/`，controller 日志为 `tmp/tau2_qwen3_8b_base_20260713.log`。
-  - 原三阶段 watcher 已退出；当前无 Tau2 tmux。Base 后续链路曾在 LongCat 重评 JSON 解析处中断，该问题已修复，Base 重评已独立续完。
+  - 旧三阶段 watcher 已退出；Base 后续链路曾在 LongCat 重评 JSON 解析处中断，该问题已修复并完成全链路。
   - Stage1 实验/Prompt 版本: `tau2_qwen3_8b_stage1_20260713`；prompt 已保存到 `evolution_store/promptevo/tau2_bench/versions/tau2_qwen3_8b_stage1_20260713.txt`。
   - Stage2 实验/Prompt 版本: `tau2_qwen3_8b_stage2_20260713`。
   - 自动链路: Base 完成并释放四卡 -> LongCat2 no-think 离线重评 Base NL assertions -> Stage1 优化/四域 rollout -> 重评 Stage1 -> Base vs Stage1 配对式 Stage2 优化/四域 rollout -> 重评 Stage2。
   - LongCat 重评结果独立保存在各实验组的 `rejudged_longcat/`，不覆盖 tau2 原始结果；Stage1/Stage2 优化均读取重评口径。
   - LongCat 只重评 `reward_basis` 含 `NL_ASSERTION` 的任务；airline 的 50 条 assertions 不参与 reward，因此跳过。非标准 JSON wrapper 会兼容解析，最终失败会记录到 `judge_failures/` 并保留原 reward，不再阻断 Stage2。
+  - `paper3` 外部 user simulator 尝试已中止：只产生 Airline 的部分 checkpoint，Retail/Telecom 仅启动了 vLLM 健康服务，没有进入 tau2 runner；相关目录已移到 `tmp/tau2_aborted_paper3_20260714/`，不计入正式指标。
+  - 新 `stable4` 实验组将复用上次成功的四卡本地双角色并行方式，同时修正旧的单 trial、80 steps 和 512-token 配置:
+    - Base: `tau2_qwen3_8b_local_user_stable4_base_20260714`
+    - Stage1: `tau2_qwen3_8b_local_user_stable4_stage1_20260714`
+    - Stage2: `tau2_qwen3_8b_local_user_stable4_stage2_20260714`
+    - 配置: 四域 GPU0-3、Qwen3 8B agent/user、4 trials、`max_steps=100`、`max_tokens=2048`。
+  - LongCat user simulator 单任务 smoke 本身已通过；provider key 只通过子进程环境传入，不写入 argv、`run_meta.json` 或复制后的 tau2 results，但暂不作为并行正式 rollout 的 user。
 - **待办**:
-  - 从 Stage1 rollout 继续，再衔接 Stage1 重评、Stage2 优化和 Stage2 rollout。Codex 沙箱内直接 `nvidia-smi` 看不到 `/dev/nvidia*`，但 Docker GPU smoke 已确认宿主机 GPU0 可用；后续以 Docker 服务健康为准。
-  - 维持 `max_model_len=32768`；超过窗口或发生单任务 OOM 时记录该任务失败并继续，不为少量长任务提升到 40k。
-  - 检查 reward 是否提升，以及是否引入对话安全或任务流程退化。
+  - 运行并监控新 `stable4` Base -> Stage1 -> Stage2；Codex 沙箱内直接 `nvidia-smi` 看不到 `/dev/nvidia*`，但 Docker GPU smoke 已确认宿主机 GPU0 可用，后续以 Docker 服务健康和每个 domain 的 `run_meta.json`/推理请求为准。
+  - 检查 4-trial Pass^k、各域 reward 和 Base/Stage1/Stage2 配对变化，并与旧单-trial 四域实验分开报告。
   - 在 metricViewer 中按 `tau2_bench` 场景展示各 domain 及 macro/worst-domain 指标。
 
 ### 2. AgentDojo
@@ -157,13 +163,11 @@
   - 实验结果统一保存到 `src/terrabox/evolution/promptevo/adapters/agentdojo/experiments/<group>/`，prompt 版本保存到 `evolution_store/promptevo/agentdojo/versions/`；metricViewer 已按 `agentdojo` 场景发现顶层实验组。
   - 已完成纯离线合成测试：clean/attack 判定、稳定 task id、tool call/result 关联、resume CLI、GPU 钉卡/Hermes 参数和 metricViewer 发现均通过；没有启动正式 AgentDojo benchmark，也没有调用付费 API。
   - `cohere`、`deepdiff`、`google-genai` 已隔离安装到 `tmp/agentdojo_site_packages/`，不污染 `unsloth` 环境；adapter 会自动加入该目录。正式 preflight 已通过，识别到 4 个 suite 和每阶段 `1081` 条结果。
-  - 当前没有代码或依赖阻塞；等待 Tau2 Stage1/Stage2 完成后启动正式 Base。Codex 沙箱内直接 `nvidia-smi` 不可用，但 Docker daemon 已验证能够分配 GPU。
+  - 真实 smoke 已完成 3/3；正式 Base `promptevo_agentdojo_base_qwen3_8b_20260714` 已产生 22 条结果后暂停。失败原因是 Pydantic 2.13 在断点续跑读取 JSON 时未解析 `FunctionCall` 前向引用，adapter-local module 已补 `TaskResults.model_rebuild()`，现有结果读取测试已通过。
   - pipeline 已补齐严格完成口径：39 个 job 均须 `complete`，每 job 结果数须匹配预期，stage 总数须为 preflight 的 `1081`；长日志实时落盘，timeout/launcher error 显式写状态，Stage1/Stage2 prompt checkpoint 可复用，四卡 rollout 有跨进程锁并会清理自身残留容器。
   - Tau2 释放 GPU 后先运行 AgentDojo 真实链路 smoke：GPU0 上 1 条 clean + 1 组 attack（共 3 个结果），通过后 watcher 才启动 1081 条 Base；smoke 只写 `tmp/agentdojo_smoke/`。
 - **待办**:
-  - 宿主机 GPU 恢复后重新运行 preflight，并做同一正式配置的最小真实 smoke。
-  - 用同一正式配置做最小真实 smoke：至少 1 个 clean user task + 1 个 attacked user/injection pair，确认 Qwen 原生工具调用、上游 evaluator、结果落盘和 GPU 清理。
-  - smoke 通过后启动正式 Base，并同时启动 `chain-after-base`，自动接 Stage1 和 Stage2。
+  - 等新 Tau2 `paper3` 三阶段释放 GPU 后，先 preflight，再从已有 22 条结果续跑 Base，并自动接 Stage1 和 Stage2；不得删除已完成结果或降级为重新全跑。
   - 汇报 clean utility、attacked utility、attacked security、attack success rate、balanced score；重点检查 PromptEvo 是否在提升 utility 的同时破坏 security。
 
 ### 3. ToolBench
