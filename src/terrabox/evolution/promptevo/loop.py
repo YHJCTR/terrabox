@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 from typing import Optional
 
 from .interfaces import PromptStore, TrajectorySource, MetricProvider, RolloutRunner
@@ -20,6 +21,10 @@ def _agg_dev(metrics: MetricProvider, experiment: str) -> dict:
 def _score(agg: dict) -> float:
     """选优用的标量:success 为主,tool_f1 次之,退步维度惩罚由调用门控。"""
     return (agg.get("success_rate") or 0) * 1.0 + (agg.get("tool_f1") or 0) * 0.5
+
+
+def _prompt_fingerprint(prompt: str) -> str:
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:10]
 
 
 class ContrastiveUpdater:
@@ -83,14 +88,20 @@ class ContrastiveUpdater:
         best, best_after = None, None
         if self.runner and dev_task_ids:
             for i, c in enumerate(candidates):
-                exp_c = self.runner.run(c["revised_prompt"], dev_task_ids, f"{new_version}_cand{i}")
+                exp_c = self.runner.run(
+                    c["revised_prompt"],
+                    dev_task_ids,
+                    f"{new_version}_cand{i}_{_prompt_fingerprint(c['revised_prompt'])}",
+                )
                 after = _agg_dev(self.metrics, exp_c)
                 if best is None or _score(after) > _score(best_after):
                     best, best_after = c, after
-            dev_before = _agg_dev(self.metrics, exp_b)  # 同 dev 子集口径需调用方保证
+            dev_before = self.metrics.aggregate(exp_b, dev_task_ids)  # same validation-task slice as candidates
             accepted = (best_after.get("success_rate", 0) >= dev_before.get("success_rate", 0) - max_success_drop)
             reason = (f"dev success {dev_before.get('success_rate'):.3f}->{best_after.get('success_rate'):.3f}"
                       f" {'接受' if accepted else '拒绝'}")
+            if not accepted:
+                best = {"revised_prompt": prompt_b, "rationale": "Rejected by rollout dev validation.", "changes": []}
         else:
             # No runner/dev set: use lightweight static selection, then require
             # an external rollout before accepting the prompt.

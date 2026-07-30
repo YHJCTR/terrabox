@@ -23,6 +23,7 @@ class ArtifactOutput:
     field: str | None = None
     param: str | None = None
     name_param: str | None = None
+    name_field: str | None = None
     container_param: str | None = None
 
 
@@ -51,6 +52,53 @@ TOOL_ARTIFACT_CONTRACTS: dict[str, ToolArtifactContract] = {
         inputs=(
             ArtifactNeed(kind="gpkg", param="gpkg"),
             ArtifactNeed(kind="vector_layer", count=2),
+        ),
+    ),
+    "osm_gis.show_index_layer": ToolArtifactContract(
+        inputs=(
+            ArtifactNeed(kind="gpkg", param="gpkg"),
+            ArtifactNeed(kind="raster_layer"),
+        ),
+        outputs=(ArtifactOutput(kind="image", field="out_file"),),
+    ),
+    "osm_gis.compute_index_change": ToolArtifactContract(
+        inputs=(
+            ArtifactNeed(kind="gpkg", param="gpkg"),
+            ArtifactNeed(kind="raster_layer", count=2),
+        ),
+        outputs=(
+            ArtifactOutput(
+                kind="raster_layer",
+                name_param="diff_layer_name",
+                name_field="diff_layer_name",
+                container_param="gpkg",
+            ),
+        ),
+    ),
+    "osm_gis.display_on_map": ToolArtifactContract(
+        inputs=(
+            ArtifactNeed(kind="gpkg", param="gpkg"),
+            ArtifactNeed(kind="vector_layer"),
+        ),
+        outputs=(ArtifactOutput(kind="image", field="out_file"),),
+    ),
+    "osm_gis.display_on_geotiff": ToolArtifactContract(
+        inputs=(
+            ArtifactNeed(kind="gpkg", param="gpkg"),
+            ArtifactNeed(kind="vector_layer"),
+            ArtifactNeed(kind="raster"),
+        ),
+        outputs=(ArtifactOutput(kind="raster", field="out_file"),),
+    ),
+    "osm_gis.add_index_layer": ToolArtifactContract(
+        inputs=(ArtifactNeed(kind="gpkg", param="gpkg"),),
+        outputs=(
+            ArtifactOutput(
+                kind="raster_layer",
+                name_param="layer_name",
+                name_field="layer_name",
+                container_param="gpkg",
+            ),
         ),
     ),
     "osm_gis.get_bbox_from_raster": ToolArtifactContract(
@@ -92,6 +140,18 @@ TOOL_ARTIFACT_CONTRACTS: dict[str, ToolArtifactContract] = {
     ),
     "geo_perception.strip_rcnn_detect": ToolArtifactContract(
         inputs=(ArtifactNeed(kind="image"),),
+    ),
+    "geo_perception.count_given_object": ToolArtifactContract(
+        inputs=(ArtifactNeed(kind="image"),),
+    ),
+    "geo_perception.region_attribute_description": ToolArtifactContract(
+        inputs=(ArtifactNeed(kind="image"),),
+    ),
+    "geo_perception.change_os_detect": ToolArtifactContract(
+        inputs=(ArtifactNeed(kind="image", count=2),),
+    ),
+    "compute.plot": ToolArtifactContract(
+        outputs=(ArtifactOutput(kind="image", field="image_path"),),
     ),
 }
 

@@ -13,6 +13,8 @@ import sys
 import math
 import numpy as np
 
+from conftest import MockRegistrar
+
 # Import the toolkit setup
 try:
     from terrabox.toolkits import georaster
@@ -21,32 +23,7 @@ except ImportError:
     from terrabox.toolkits import georaster
 
 # -----------------------------
-# 1. Mock Registrar
-# -----------------------------
-class MockRegistrar:
-    def __init__(self):
-        self.toolkits = {}
-        self.tools = {}
-        self.handlers = {}
-
-    def toolkit(self, name: str, description: str, version: str):
-        self.toolkits[name] = {"description": description, "version": version}
-
-    def tool(self, toolspec, handler):
-        self.tools[toolspec.slug] = toolspec
-        self.handlers[toolspec.slug] = handler
-
-    def call(self, slug: str, arguments: dict, context: dict = None, account=None):
-        if context is None:
-            context = {}
-        handler = self.handlers.get(slug)
-        if not handler:
-            raise KeyError(f"Tool not registered: {slug}. Available: {list(self.handlers.keys())}")
-        return handler(arguments, context, account)
-
-
-# -----------------------------
-# 2. Helpers
+# 1. Helpers
 # -----------------------------
 def create_dummy_raster(path, value=0.5, shape=(10, 10), dtype='float32', nodata=-9999):
     """Creates a simple GeoTIFF with constant (or array) value using rasterio."""

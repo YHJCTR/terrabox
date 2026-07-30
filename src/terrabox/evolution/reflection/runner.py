@@ -40,6 +40,7 @@ def build_rollout_command(
     only_online: bool = False,
     skip_online: bool = False,
     gpu_class: str = "any",
+    llm_provider: str = "",
 ) -> list[str]:
     cmd = [
         sys.executable,
@@ -62,6 +63,8 @@ def build_rollout_command(
         # (the script defaults skip them on). Mirrors the ReAct oe_full experiment.
         "--no-skip-mock", "--no-skip-bing", "--no-skip-osm", "--no-skip-vlm", "--no-skip-changeos",
     ]
+    if llm_provider:
+        cmd.extend(["--llm-provider", llm_provider])
     if resume:
         cmd.append("--resume")
     if only_online:
@@ -107,6 +110,7 @@ def cmd_build_memory(args: argparse.Namespace) -> None:
         args.trajectory_dir,
         low_f1_threshold=args.low_f1_threshold,
         include_success=args.include_success,
+        llm_provider=getattr(args, "llm_provider", ""),
     )
     bank = ReflectionMemoryBank(memory_path)
     bank.entries = entries
@@ -141,6 +145,7 @@ def cmd_rollout(args: argparse.Namespace) -> None:
         only_online=getattr(args, "only_online", False),
         skip_online=getattr(args, "skip_online", False),
         gpu_class=getattr(args, "gpu_class", "any"),
+        llm_provider=getattr(args, "llm_provider", ""),
     )
     log_path = exp_dir / "logs" / f"{args.phase}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -199,6 +204,7 @@ def _rollout_namespace(base: argparse.Namespace, *, phase: str, start_index: int
         only_online=getattr(base, "only_online", False),
         skip_online=getattr(base, "skip_online", False),
         gpu_class=getattr(base, "gpu_class", "any"),
+        llm_provider=getattr(base, "llm_provider", ""),
     )
 
 
@@ -240,6 +246,7 @@ def cmd_pipeline(args: argparse.Namespace) -> None:
                 store_dir=None,
                 low_f1_threshold=args.low_f1_threshold,
                 include_success=args.include_success,
+                llm_provider=getattr(args, "llm_provider", ""),
             )
             cmd_build_memory(bns)
             # If eval won't run, we no longer need the kept-warm services.
@@ -312,6 +319,8 @@ def main() -> None:
     p_memory.add_argument("--store-dir")
     p_memory.add_argument("--low-f1-threshold", type=float, default=0.8)
     p_memory.add_argument("--include-success", action="store_true", default=True)
+    p_memory.add_argument("--llm-provider", default="", choices=["", "local", "deepseek", "longcat"],
+                          help="Provider used to write reflection lessons; default local EvolutionLLMClient")
     p_memory.set_defaults(func=cmd_build_memory)
 
     p_rollout = sub.add_parser("rollout", help="Run standard rollout, optionally with reflection memory")
@@ -339,6 +348,8 @@ def main() -> None:
     p_rollout.add_argument("--end-index", type=int)
     p_rollout.add_argument("--limit", type=int)
     p_rollout.add_argument("--max-iterations", type=int, default=15)
+    p_rollout.add_argument("--llm-provider", default="", choices=["", "local", "deepseek", "longcat"],
+                           help="Agent LLM provider passed through to run_trajectory_experiment.py")
     # online/GPU partitioning (passed through to run_trajectory_experiment.py):
     p_rollout.add_argument("--only-online", action="store_true", default=False,
                            help="只跑联网任务(osm_gis/bing);配合本地转发窗口")
@@ -375,6 +386,8 @@ def main() -> None:
     p_pipe.add_argument("--vlm-max-model-len", type=int, default=None)
     p_pipe.add_argument("--exclude-tools", default=None)
     p_pipe.add_argument("--max-iterations", type=int, default=15)
+    p_pipe.add_argument("--llm-provider", default="", choices=["", "local", "deepseek", "longcat"],
+                        help="Agent rollout provider and build-memory reflection provider")
     p_pipe.add_argument("--only-online", action="store_true", default=False)
     p_pipe.add_argument("--skip-online", action="store_true", default=False)
     p_pipe.add_argument("--gpu-class", choices=["any", "gpu", "nogpu"], default="any")

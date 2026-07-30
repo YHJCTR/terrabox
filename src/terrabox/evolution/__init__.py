@@ -45,7 +45,7 @@ def get_prompt_augmenter(
     """Return a ready-to-use PromptAugmenter for the specified evolution method.
 
     Args:
-        method: One of "skillrl", "skillrl_full", "evoskill", "agentevolver", "memrl", "memrl_full", "memrl_full_source", "reflection", "causalevo", "rewardevo", "graphskillevo", "seqgraphevo", "causaltextevo", "causalpolicyevo", "expel".
+        method: One of "skillrl", "skillrl_full", "evoskill", "agentevolver", "memrl", "memrl_full", "memrl_full_source", "reflection", "experience_evo", "causalevo", "rewardevo", "graphskillevo", "seqgraphevo", "causaltextevo", "causalpolicyevo", "expel".
         store_dir: Directory containing evolution store. Defaults to
                    "evolution_store/{method}". For memrl, pass memory_db=...
         top_k: Number of skills/memories to inject per query.
@@ -144,6 +144,27 @@ def get_prompt_augmenter(
 
         return ReflectionPromptInjector(store_dir or "evolution_store/reflection", top_k=top_k)
 
+    elif method in {"experience_evo", "experienceevo"}:
+        from .experience_evo.prompt_injector import ExperienceEvoPromptInjector
+
+        return ExperienceEvoPromptInjector(
+            store_dir or "evolution_store/experience_evo/oea_longcat_base_offline",
+            top_k=top_k,
+            min_q=float(kwargs.get("min_q", 0.0)),
+            max_risk=float(kwargs.get("max_risk", 0.75)),
+        )
+
+    elif method in {"experience_evo_v2", "experienceevo_v2", "product_transition_evo"}:
+        from .experience_evo.v2 import ExperienceEvoV2Runtime
+
+        return ExperienceEvoV2Runtime(
+            store_dir or "evolution_store/experience_evo/oea_train2000_v2",
+            top_k=top_k,
+            min_q=float(kwargs.get("min_q", 0.0)),
+            max_risk=float(kwargs.get("max_risk", 0.75)),
+            q_use_smoothing_k=float(kwargs.get("q_use_smoothing_k", 5.0)),
+        )
+
     elif method == "causalevo":
         if store_dir is None:
             store_dir = kwargs.get("store_dir", "evolution_store/causalevo")
@@ -237,7 +258,7 @@ def get_prompt_augmenter(
         raise ValueError(
             f"Unknown evolution method: {method!r}. "
             f"Choose from: 'skillrl', 'skillrl_full', 'evoskill', 'agentevolver', 'memrl', 'memrl_full', 'memrl_full_source', 'causalevo', "
-            f"'reflection', 'rewardevo', 'graphskillevo', 'seqgraphevo', 'causaltextevo', 'causalpolicyevo', "
+            f"'reflection', 'experience_evo', 'rewardevo', 'graphskillevo', 'seqgraphevo', 'causaltextevo', 'causalpolicyevo', "
             f"'expel', 'selfcritic'"
         )
 

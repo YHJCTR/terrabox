@@ -66,7 +66,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Tool filtering constants (shared with prepare_merged_dataset.py)
+# Tool filtering constants used by rollout task filtering.
 # ──────────────────────────────────────────────────────────────────────────────
 
 MOCK_TOOLS = {
@@ -147,11 +147,21 @@ _TRANSIENT_FAILURE_MARKERS = (
     "service unavailable",
     "bad gateway",
     "gateway timeout",
+    "rate limit",
+    "ratelimit",
+    "too many requests",
+    "too_many_requests",
+    "request limit",
+    "throttle",
+    "throttled",
+    "server overloaded",
+    "overloaded",
     "apiconnectionerror",
     "apitimeouterror",
     "econnreset",
     "read timed out",
     "readtimeout",
+    " 429",
     " 502",
     " 503",
     " 504",
@@ -161,6 +171,11 @@ _TRANSIENT_FAILURE_MARKERS = (
     "container exited",
     "tls connect error",
 )
+_TRANSIENT_TOOL_TIMEOUT_MARKERS = (
+    "tool execution timeout",
+    "timed out after",
+    "timeout while",
+)
 # Deterministic LLM/model errors — re-running won't help, so never retry these
 # (otherwise we'd burn the cap looping on the same context overflow / bad tool name).
 _NONRETRYABLE_MARKERS = (
@@ -168,21 +183,117 @@ _NONRETRYABLE_MARKERS = (
     "context length",
     "selected unavailable tool",
     "invalid action format",
+    "missing required",
+    "required parameter",
+    "invalid parameter",
+    "invalid argument",
+    "invalid value",
+    "schema validation",
+    "validation error",
+    "no such file",
+    "does not exist",
+    "missing artifact",
+    "unknown layer",
+    "layer not found",
+    "file not found",
+    "invalid geometry",
+    "invalid bbox",
+    "invalid expression",
+    "max sequential tool turns reached",
 )
+
+
+def _result_top_failure_text(result: dict) -> str:
+    """Collect top-level failure/error text written by the rollout runner."""
+    return " ".join(
+        str(result.get(k, "") or "")
+        for k in (
+            "status",
+            "final_answer_full",
+            "final_answer_preview",
+            "error",
+            "exception",
+        )
+    ).lower()
+
+
+def _result_trace_text(result: dict) -> str:
+    """Collect tool-observation and conversation text from a saved result."""
+    chunks = []
+    for msg in result.get("conversation_history") or []:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            chunks.append(content)
+        for call in msg.get("tool_calls") or []:
+            if isinstance(call, dict):
+                chunks.append(str(call.get("name", "")))
+    for call in result.get("tool_calls") or []:
+        chunks.append(str(call))
+    return " ".join(chunks).lower()
+
+
+def _result_failure_text(result: dict) -> str:
+    """Collect failure/error text from both top-level fields and observations."""
+    return f"{_result_top_failure_text(result)} {_result_trace_text(result)}".strip()
+
+
+def _result_is_failed(result: dict) -> bool:
+    status = str(result.get("status", "") or "").lower()
+    if status in {"failed", "exception", "empty_final"}:
+        return True
+    # Some older result files record a failed episode as success=False with a
+    # completed-ish status. Only consider those for retry when an actual tool or
+    # exception error is present; low F1 alone is a model behavior signal.
+    return result.get("success") is False and bool(
+        result.get("has_tool_error") or result.get("has_tool_oom") or result.get("error")
+    )
 
 
 def is_transient_failure(result: dict) -> bool:
     """True if a result died from a transient network/service hiccup (retryable),
     not from a deterministic LLM/model error."""
-    if result.get("status") not in {"failed", "exception"}:
+    if not _result_is_failed(result):
         return False
-    text = " ".join(
-        str(result.get(k, "") or "")
-        for k in ("final_answer_full", "final_answer_preview", "error")
-    ).lower()
+    top_text = _result_top_failure_text(result)
+    trace_text = _result_trace_text(result)
+    text = f"{top_text} {trace_text}".strip()
     if any(m in text for m in _NONRETRYABLE_MARKERS):
         return False
+    if any(m in top_text for m in _TRANSIENT_FAILURE_MARKERS):
+        return True
+    if str(result.get("status", "") or "").lower() == "exception" and any(
+        m in top_text for m in _TRANSIENT_TOOL_TIMEOUT_MARKERS
+    ):
+        return True
+    # Tool timeout observations inside a completed agent loop are often caused
+    # by bad or over-broad tool arguments. Treat those as trajectory failures
+    # once recorded, instead of burning many whole-episode repair attempts.
+    if any(m in trace_text for m in _TRANSIENT_TOOL_TIMEOUT_MARKERS):
+        return False
     return any(m in text for m in _TRANSIENT_FAILURE_MARKERS)
+
+
+def transient_attempts_used(result: dict) -> int:
+    """Return how many whole-episode attempts are already represented."""
+    try:
+        return max(1, int(result.get("transient_attempts") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def should_retry_saved_transient(result: dict, max_transient_retries: int) -> bool:
+    """Whether --resume should re-run an existing transient failure result."""
+    if max_transient_retries <= 0:
+        return False
+    if not is_transient_failure(result):
+        return False
+    if result.get("transient_retry_exhausted"):
+        return False
+    if result.get("transient_retry_time_exhausted"):
+        return False
+    return transient_attempts_used(result) < max_transient_retries + 1
 
 
 def should_skip_task(
@@ -809,19 +920,37 @@ def cmd_rollout(args):
     for i, task in enumerate(tasks):
         task_id = task.get("task_id") or task.get("id", f"task_{i}")
         result_path = results_dir / f"{task_id}.json"
+        max_transient = getattr(args, "max_transient_retries", 5)
+        previous_transient_attempts = 0
 
-        # Resume: skip existing
+        # Resume: skip existing unless it is a saved transient failure that
+        # still has retry budget. This lets a later repair pass put network/
+        # service hiccups back at the end of the experiment without deleting
+        # unrelated deterministic failures.
         if args.resume and result_path.exists() and result_path.stat().st_size > 0:
-            log.info(f"[{i+1}/{len(tasks)}] Skipping {task_id} (result exists)")
             try:
                 with open(result_path) as f:
                     existing = json.load(f)
-                results.append(existing)
-                if existing.get("success"):
-                    success_count += 1
             except Exception:
-                pass
-            continue
+                existing = None
+            if (
+                existing is not None
+                and getattr(args, "retry_existing_transient", True)
+                and should_retry_saved_transient(existing, max_transient)
+            ):
+                previous_transient_attempts = transient_attempts_used(existing)
+                log.warning(
+                    f"[{i+1}/{len(tasks)}] Re-running existing transient failure "
+                    f"{task_id} (attempts_used={previous_transient_attempts}, "
+                    f"max_retries={max_transient})"
+                )
+            else:
+                log.info(f"[{i+1}/{len(tasks)}] Skipping {task_id} (result exists)")
+                if existing is not None:
+                    results.append(existing)
+                    if existing.get("success"):
+                        success_count += 1
+                continue
 
         log.info(f"[{i+1}/{len(tasks)}] Running {task_id} ...")
 
@@ -836,8 +965,9 @@ def cmd_rollout(args):
         # Transient-failure retry: re-run the whole task on network jitter and
         # DISCARD the failed attempt (never written), so jitter never inflates the
         # recorded tool calls / metrics. Capped by --max-transient-retries.
-        max_transient = getattr(args, "max_transient_retries", 5)
-        attempt = 0
+        retry_started_at = time.monotonic()
+        transient_retry_time_exhausted = False
+        attempt = previous_transient_attempts
         while True:
             attempt += 1
             try:
@@ -870,6 +1000,15 @@ def cmd_rollout(args):
                     "success": False,
                     "error": str(e),
                 }
+            retry_elapsed = time.monotonic() - retry_started_at
+            retry_seconds = max(0, int(getattr(args, "max_transient_retry_seconds", 1200) or 0))
+            if retry_seconds and is_transient_failure(result) and retry_elapsed >= retry_seconds:
+                transient_retry_time_exhausted = True
+                log.warning(
+                    f"[{i+1}/{len(tasks)}] {task_id} transient retry time budget exhausted "
+                    f"after {retry_elapsed:.0f}s; keeping this failed result and continuing."
+                )
+                break
             if is_transient_failure(result) and attempt <= max_transient:
                 backoff = min(30, 3 * attempt)
                 log.warning(
@@ -880,6 +1019,13 @@ def cmd_rollout(args):
                 time.sleep(backoff)
                 continue
             break
+        result["transient_attempts"] = attempt
+        result["max_transient_retries"] = max_transient
+        result["transient_retried"] = attempt > 1
+        result["transient_retry_exhausted"] = bool(is_transient_failure(result) and attempt >= max_transient + 1)
+        result["transient_retry_time_exhausted"] = transient_retry_time_exhausted
+        if previous_transient_attempts:
+            result["resumed_from_transient_failure"] = True
 
         # Save per-task result
         with open(result_path, "w") as f:
@@ -1281,6 +1427,12 @@ def main():
     p_rollout.add_argument("--max-transient-retries", type=int, default=5,
                            help="网络/服务抖动导致整条任务失败时,丢弃该次并重跑的最大次数"
                                 "(只针对连接类瞬时错误;上下文超限/选错工具等确定性错误不重试)")
+    p_rollout.add_argument("--max-transient-retry-seconds", type=int, default=1200,
+                           help="单个任务用于整条 transient retry 的墙钟预算秒数;0 表示不限制。"
+                                "预算耗尽时保留当前失败结果并继续后续任务")
+    p_rollout.add_argument("--no-retry-existing-transient", dest="retry_existing_transient",
+                           action="store_false", default=True,
+                           help="配合 --resume 时,不要复跑已有的瞬时失败结果文件")
     p_rollout.add_argument("--resume", action="store_true", help="跳过已有结果的任务")
     p_rollout.add_argument("--use-docker", action="store_true", help="使用 Docker 感知服务")
     p_rollout.add_argument(

@@ -3,10 +3,91 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
-import yaml
+try:
+    import yaml
+except Exception:  # pragma: no cover - fallback for minimal Python envs
+    yaml = None
 
 from .modes import list_agent_modes
+
+
+def _repo_root() -> Path:
+    # config.py -> agent -> terrabox -> src -> repo root
+    return Path(__file__).resolve().parents[3]
+
+
+def _resolve_config_path() -> str:
+    """Find agent_config.yaml even when subprocesses run outside the repo.
+
+    Some external benchmark adapters execute from their own source tree while
+    importing terrabox via PYTHONPATH. In that case a relative
+    ``agent_config.yaml`` would otherwise resolve against the benchmark cwd and
+    silently miss provider keys.
+    """
+
+    explicit = os.environ.get("AGENT_CONFIG_PATH")
+    if explicit:
+        path = Path(explicit).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        return str(path)
+
+    cwd_path = Path.cwd() / "agent_config.yaml"
+    if cwd_path.exists():
+        return str(cwd_path)
+
+    repo_path = _repo_root() / "agent_config.yaml"
+    return str(repo_path)
+
+
+def _parse_simple_yaml_scalar(value: str) -> Any:
+    value = value.strip()
+    if not value:
+        return ""
+    if value[0] in {"'", '"'} and value[-1:] == value[0]:
+        return value[1:-1]
+    lowered = value.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    if lowered in {"null", "none", "~"}:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError:
+        return value
+
+
+def _load_yaml_file(path: str) -> dict:
+    if yaml is not None:
+        with open(path) as f:
+            return yaml.safe_load(f) or {}
+
+    # Minimal fallback for environments without PyYAML. This intentionally only
+    # supports top-level scalar keys, which covers provider credentials and model
+    # settings used by lightweight CLI utilities.
+    data: dict[str, Any] = {}
+    with open(path) as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or ":" not in line:
+                continue
+            if raw_line[:1].isspace():
+                continue
+            key, value = line.split(":", 1)
+            key = key.strip()
+            value = value.strip()
+            if " #" in value:
+                value = value.split(" #", 1)[0].rstrip()
+            if key:
+                data[key] = _parse_simple_yaml_scalar(value)
+    return data
 
 
 @dataclass
@@ -92,12 +173,11 @@ class AgentConfig:
 def load_config() -> AgentConfig:
     """Load AgentConfig from agent_config.yaml (project root) or return defaults."""
     import logging as _logging
-    path = os.environ.get("AGENT_CONFIG_PATH", "agent_config.yaml")
+    path = _resolve_config_path()
     data: dict = {}
     if os.path.exists(path):
         try:
-            with open(path) as f:
-                data = yaml.safe_load(f) or {}
+            data = _load_yaml_file(path)
         except Exception as exc:
             _logging.getLogger(__name__).warning(
                 f"Failed to load agent config from {path}: {exc}. Using defaults."
@@ -156,12 +236,11 @@ def load_raw_yaml() -> dict:
     global _yaml_cache
     if _yaml_cache is not None:
         return _yaml_cache
-    path = os.environ.get("AGENT_CONFIG_PATH", "agent_config.yaml")
+    path = _resolve_config_path()
     _yaml_cache = {}
     if os.path.exists(path):
         try:
-            with open(path) as f:
-                _yaml_cache = yaml.safe_load(f) or {}
+            _yaml_cache = _load_yaml_file(path)
         except Exception:
             pass
     return _yaml_cache

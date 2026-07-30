@@ -37,6 +37,9 @@ Directory layout:
 - `toolbench/` reads ToolBench rollout JSON files and includes a
   StableToolBench runner that applies only an experiment-local ReAct static
   prompt override before calling the official `qa_pipeline_multithread.py`.
+- `gepa_aime/` runs the prompt-only AIME scenario from GEPA's public example
+  using cached HuggingFace AIME datasets; it optimizes only the static math
+  system prompt and scores exact final integer answers in `### <answer>` form.
 - `agentdojo/` reads AgentDojo system messages and `runs/**.json` traces;
   it also has an optional official-CLI runner that writes adapter-owned runs.
 - `terrabox/` is the native OEA adapter. It reads Terrabox ReAct rollout
@@ -72,6 +75,7 @@ Detailed quick starts:
 - [AgentDojo](agentdojo/README.md)
 - [Terrabox/OEA](terrabox/README.md)
 - [tau2-bench](tau2_bench/README.md)
+- [GEPA AIME](gepa_aime/README.md)
 - [Adapter template](template/README.md)
 
 ## API-Bank Summary

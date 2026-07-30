@@ -256,7 +256,7 @@ class CTFMBuilder:
             # Also split on Chinese/CJK punctuation so sentences without spaces
             # don't get stored as a single "word" (e.g. full Chinese question text).
             import re as _re
-            tokens = _re.split(r'[\s，。！？；：、""''【】（）\[\]]+', q.lower())
+            tokens = _re.split(r"""[\s，。！？；：、"'【】（）\[\]]+""", q.lower())
             for w in tokens:
                 w = w.strip(".,!?;:\"'()[]")
                 # 3–30 chars: accepts real words but rejects whole sentences

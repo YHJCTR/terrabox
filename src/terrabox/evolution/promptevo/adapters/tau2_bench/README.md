@@ -186,12 +186,28 @@ named rollout profile.
   `max_steps=100`, and `max_tokens=2048`. The external-user `paper3` profile
   remains experimental until every submitted domain has created `run_meta.json`
   and received inference requests, not just passed `/health`.
+- `longcat_agent4` is the explicit external-agent profile: LongCat2 runs both
+  the agent and user simulator through the OpenAI-compatible API, uses the same
+  four-domain/four-trial/100-step setup, dynamic chunks, and no local vLLM
+  containers. Credentials stay in the child environment and out of metadata.
   `stable4` uses dynamic chunk scheduling: GPU/port pairs are reusable lanes,
   tasks are split into small `task_ids` chunks, and early-finished lanes pull
   more work from the remaining queue. Chunk outputs are merged back into the
   canonical domain `tau2_results/results.json` with `(task_id, trial, seed)`
   de-duplication, so do not run multiple processes against the same domain
   result file directly.
+- External-provider 429, rate-limit, timeout, and provider-overload failures in
+  dynamic chunks are retryable queue events. The failed chunk waits briefly and
+  is put at the back of the queue; `TERRABOX_TAU2_QUEUE_RETRIES` (default 12)
+  caps this so real code/data bugs still surface.
+- tau2 external-agent runs call LongCat/DeepSeek through LiteLLM inside tau2
+  subprocesses, so they bypass Terrabox `RemoteChatClient`. The bootstrap must
+  pace those calls with `TERRABOX_TAU2_API_MIN_INTERVAL_SECONDS` and
+  `TERRABOX_TAU2_API_RATE_LOCK` (LongCat default 8s). `longcat_agent4` defaults
+  to conservative `api_workers=1` / `run_concurrency=1`; raise
+  `TERRABOX_TAU2_API_WORKERS`, `TERRABOX_TAU2_RUN_CONCURRENCY`, and/or set the
+  interval to `0` only for an intentional high-concurrency rerun. Changing these
+  env vars requires restarting the watcher or rollout parent process.
 
 The external user key is loaded from gitignored provider configuration and is
 passed only through the child environment. It must not appear in command-line

@@ -6,33 +6,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from terrabox.agent import session
-
-
-class _FakeQuery:
-    def __init__(self, record):
-        self.record = record
-        self.filters = {}
-
-    def filter_by(self, **kwargs):
-        self.filters.update(kwargs)
-        return self
-
-    def first(self):
-        if self.record and self.filters.get("id") == self.record.id:
-            return self.record
-        return None
-
-
-class _FakeDb:
-    def __init__(self, record=None):
-        self.record = record
-        self.committed = False
-
-    def query(self, *_args, **_kwargs):
-        return _FakeQuery(self.record)
-
-    def commit(self):
-        self.committed = True
+from conftest import RecordDb
 
 
 class _FakeLLM:
@@ -65,7 +39,7 @@ def test_run_btw_query_uses_session_context_without_persisting(monkeypatch):
         original_messages,
         [SystemMessage(content="[Terrabox conversation memory]\n## 当前任务状态\n- Comparing images")],
     )
-    db = _FakeDb(record)
+    db = RecordDb(record)
     llm = _FakeLLM()
     before = record.messages_json
 
@@ -92,7 +66,7 @@ def test_run_btw_query_requires_existing_session():
             session_id="missing",
             question="side question",
             user=SimpleNamespace(id="user-1"),
-            db=_FakeDb(None),
+            db=RecordDb(None),
             llm=_FakeLLM(),
         )
 
@@ -100,7 +74,7 @@ def test_run_btw_query_requires_existing_session():
 def test_run_btw_query_splits_thinking_from_response(monkeypatch):
     monkeypatch.setattr(session, "get_user_memory_context", lambda *_args, **_kwargs: "")
     record = _record([HumanMessage(content="Context")])
-    db = _FakeDb(record)
+    db = RecordDb(record)
     llm = _FakeLLM("<think>need context</think>final answer")
 
     result = session.run_btw_query(

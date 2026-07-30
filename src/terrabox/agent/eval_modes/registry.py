@@ -8,10 +8,13 @@ from .progressive import ProgressiveEvalRunner
 from .standard import StandardEvalRunner
 
 
+_CATEGORY_RUNNER = CategoryEvalRunner()
+
 _RUNNERS = {
     "standard": StandardEvalRunner(),
     "progressive": ProgressiveEvalRunner(),
-    "category": CategoryEvalRunner(),
+    "category": _CATEGORY_RUNNER,
+    "category_scoped": _CATEGORY_RUNNER,
     "artifact_progressive": ArtifactProgressiveEvalRunner(),
 }
 

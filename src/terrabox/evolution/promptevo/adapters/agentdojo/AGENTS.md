@@ -71,6 +71,33 @@ without modifying that checkout.
   same Base/Stage1 task IDs and explicitly protect security while improving
   utility. Existing `stage1_proposal.json` and `stage2_contrastive.json` are
   paid-API checkpoints and must be reused on watcher restart.
+- To intentionally test LongCat2 as the executable AgentDojo agent, pass
+  `--agent-provider longcat`. This uses upstream `OPENAI_COMPATIBLE` provider,
+  the same suites/attacks/evaluators/result-count checks, and does not start
+  local vLLM containers. The default remains `qwen`. External API rollouts use
+  `TERRABOX_AGENTDOJO_API_WORKERS` concurrent job lanes (default 1, raise only for deliberate high-concurrency reruns); this knob
+  must not affect local Qwen runs, which remain bound to the four GPU lanes.
+  If LongCat/other API providers enter repeated rate-limit/timeout retries,
+  first reduce this to 4 or lower, then increase the API pacing interval and
+  resume the same group instead of continuing a high-concurrency retry storm.
+
+- External API provider/rate-limit errors are retryable queue events, not final
+  benchmark failures. LongCat job lanes inspect job stderr/stdout and run JSON
+  for 429/rate-limit/timeout/provider-overload markers, wait briefly, and put
+  the same job at the back of the queue. Keep
+  `TERRABOX_AGENTDOJO_QUEUE_RETRIES` finite (default 12), and do not synthesize
+  these as evaluator failures. Even with `TERRABOX_AGENTDOJO_API_WORKERS=1`,
+  one AgentDojo sample can issue many rapid model calls, so external API
+  requests are cross-process paced by `TERRABOX_AGENTDOJO_API_MIN_INTERVAL_SECONDS`
+  (LongCat default 8.0s) using `TERRABOX_AGENTDOJO_API_RATE_LOCK`. Legacy
+  `TERRABOX_AGENTDOJO_LONGCAT_MIN_INTERVAL_SECONDS` / `_RATE_LOCK` remain aliases,
+  but new watcher scripts should use the generic API names. LongCat
+  OpenAI-compatible calls must disable `thinking` explicitly and must not forward
+  OpenAI `reasoning_effort`; that parameter is provider-specific and can create
+  false 400 failures. After changing pacing env vars, restart the watcher or
+  rollout parent process; already-running Python parents keep their old env.
+  Keep `TERRABOX_AGENTDOJO_OPENAI_TIMEOUT_SECONDS` finite (default 300s) so one
+  wedged HTTPS request cannot stall the whole watcher overnight.
 - PromptEvo meta-prompt v2 is additive and opt-in: use `chain-after-base
   --optimizer-version v2` for new generic optimization experiments. The default
   remains v1 so historical prompt versions and old chains are not overwritten.
@@ -78,6 +105,11 @@ without modifying that checkout.
   version's traces to propose a conservative first edit; Stage2 reads the exact
   Base->Stage1 prompt diff plus paired task traces to keep gains and narrowly
   repair regressions. Do not collapse them into one shared meta prompt.
+- For controlled prompt ablations, save the ablated prompt as a normal
+  PromptStore version and pass the same version to Base rollout
+  `--prompt-version` and to `chain-after-base --base-prompt-version`. Without
+  this, Stage1/Stage2 optimization will intentionally keep historical official
+  `base` behavior and the ablation recovery result will be invalid.
 - Keep `AGENTS.md`, `CLAUDE.md`, this adapter README, the shared adapter README,
   and `EXPERIMENT_TODO.md` synchronized when changing scope, metrics, provider,
   GPU layout, or output paths.

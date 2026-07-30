@@ -145,9 +145,11 @@ class Tau2RolloutRunner:
         code = '''"""Experiment-local tau2 bootstrap used by promptevo."""
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 
@@ -164,6 +166,68 @@ def _strip_think(text):
 
 
 import tau2.utils.llm_utils as llm_utils
+
+
+def _float_env(names, default):
+    for name in names:
+        raw = os.environ.get(name)
+        if raw not in (None, ""):
+            try:
+                return max(0.0, float(raw))
+            except ValueError:
+                return default
+    return default
+
+
+REQUEST_PROFILE = os.environ.get("TERRABOX_TAU2_REQUEST_PROFILE") or os.environ.get("TERRABOX_LLM_PROVIDER") or ""
+REQUEST_PROFILE = REQUEST_PROFILE.strip().lower()
+API_MIN_INTERVAL_SECONDS = _float_env(
+    [
+        "TERRABOX_TAU2_API_MIN_INTERVAL_SECONDS",
+        f"TERRABOX_{REQUEST_PROFILE.upper()}_MIN_INTERVAL_SECONDS" if REQUEST_PROFILE else "",
+        "TERRABOX_REMOTE_LLM_MIN_INTERVAL_SECONDS",
+    ],
+    8.0 if REQUEST_PROFILE == "longcat" else (1.0 if REQUEST_PROFILE else 0.0),
+)
+API_RATE_LOCK = Path(
+    os.environ.get(
+        "TERRABOX_TAU2_API_RATE_LOCK",
+        os.environ.get(
+            "TERRABOX_REMOTE_LLM_RATE_LOCK",
+            str(Path(os.environ.get("TERRABOX_ROOT", "/data1/yuhongjie2/terrabox")) / "tmp" / "service_locks" / f"tau2_{REQUEST_PROFILE or 'remote'}_api_rate.lock"),
+        ),
+    )
+)
+
+
+def _pace_external_api_request():
+    """Cross-process pacing for tau2 external API calls.
+
+    tau2 uses LiteLLM inside its own subprocess, so it bypasses Terrabox's
+    RemoteChatClient. Keep an equivalent configurable gap here; set the
+    interval to 0 only for deliberate high-concurrency reruns.
+    """
+    if not REQUEST_PROFILE or REQUEST_PROFILE in {"local", "qwen", "vllm"} or API_MIN_INTERVAL_SECONDS <= 0:
+        return
+    API_RATE_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with API_RATE_LOCK.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        handle.seek(0)
+        raw = handle.read().strip()
+        try:
+            last = float(raw) if raw else 0.0
+        except ValueError:
+            last = 0.0
+        now = time.monotonic()
+        wait_s = API_MIN_INTERVAL_SECONDS - (now - last)
+        if wait_s > 0:
+            time.sleep(wait_s)
+            now = time.monotonic()
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"{now:.6f}")
+        handle.flush()
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _decode_tool_arguments(value):
@@ -198,6 +262,7 @@ _orig_generate = llm_utils.generate
 
 
 def _generate_no_think(*args, **kwargs):
+    _pace_external_api_request()
     msg = _orig_generate(*args, **kwargs)
     if getattr(msg, "content", None) is not None:
         msg.content = _strip_think(msg.content)

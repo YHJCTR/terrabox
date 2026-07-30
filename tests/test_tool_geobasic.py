@@ -13,33 +13,10 @@ Run:
 import json
 import math
 
+from conftest import MockRegistrar
+
 # Import the toolkit setup and handlers indirectly by calling setup(registrar)
 from terrabox.toolkits.geobasic import setup as geo_basic_setup
-
-# -----------------------------
-# Mock Registrar (compatible with your example)
-# -----------------------------
-class MockRegistrar:
-    def __init__(self):
-        self.toolkits = {}
-        self.tools = {}          # slug -> spec
-        self.handlers = {}       # slug -> handler
-
-    def toolkit(self, name: str, description: str, version: str):
-        self.toolkits[name] = {"description": description, "version": version}
-
-    def tool(self, toolspec, handler):
-        self.tools[toolspec.slug] = toolspec
-        self.handlers[toolspec.slug] = handler
-
-    # Convenience call method to simulate your platform's invocation
-    def call(self, slug: str, arguments: dict, context: dict = None, account=None):
-        if context is None:
-            context = {}
-        handler = self.handlers.get(slug)
-        if not handler:
-            raise KeyError(f"Tool not registered: {slug}")
-        return handler(arguments, context, account)
 
 
 # -----------------------------

@@ -2,7 +2,7 @@
 """
 真实 Agent 评测脚本：使用 augmented_prompt 运行真实 agent，评估进化方法的实际效果。
 
-与 run_evolution_detailed_eval_v2.py 的区别：
+与 run_evolution_llm_eval.py 的区别：
   - 离线评测：直接用技能库工具列表 vs expected_tools
   - 真实评测：LLM 读 augmented_prompt → 真实 agent 推理 → 实际工具调用
 

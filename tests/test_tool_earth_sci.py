@@ -12,6 +12,8 @@ import tempfile
 import sys
 import numpy as np
 
+from conftest import MockRegistrar
+
 # Import the toolkit setup
 try:
     from terrabox.toolkits import earth_sci
@@ -21,26 +23,7 @@ except ImportError:
     from terrabox.toolkits import earth_sci
 
 # -----------------------------
-# 1. Mock Registrar
-# -----------------------------
-class MockRegistrar:
-    def __init__(self):
-        self.handlers = {}
-
-    def toolkit(self, *args, **kwargs):
-        pass
-
-    def tool(self, spec, handler):
-        # Register handler by slug
-        self.handlers[spec.slug] = handler
-
-    def call(self, slug, arguments):
-        if slug not in self.handlers:
-            raise KeyError(f"Tool not found: {slug}. Available: {list(self.handlers.keys())}")
-        return self.handlers[slug](arguments, {}, {})
-
-# -----------------------------
-# 2. Helpers
+# 1. Helpers
 # -----------------------------
 def create_dummy_tif(path, val=100.0, size=(10, 10), bands=1):
     """Creates a dummy GeoTIFF with specific value."""

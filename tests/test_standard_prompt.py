@@ -6,19 +6,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from terrabox.agent.modes import standard
 from terrabox.agent.session import _REACT_SYSTEM_PROMPT
-
-
-class _FakeQuery:
-    def filter_by(self, **_kwargs):
-        return self
-
-    def first(self):
-        return object()
-
-
-class _FakeDb:
-    def query(self, *_args, **_kwargs):
-        return _FakeQuery()
+from conftest import ObjectDb
 
 
 def test_react_system_prompt_stays_first_and_rag_is_separate(monkeypatch):
@@ -34,7 +22,7 @@ def test_react_system_prompt_stays_first_and_rag_is_separate(monkeypatch):
         history=[SystemMessage(content="[Terrabox user memories]\nremember me"), HumanMessage(content="question")],
         user_message="question",
         user=SimpleNamespace(id="user-1"),
-        db=_FakeDb(),
+        db=ObjectDb(),
         llm=object(),
         tools=[object()],
     )

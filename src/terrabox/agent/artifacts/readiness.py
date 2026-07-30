@@ -29,8 +29,13 @@ def is_file_input_param(name: str) -> bool:
 
 
 def _need_satisfied(need: ArtifactNeed, state: dict[str, Any]) -> bool:
-    if need.kind == "vector_layer":
-        return len(state.get("layers", [])) >= need.count
+    if need.kind.endswith("_layer"):
+        matching = [
+            layer
+            for layer in state.get("layers", [])
+            if str(layer.get("kind") or "vector_layer") == need.kind
+        ]
+        return len(matching) >= need.count
     paths = artifact_paths(state, need.kind)
     return len(paths) >= need.count
 
@@ -46,8 +51,8 @@ def tool_readiness(spec, state: dict[str, Any]) -> tuple[bool, list[str]]:
     if contract is not None:
         for need in contract.inputs:
             if not _need_satisfied(need, state):
-                if need.kind == "vector_layer":
-                    blockers.append(f"needs at least {need.count} vector layer(s)")
+                if need.kind.endswith("_layer"):
+                    blockers.append(f"needs at least {need.count} {need.kind}(s)")
                 else:
                     blockers.append(f"needs {need.kind} artifact")
         return not blockers, blockers

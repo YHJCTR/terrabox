@@ -7,25 +7,7 @@ from langchain_core.messages import HumanMessage
 from terrabox.agent import harness
 from terrabox.agent import session
 from terrabox.core.utils.uploads import inspect_uploaded_file
-
-
-class _FakeQuery:
-    def filter_by(self, **_kwargs):
-        return self
-
-    def first(self):
-        return None
-
-
-class _FakeDb:
-    def add(self, _record):
-        pass
-
-    def flush(self):
-        pass
-
-    def query(self, *_args, **_kwargs):
-        return _FakeQuery()
+from conftest import NullDb
 
 
 def test_inspect_uploaded_file_reports_basic_png_facts(tmp_path):
@@ -52,7 +34,7 @@ def test_prepare_history_includes_dynamic_uploaded_file_metadata(monkeypatch):
         user_message="compare these files",
         image_paths=["/tmp/before.png", "/tmp/after.png"],
         user=SimpleNamespace(id="user-1"),
-        db=_FakeDb(),
+        db=NullDb(),
         llm=None,
     )
 

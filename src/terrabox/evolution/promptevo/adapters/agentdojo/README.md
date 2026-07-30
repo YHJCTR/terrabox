@@ -213,8 +213,29 @@ recursively reads its authoritative AgentDojo JSON traces. Legacy upstream
 - Stage2 pairs Base and Stage1 by
   `suite/user_task/attack_type/injection_task`, then asks for changes that
   improve utility without accepting a material security regression.
-- Prompt optimization uses LongCat/DeepSeek only for proposing the static
-  prompt. Agent rollout remains local Qwen3 8B for all three stages.
+- Controlled ablation experiments should create an explicit prompt version
+  (for example a minimal prompt that keeps only role and identity) and pass it
+  both to Base rollout as `--prompt-version <version>` and to the chained
+  optimizer as `--base-prompt-version <version>`. This keeps Stage1/Stage2
+  recovery anchored to the ablated prompt instead of accidentally optimizing
+  from the official AgentDojo default prompt.
+- By default, prompt optimization uses LongCat/DeepSeek only for proposing the
+  static prompt, while rollout remains local Qwen3 8B. For explicit LongCat2
+  agent experiments, pass `--agent-provider longcat`; the adapter then uses
+  AgentDojo's upstream `OPENAI_COMPATIBLE` provider and keeps suites, attacks,
+  evaluators, and result-count checks unchanged. LongCat job-level parallelism
+  is controlled by `TERRABOX_AGENTDOJO_API_WORKERS` (default 1, configurable) and is separate
+  from the four local-GPU lanes used by Qwen.
+- LongCat/other external-provider 429, rate-limit, timeout, and provider-overload
+  errors are treated as retryable queue events. The failed job waits briefly and
+  is put at the back of the queue; `TERRABOX_AGENTDOJO_QUEUE_RETRIES` (default
+  12) caps this so real benchmark or adapter bugs still surface. Even with one
+  API worker, a single AgentDojo sample can issue rapid multi-turn model calls;
+  external API calls are therefore paced with a cross-process file lock. Tune
+  `TERRABOX_AGENTDOJO_API_MIN_INTERVAL_SECONDS` (LongCat default 8.0s) and
+  `TERRABOX_AGENTDOJO_API_RATE_LOCK`; the old `TERRABOX_AGENTDOJO_LONGCAT_*`
+  names remain aliases. Restart the watcher or rollout parent after changing
+  pacing env vars, because running Python parents keep their old environment.
 - Meta-prompt v2 is still domain-neutral: it uses repeated behavior patterns,
   metric directions, and paired trace evidence, but must not inject suite names,
   tool names, task IDs, or fixed workflows into the optimized static prompt.

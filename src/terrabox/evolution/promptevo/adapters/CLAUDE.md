@@ -52,6 +52,7 @@ These two are enough for first-stage prompt proposal.
   experiment-local prompt overrides and dependency preflight checks intact:
   missing external-project dependencies should produce `run_status.json`
   explaining the blocker, not fake metrics or source-tree edits.
+- `gepa_aime` exposes a cached-HuggingFace AIME prompt-only runner aligned with GEPA's public example. It optimizes only the static math system prompt, keeps AIME solutions out of agent inputs, writes `results.jsonl` + `metrics.json` under `gepa_aime/experiments/<group>/<stage>/`, and should use `HF_HUB_OFFLINE=1` with the local cache unless the user explicitly wants network downloads.
 - `toolbench` exposes a StableToolBench runner for the local
   `/data1/yuhongjie2/StepTool/stabletoolbench` checkout. It must only override
   `Prompts.ReAct_prompts.FORMAT_INSTRUCTIONS_SYSTEM_FUNCTION` in the current
@@ -59,6 +60,27 @@ These two are enough for first-stage prompt proposal.
   external source tree. The formal pipeline may explicitly start the cached API
   server and per-GPU vLLM lanes, must record those resources in experiment
   metadata/logs, and must stop resources it started at the end of each stage.
+
+## External API pacing
+
+- Adapters that call LongCat/DeepSeek through `make_llm_client()` inherit the
+  shared `RemoteChatClient` pacing and retry behavior. Keep it configurable with
+  `TERRABOX_REMOTE_LLM_MIN_INTERVAL_SECONDS`, provider-specific overrides such
+  as `TERRABOX_LONGCAT_MIN_INTERVAL_SECONDS`, and `TERRABOX_REMOTE_LLM_RATE_LOCK_DIR`;
+  do not hard-code permanent serial execution. LongCat defaults to conservative
+  pacing because multi-turn agent tasks can burst requests even at low job
+  concurrency; set the interval to `0` only for a deliberate high-concurrency
+  rerun.
+- Adapters that bypass `RemoteChatClient` and call an upstream OpenAI-compatible
+  SDK directly must implement equivalent cross-process pacing and finite queue
+  retries. A single worker can still issue many rapid API calls inside one
+  agent sample, so do not assume `API_WORKERS=1` is enough to avoid 429s. Prefer
+  adapter-specific generic knobs like `TERRABOX_AGENTDOJO_API_MIN_INTERVAL_SECONDS`
+  / `TERRABOX_AGENTDOJO_API_RATE_LOCK` and
+  `TERRABOX_TAU2_API_MIN_INTERVAL_SECONDS` / `TERRABOX_TAU2_API_RATE_LOCK`,
+  while retaining provider-specific aliases for backward compatibility. If
+  pacing env vars change, restart the watcher or rollout parent process;
+  already-running Python parents keep their old env.
 
 ## Trace rendering
 

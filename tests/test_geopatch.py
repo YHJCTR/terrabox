@@ -119,26 +119,7 @@ if "GeoPatch" not in sys.modules:
 # ------------------------------------------------------------------------------
 # 2) Mock Registrar (compatible with your example)
 # ------------------------------------------------------------------------------
-class MockRegistrar:
-    def __init__(self):
-        self.toolkits = {}
-        self.tools = {}
-        self.handlers = {}
-
-    def toolkit(self, name: str, description: str, version: str):
-        self.toolkits[name] = {"description": description, "version": version}
-
-    def tool(self, toolspec, handler):
-        self.tools[toolspec.slug] = toolspec
-        self.handlers[toolspec.slug] = handler
-
-    def call(self, slug: str, arguments: dict, context: dict = None, account=None):
-        if context is None:
-            context = {}
-        handler = self.handlers.get(slug)
-        if not handler:
-            raise KeyError(f"Tool not registered: {slug}")
-        return handler(arguments, context, account)
+from conftest import MockRegistrar
 
 
 # ------------------------------------------------------------------------------

@@ -5,33 +5,7 @@ from types import SimpleNamespace
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from terrabox.agent import session
-
-
-class _FakeQuery:
-    def __init__(self, record):
-        self.record = record
-        self.filters = {}
-
-    def filter_by(self, **kwargs):
-        self.filters.update(kwargs)
-        return self
-
-    def first(self):
-        if self.record and self.filters.get("id") == self.record.id:
-            return self.record
-        return None
-
-
-class _FakeDb:
-    def __init__(self, record):
-        self.record = record
-        self.committed = False
-
-    def query(self, *_args, **_kwargs):
-        return _FakeQuery(self.record)
-
-    def commit(self):
-        self.committed = True
+from conftest import RecordDb
 
 
 def _record(messages, summary_messages=None):
@@ -53,7 +27,7 @@ def test_get_context_status_reports_message_summary_and_token_budget():
         [SystemMessage(content="[Terrabox conversation memory]\n## 当前任务状态\n- ok")],
     )
 
-    status = session.get_context_status("session-1", _FakeDb(record), "user-1", max_model_len=100)
+    status = session.get_context_status("session-1", RecordDb(record), "user-1", max_model_len=100)
 
     assert status["session_id"] == "session-1"
     assert status["exists"] is True
@@ -76,7 +50,7 @@ def test_compact_session_keeps_recent_messages_and_stores_summary(monkeypatch):
         AIMessage(content="recent assistant"),
     ]
     record = _record(messages)
-    db = _FakeDb(record)
+    db = RecordDb(record)
 
     status = session.compact_session("session-1", db, "user-1", llm=None)
 

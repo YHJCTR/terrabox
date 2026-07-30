@@ -451,6 +451,34 @@ class ToolBenchSceneAdapter(ProviderSceneAdapter):
         return ToolBenchMetricProvider(results_dir_fn=lambda _exp: str(ref.source_path))
 
 
+class GEPAAIMESceneAdapter(ProviderSceneAdapter):
+    scene = "gepa_aime"
+    label = "GEPA AIME"
+    root = REPO_ROOT / "src" / "terrabox" / "evolution" / "promptevo" / "adapters" / "gepa_aime" / "experiments"
+
+    def discover(self) -> list[ExperimentRef]:
+        refs: list[ExperimentRef] = []
+        if not self.root.exists():
+            return refs
+        for results in sorted(self.root.glob("**/results.jsonl")):
+            run_dir = results.parent
+            refs.append(
+                ExperimentRef(
+                    name=str(run_dir.relative_to(self.root)),
+                    scene=self.scene,
+                    source_path=run_dir,
+                    kind=_stage_kind(run_dir.name),
+                    prompt_path=_first_file([run_dir / "system_prompt.txt", *(run_dir / name for name in _PROMPT_FILENAMES)]),
+                )
+            )
+        return sorted(_dedupe_refs(refs), key=lambda ref: ref.name)
+
+    def provider(self, ref: ExperimentRef):
+        from terrabox.evolution.promptevo.adapters.gepa_aime import GEPAAIMEMetricProvider
+
+        return GEPAAIMEMetricProvider(result_path_fn=lambda _exp: str(ref.source_path / "results.jsonl"))
+
+
 class MetricViewerRegistry:
     def __init__(self, adapters: Iterable[SceneAdapter]):
         self.adapters = {adapter.scene: adapter for adapter in adapters}
@@ -567,6 +595,7 @@ REGISTRY = MetricViewerRegistry(
         Tau2SceneAdapter(),
         AgentDojoSceneAdapter(),
         ToolBenchSceneAdapter(),
+        GEPAAIMESceneAdapter(),
     ]
 )
 

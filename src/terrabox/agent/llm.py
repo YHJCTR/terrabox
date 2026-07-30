@@ -9,7 +9,7 @@ import httpx
 from langchain_openai import ChatOpenAI
 
 from .config import AgentConfig
-from .llm_provider import longcat_thinking_enabled
+from .llm_provider import longcat_thinking_enabled, remote_llm_max_retries, remote_llm_timeout_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,8 @@ def get_llm(config: AgentConfig) -> ChatOpenAI:
             model=config.remote_llm_model,
             temperature=0.7,
             streaming=True,    # enable SSE token streaming from remote API
+            timeout=remote_llm_timeout_seconds(),
+            max_retries=remote_llm_max_retries(),
             **extra_kwargs,
         )
 

@@ -8,25 +8,7 @@ from terrabox.agent import session
 from terrabox.agent.modes import standard
 from terrabox.agent.prompt_blocks import PromptBlock, PromptRenderer
 from terrabox.agent.session import _REACT_SYSTEM_PROMPT
-
-
-class _FakeQuery:
-    def filter_by(self, **_kwargs):
-        return self
-
-    def first(self):
-        return None
-
-
-class _FakeDb:
-    def add(self, _record):
-        pass
-
-    def flush(self):
-        pass
-
-    def query(self, *_args, **_kwargs):
-        return _FakeQuery()
+from conftest import NullDb
 
 
 def test_prompt_renderer_renders_messages_and_describes_blocks():
@@ -82,7 +64,7 @@ def test_prepare_history_can_return_prompt_blocks_for_dynamic_context(monkeypatc
         user_message="compare",
         image_paths=["/tmp/before.png"],
         user=SimpleNamespace(id="user-1"),
-        db=_FakeDb(),
+        db=NullDb(),
         llm=None,
         include_prompt_blocks=True,
     )
@@ -107,7 +89,7 @@ def test_standard_prompt_returns_described_prompt_blocks(monkeypatch):
         history=[HumanMessage(content="question")],
         user_message="question",
         user=SimpleNamespace(id="user-1"),
-        db=SimpleNamespace(query=lambda *_args, **_kwargs: _FakeQuery()),
+        db=NullDb(),
         llm=object(),
         tools=[object()],
         include_prompt_blocks=True,

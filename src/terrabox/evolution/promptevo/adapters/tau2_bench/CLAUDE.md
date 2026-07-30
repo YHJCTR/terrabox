@@ -89,6 +89,25 @@ profile is experimental and must not be used as the default parallel rollout
 until each submitted domain is verified to create `run_meta.json` and receive
 inference requests, not merely answer `/health`.
 
+Use `pipeline.py full-chain --profile longcat_agent4` only when intentionally
+testing LongCat2 as the executable agent and user simulator. It keeps the same
+four-domain, four-trial, `max_steps=100` profile, uses dynamic chunk scheduling,
+does not start local vLLM containers, and passes LongCat credentials only
+through the child environment. The provider config lookup must be cwd-independent: tau2 subprocesses run from `/data1/yuhongjie2/tau2-bench`, so `agent_config.yaml` must resolve via `AGENT_CONFIG_PATH`, `TERRABOX_LLM_API_*`, or the Terrabox repo-root fallback, never only via the current working directory.
+For new LongCat agent experiments, use the generic PromptEvo v2 meta prompts by
+passing `--optimizer-version v2`. When another LongCat API-heavy run is active,
+start tau2 conservatively with `TERRABOX_TAU2_API_WORKERS=1-2`,
+`TERRABOX_TAU2_CHUNK_SIZE=1-2`, and `TERRABOX_TAU2_RUN_CONCURRENCY=1`; these
+change scheduling pressure only, not the benchmark prompt or task semantics.
+Even with one worker, a single tau2 simulation can issue rapid agent/user/eval
+LLM calls. External-provider runs therefore pace LiteLLM calls in the bootstrap
+with `TERRABOX_TAU2_API_MIN_INTERVAL_SECONDS` and
+`TERRABOX_TAU2_API_RATE_LOCK` (LongCat default 8s). Set the interval to `0` or
+increase workers only for a deliberate high-concurrency rerun, and restart the
+watcher/rollout parent after changing these env vars.
+Keep `TERRABOX_TAU2_OPENAI_TIMEOUT_SECONDS` finite (default 300s) so LiteLLM
+HTTP calls fail and requeue instead of hanging a chunk forever.
+
 `stable4` uses dynamic chunk scheduling, not fixed domain-to-GPU scheduling.
 Each GPU/port is a reusable lane; tau2 tasks are split into small `task_ids`
 chunks, and a lane that finishes early immediately pulls another chunk from the
@@ -97,6 +116,12 @@ longer domains. Chunk outputs are written under `<group>/_chunks/...` and then
 merged back into the canonical `<group>/<domain>_base/tau2_results/results.json`
 with `(task_id, trial, seed)` de-duplication. Do not run multiple processes
 against the same domain `results.json` directly; use the chunk merger.
+
+External API provider/rate-limit errors are retryable queue events, not final
+rollout failures. Dynamic chunk workers inspect stderr/stdout for 429/rate-limit
+/timeout/provider-overload markers, wait briefly, and put the same chunk at the
+back of the queue. Keep `TERRABOX_TAU2_QUEUE_RETRIES` finite (default 12) so real
+code/data bugs still surface instead of burning API tokens overnight.
 
 Restarting the same chain must reuse completed artifacts: a valid
 `rejudged_<provider>/rejudge_summary.json`, `stage1_proposal.json`, or

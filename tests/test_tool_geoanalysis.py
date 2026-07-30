@@ -14,6 +14,8 @@ import math
 import json
 import numpy as np
 
+from conftest import MockRegistrar
+
 # Import the toolkit setup
 try:
     from terrabox.toolkits import geoanalysis
@@ -22,31 +24,7 @@ except ImportError:
     from terrabox.toolkits import geoanalysis
 
 # -----------------------------
-# 1. Mock Registrar (Shared Pattern)
-# -----------------------------
-class MockRegistrar:
-    def __init__(self):
-        self.toolkits = {}
-        self.tools = {}          # slug -> spec
-        self.handlers = {}       # slug -> handler
-
-    def toolkit(self, name: str, description: str, version: str):
-        self.toolkits[name] = {"description": description, "version": version}
-
-    def tool(self, toolspec, handler):
-        # Store by slug
-        self.tools[toolspec.slug] = toolspec
-        self.handlers[toolspec.slug] = handler
-
-    def call(self, slug: str, arguments: dict, context: dict = None, account=None):
-        if context is None: context = {}
-        handler = self.handlers.get(slug)
-        if not handler:
-            raise KeyError(f"Tool not registered: {slug}. Available: {list(self.handlers.keys())}")
-        return handler(arguments, context, account)
-
-# -----------------------------
-# 2. Helpers
+# 1. Helpers
 # -----------------------------
 def create_dummy_raster(path, data, nodata=-9999):
     """Creates a simple GeoTIFF using rasterio."""

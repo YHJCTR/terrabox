@@ -44,8 +44,11 @@ def _record_contract_outputs(
     if contract is None:
         return
     for output in contract.outputs:
-        if output.kind == "vector_layer":
-            name = args.get(output.name_param or "layer_name")
+        if output.kind.endswith("_layer"):
+            name = (
+                parsed.get(output.name_field or "")
+                or args.get(output.name_param or "layer_name")
+            )
             container = (
                 parsed.get(output.container_param or "")
                 or args.get(output.container_param or "")
@@ -58,6 +61,7 @@ def _record_contract_outputs(
             if layer_key not in existing:
                 state.setdefault("layers", []).append(
                     {
+                        "kind": output.kind,
                         "name": name,
                         "container": container,
                         "source": slug,

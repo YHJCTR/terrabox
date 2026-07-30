@@ -118,8 +118,11 @@ def _llm_reflection(row: dict[str, Any], issues: list[str], llm) -> str:
         "Write 1-2 concise lessons for next time (do not guess the correct answer):"
     )
     try:
-        text = (llm.call(prompt, system=_REFLECT_SYSTEM, max_tokens=160,
-                         enable_thinking=False) or "").strip()
+        try:
+            raw = llm.call(prompt, system=_REFLECT_SYSTEM, max_tokens=160, enable_thinking=False)
+        except TypeError:
+            raw = llm.call(prompt, system=_REFLECT_SYSTEM, max_tokens=160)
+        text = (raw or "").strip()
         if text:
             return text
     except Exception as exc:  # noqa: BLE001
@@ -163,6 +166,7 @@ def build_reflections_from_rollout(
     *,
     low_f1_threshold: float = 0.8,   # kept for CLI compat; unused (no gold)
     include_success: bool = True,
+    llm_provider: str | None = None,
     llm=None,
 ) -> list[ReflectionEntry]:
     """Generate self-reflections per trajectory via the Docker vLLM
@@ -170,10 +174,15 @@ def build_reflections_from_rollout(
     unreachable (still never uses gold)."""
     if llm is None:
         try:
-            from ..shared.llm_client import EvolutionLLMClient
-            llm = EvolutionLLMClient()
+            provider = (llm_provider or "").strip().lower()
+            if provider and provider != "local":
+                from ...agent.llm_provider import make_llm_client
+                llm = make_llm_client(provider)
+            else:
+                from ..shared.llm_client import EvolutionLLMClient
+                llm = EvolutionLLMClient()
         except Exception as exc:  # noqa: BLE001
-            logger.warning("EvolutionLLMClient unavailable (%s); template fallback used.", exc)
+            logger.warning("reflection LLM unavailable (%s); template fallback used.", exc)
             llm = None
     entries: list[ReflectionEntry] = []
     for row in load_rollout_rows(trajectory_dir):

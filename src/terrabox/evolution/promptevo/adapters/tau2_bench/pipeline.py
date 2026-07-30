@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import random
+import shutil
 import subprocess
 import time
 import urllib.request
@@ -12,9 +13,10 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from queue import Empty, Queue
 from typing import Any
 
-from terrabox.agent.llm_provider import make_llm_client, resolve_provider
+from terrabox.agent.llm_provider import is_retryable_remote_error_text, make_llm_client, resolve_provider
 from terrabox.evolution.promptevo.contrastive_optimizer import ContrastiveOptimizer
 from terrabox.evolution.promptevo.contrastive_sampler import default_render
 from terrabox.evolution.promptevo.loop import ContrastiveUpdater
@@ -31,7 +33,18 @@ from .traces import Tau2TrajectorySource
 TAU2_ROOT = "/data1/yuhongjie2/tau2-bench"
 TAU2_PYTHON = "/data1/yuhongjie2/tau2-bench/.venv/bin/python"
 MODEL_PATH = "/data1/yuhongjie2/Earth-Agent/llm/qwen/3_8B"
+TERRABOX_ROOT = Path(__file__).resolve().parents[6]
+TERRABOX_AGENT_CONFIG = TERRABOX_ROOT / "agent_config.yaml"
 DOMAINS = (("airline", 0, 9100), ("retail", 1, 9101), ("telecom", 2, 9102), ("banking_knowledge", 3, 9103))
+DEFAULT_QUEUE_RETRIES = 12
+
+# tau2 subprocesses run from /data1/yuhongjie2/tau2-bench. Pin the Terrabox
+# config path before any provider lookup so external API keys do not depend on cwd.
+os.environ.setdefault("AGENT_CONFIG_PATH", str(TERRABOX_AGENT_CONFIG))
+
+
+class QueueRetryLimitExceeded(RuntimeError):
+    """Raised when a retryable provider failure keeps recurring past the cap."""
 
 
 @dataclass(frozen=True)
@@ -41,9 +54,12 @@ class Tau2PipelineProfile:
     num_trials: int
     max_steps: int
     max_tokens: int
+    agent_provider: str | None = None
     user_provider: str | None = None
     dynamic_chunks: bool = False
     chunk_size: int = 8
+    api_workers: int = 0
+    run_concurrency: int = 1
 
 
 PIPELINE_PROFILES = {
@@ -70,6 +86,19 @@ PIPELINE_PROFILES = {
         max_tokens=2048,
         dynamic_chunks=True,
         chunk_size=8,
+    ),
+    "longcat_agent4": Tau2PipelineProfile(
+        name="longcat_agent4",
+        domains=DOMAINS,
+        num_trials=4,
+        max_steps=100,
+        max_tokens=4096,
+        agent_provider="longcat",
+        user_provider="longcat",
+        dynamic_chunks=True,
+        chunk_size=4,
+        api_workers=1,
+        run_concurrency=1,
     ),
 }
 
@@ -175,6 +204,163 @@ def _start_server(stage: str, gpu: int, port: int) -> str:
         raise
 
 
+def _profile_needs_local_servers(profile: Tau2PipelineProfile) -> bool:
+    return profile.agent_provider is None
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(name, str(default))
+    try:
+        return max(minimum, int(raw))
+    except (TypeError, ValueError):
+        return max(minimum, default)
+
+
+def _profile_worker_ports(profile: Tau2PipelineProfile) -> list[int]:
+    if _profile_needs_local_servers(profile):
+        return [port for _, _, port in profile.domains]
+    requested = _env_int("TERRABOX_TAU2_API_WORKERS", profile.api_workers or 1, minimum=1)
+    return [9100 + i for i in range(max(1, requested))]
+
+
+def _profile_chunk_size(profile: Tau2PipelineProfile) -> int:
+    return _env_int("TERRABOX_TAU2_CHUNK_SIZE", profile.chunk_size, minimum=1)
+
+
+def _profile_run_concurrency(profile: Tau2PipelineProfile) -> int:
+    return _env_int("TERRABOX_TAU2_RUN_CONCURRENCY", profile.run_concurrency, minimum=1)
+
+
+def _effective_runtime(profile: Tau2PipelineProfile) -> dict[str, int]:
+    return {
+        "api_workers": len(_profile_worker_ports(profile)),
+        "chunk_size": _profile_chunk_size(profile),
+        "run_concurrency": _profile_run_concurrency(profile),
+    }
+
+
+def _queue_retry_limit(env_name: str, default: int = DEFAULT_QUEUE_RETRIES) -> int:
+    raw = os.getenv(env_name, str(default))
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+def _queue_retry_delay(attempt: int) -> float:
+    return min(300.0, 10.0 * max(1, attempt) + random.uniform(1.0, 8.0))
+
+
+def _tau2_chunk_dir(group: str, domain: str, chunk_index: int) -> Path:
+    return Path(experiment_dir(f"{group}/_chunks/{domain}_chunk_{chunk_index:04d}"))
+
+
+def _tau2_runtime_chunk_dir(group: str, domain: str, chunk_index: int) -> Path:
+    return Path("tmp", "tau2_runtime", group, "_chunks", f"{domain}_chunk_{chunk_index:04d}")
+
+
+def _clear_tau2_chunk_outputs(group: str, domain: str, chunk_index: int) -> None:
+    for path in (_tau2_chunk_dir(group, domain, chunk_index), _tau2_runtime_chunk_dir(group, domain, chunk_index)):
+        if path.exists() or path.is_symlink():
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def _tau2_chunk_failure_text(group: str, domain: str, chunk_index: int, exc: BaseException) -> str:
+    chunk_dir = _tau2_chunk_dir(group, domain, chunk_index)
+    parts = [repr(exc)]
+    for name in ("stderr.log", "stdout.log", "run_status.json"):
+        path = chunk_dir / name
+        if path.is_file():
+            try:
+                parts.append(path.read_text(encoding="utf-8", errors="ignore")[-12000:])
+            except OSError:
+                pass
+    return "\n".join(parts)
+
+
+def _tau2_chunk_has_retryable_provider_failure(group: str, domain: str, chunk_index: int) -> bool:
+    chunk_dir = _tau2_chunk_dir(group, domain, chunk_index)
+    text = _tau2_chunk_failure_text(group, domain, chunk_index, RuntimeError("completed_chunk_audit"))
+    if not is_retryable_remote_error_text(text):
+        return False
+    metrics_path = chunk_dir / "metrics_summary.json"
+    if metrics_path.is_file():
+        try:
+            metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+            if float(metrics.get("infrastructure_error_rate") or 0) > 0:
+                return True
+            if float(metrics.get("error_termination_rate") or 0) > 0:
+                return True
+        except (OSError, ValueError, TypeError):
+            pass
+    results_path = chunk_dir / "tau2_results" / "results.json"
+    if results_path.is_file():
+        try:
+            data = json.loads(results_path.read_text(encoding="utf-8"))
+            for sim in data.get("simulations") or []:
+                if isinstance(sim, dict) and str(sim.get("termination_reason") or "") == "infrastructure_error":
+                    return True
+        except (OSError, ValueError, TypeError):
+            pass
+    return False
+
+
+def _llm_settings(
+    profile: Tau2PipelineProfile,
+    *,
+    role: str,
+    port: int,
+) -> tuple[str, dict[str, Any], dict[str, str]]:
+    provider = profile.agent_provider if role == "agent" else profile.user_provider
+    if provider:
+        spec = resolve_provider(provider)
+        return (
+            f"openai/{spec.model}",
+            {
+                "temperature": 0.0,
+                "api_base": spec.base_url,
+                "max_tokens": profile.max_tokens,
+                "extra_body": {"thinking": {"type": "disabled"}},
+                "timeout": int(os.getenv("TERRABOX_TAU2_OPENAI_TIMEOUT_SECONDS", os.getenv("TERRABOX_REMOTE_LLM_TIMEOUT_SECONDS", "300"))),
+            },
+            {
+                "OPENAI_API_KEY": spec.api_key,
+                "TERRABOX_LLM_API_KEY": spec.api_key,
+                "TERRABOX_LLM_API_BASE": spec.base_url,
+                "TERRABOX_LLM_MODEL": spec.model,
+                "TERRABOX_LLM_PROVIDER": provider,
+                "TERRABOX_TAU2_REQUEST_PROFILE": provider,
+                "TERRABOX_TAU2_API_MIN_INTERVAL_SECONDS": os.getenv(
+                    "TERRABOX_TAU2_API_MIN_INTERVAL_SECONDS",
+                    os.getenv(
+                        f"TERRABOX_{provider.upper()}_MIN_INTERVAL_SECONDS",
+                        os.getenv("TERRABOX_REMOTE_LLM_MIN_INTERVAL_SECONDS", "8.0" if provider == "longcat" else "1.0"),
+                    ),
+                ),
+                "TERRABOX_TAU2_API_RATE_LOCK": os.getenv(
+                    "TERRABOX_TAU2_API_RATE_LOCK",
+                    str(Path("tmp/service_locks") / f"tau2_{provider}_api_rate.lock"),
+                ),
+                "AGENT_CONFIG_PATH": str(TERRABOX_AGENT_CONFIG),
+            },
+        )
+    args = {
+        "temperature": 0.0,
+        "api_base": f"http://127.0.0.1:{port}/v1",
+        "api_key": "EMPTY",
+        "max_tokens": profile.max_tokens,
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+    }
+    return "openai//model", args, {}
+
+
+def _merged_env(*envs: dict[str, str]) -> dict[str, str]:
+    merged: dict[str, str] = {}
+    for env in envs:
+        merged.update(env)
+    return merged
+
+
 def _task_ids_for_domain(domain: str, split: str = "base") -> list[str]:
     code = (
         "import json, sys; "
@@ -257,6 +443,8 @@ def _completed_trial_counts(group: str, domain: str) -> dict[str, set[tuple[str,
         for sim in data.get("simulations", []):
             if not isinstance(sim, dict):
                 continue
+            if str(sim.get("termination_reason") or "") == "infrastructure_error":
+                continue
             task_id = str(sim.get("task_id") or "")
             if not task_id:
                 continue
@@ -284,33 +472,31 @@ def _run_domain_chunk(
     if status_path.is_file():
         try:
             if json.loads(status_path.read_text(encoding="utf-8")).get("status") == "complete":
-                return str(status_path.parent)
+                if _tau2_chunk_has_retryable_provider_failure(group, domain, chunk_index):
+                    _clear_tau2_chunk_outputs(group, domain, chunk_index)
+                else:
+                    return str(status_path.parent)
         except (OSError, ValueError, TypeError):
             pass
-    agent_args = {
-        "temperature": 0.0,
-        "api_base": f"http://127.0.0.1:{port}/v1",
-        "api_key": "EMPTY",
-        "max_tokens": profile.max_tokens,
-        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
-    }
+    agent_llm, agent_args, agent_env = _llm_settings(profile, role="agent", port=port)
+    user_llm, user_args, user_env = _llm_settings(profile, role="user", port=port)
     config = Tau2RunConfig(
         domain=domain,
         task_split_name="base",
         task_ids=task_ids,
         num_trials=profile.num_trials,
         max_steps=profile.max_steps,
-        max_concurrency=1,
+        max_concurrency=_profile_run_concurrency(profile),
         max_retries=3,
         timeout=900,
-        agent_llm="openai//model",
-        user_llm="openai//model",
+        agent_llm=agent_llm,
+        user_llm=user_llm,
         agent_llm_args=dict(agent_args),
-        user_llm_args=dict(agent_args),
+        user_llm_args=dict(user_args),
         extra_args=["--retrieval-config", "bm25"] if domain == "banking_knowledge" else [],
     )
     runner = Tau2RolloutRunner(tau2_root=TAU2_ROOT, python_executable=TAU2_PYTHON)
-    return runner.run(prompt, experiment=experiment, run_config=config)
+    return runner.run(prompt, experiment=experiment, run_config=config, env=_merged_env(agent_env, user_env))
 
 
 def _merge_domain_results(group: str, domain: str, profile: Tau2PipelineProfile) -> str:
@@ -381,36 +567,19 @@ def _run_domain(
     port: int,
     profile: Tau2PipelineProfile,
 ) -> str:
-    agent_args = {
-        "temperature": 0.0,
-        "api_base": f"http://127.0.0.1:{port}/v1",
-        "api_key": "EMPTY",
-        "max_tokens": profile.max_tokens,
-        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
-    }
-    user_llm = "openai//model"
-    user_args = dict(agent_args)
-    run_env: dict[str, str] = {}
-    if profile.user_provider:
-        user_spec = resolve_provider(profile.user_provider)
-        user_llm = f"openai/{user_spec.model}"
-        user_args = {
-            "temperature": 0.0,
-            "api_base": user_spec.base_url,
-            "max_tokens": profile.max_tokens,
-            "extra_body": {"thinking": {"type": "disabled"}},
-        }
-        # Keep provider credentials out of argv, run_meta.json, and tau2 results.
-        run_env["OPENAI_API_KEY"] = user_spec.api_key
+    agent_llm, agent_args, agent_env = _llm_settings(profile, role="agent", port=port)
+    user_llm, user_args, user_env = _llm_settings(profile, role="user", port=port)
+    # Keep provider credentials out of argv, run_meta.json, and tau2 results.
+    run_env = _merged_env(agent_env, user_env)
     config = Tau2RunConfig(
         domain=domain,
         task_split_name="base",
         num_trials=profile.num_trials,
         max_steps=profile.max_steps,
-        max_concurrency=1,
+        max_concurrency=_profile_run_concurrency(profile),
         max_retries=3,
         timeout=900,
-        agent_llm="openai//model",
+        agent_llm=agent_llm,
         user_llm=user_llm,
         agent_llm_args=agent_args,
         user_llm_args=user_args,
@@ -445,6 +614,7 @@ def _rollout_group_dynamic_chunks(
             "stage": stage,
             "prompt_version": prompt_version,
             "profile": asdict(profile),
+            "effective_runtime": _effective_runtime(profile),
             "scheduler": "dynamic_chunks",
         },
     )
@@ -459,7 +629,7 @@ def _rollout_group_dynamic_chunks(
             for task_id in all_task_ids
             if len(completed.get(task_id, set())) < profile.num_trials
         ]
-        for chunk in _chunked(remaining, profile.chunk_size):
+        for chunk in _chunked(remaining, _profile_chunk_size(profile)):
             jobs.append((domain, chunk, chunk_counter))
             chunk_counter += 1
         print(
@@ -471,23 +641,24 @@ def _rollout_group_dynamic_chunks(
 
     containers: list[str] = []
     try:
-        for _, gpu, port in profile.domains:
-            containers.append(_start_server(stage, gpu, port))
-
-        from queue import Queue
+        if _profile_needs_local_servers(profile):
+            for _, gpu, port in profile.domains:
+                containers.append(_start_server(stage, gpu, port))
 
         queue: Queue[tuple[str, list[str], int]] = Queue()
         for job in jobs:
             queue.put(job)
 
         chunk_results: list[str] = []
+        retry_counts: dict[tuple[str, int], int] = defaultdict(int)
+        max_queue_retries = _queue_retry_limit("TERRABOX_TAU2_QUEUE_RETRIES")
 
         def worker(port: int) -> list[str]:
             done: list[str] = []
             while True:
                 try:
                     domain, task_ids, chunk_index = queue.get_nowait()
-                except Exception:
+                except Empty:
                     return done
                 print(
                     f"[{time.strftime('%F %T')}] lane {port} running "
@@ -495,12 +666,61 @@ def _rollout_group_dynamic_chunks(
                     flush=True,
                 )
                 try:
-                    done.append(_run_domain_chunk(group, prompt, domain, task_ids, chunk_index, port, profile))
+                    result = _run_domain_chunk(group, prompt, domain, task_ids, chunk_index, port, profile)
+                    if _tau2_chunk_has_retryable_provider_failure(group, domain, chunk_index):
+                        key = (domain, chunk_index)
+                        retry_counts[key] += 1
+                        attempt = retry_counts[key]
+                        if attempt <= max_queue_retries:
+                            delay = _queue_retry_delay(attempt)
+                            print(
+                                f"[{time.strftime('%F %T')}] lane {port} completed "
+                                f"{domain}_chunk_{chunk_index:04d} with retryable provider/API "
+                                f"failures; requeue attempt {attempt}/{max_queue_retries} "
+                                f"after {delay:.1f}s",
+                                flush=True,
+                            )
+                            _clear_tau2_chunk_outputs(group, domain, chunk_index)
+                            time.sleep(delay)
+                            queue.put((domain, task_ids, chunk_index))
+                        else:
+                            raise QueueRetryLimitExceeded(
+                                f"{domain}_chunk_{chunk_index:04d} still contains retryable "
+                                f"provider/API failures after {max_queue_retries} queue retries"
+                            )
+                    else:
+                        done.append(result)
+                except Exception as exc:
+                    if isinstance(exc, QueueRetryLimitExceeded):
+                        raise
+                    key = (domain, chunk_index)
+                    retry_counts[key] += 1
+                    attempt = retry_counts[key]
+                    failure_text = _tau2_chunk_failure_text(group, domain, chunk_index, exc)
+                    if is_retryable_remote_error_text(failure_text) and attempt <= max_queue_retries:
+                        delay = _queue_retry_delay(attempt)
+                        print(
+                            f"[{time.strftime('%F %T')}] lane {port} retryable provider/API failure in "
+                            f"{domain}_chunk_{chunk_index:04d}; requeue attempt "
+                            f"{attempt}/{max_queue_retries} after {delay:.1f}s",
+                            flush=True,
+                        )
+                        _clear_tau2_chunk_outputs(group, domain, chunk_index)
+                        time.sleep(delay)
+                        queue.put((domain, task_ids, chunk_index))
+                    else:
+                        print(
+                            f"[{time.strftime('%F %T')}] lane {port} non-requeueable failure in "
+                            f"{domain}_chunk_{chunk_index:04d}: {exc!r}",
+                            flush=True,
+                        )
+                        raise
                 finally:
                     queue.task_done()
 
-        with ThreadPoolExecutor(max_workers=len(profile.domains)) as pool:
-            futures = [pool.submit(worker, port) for _, _, port in profile.domains]
+        worker_ports = _profile_worker_ports(profile)
+        with ThreadPoolExecutor(max_workers=len(worker_ports)) as pool:
+            futures = [pool.submit(worker, port) for port in worker_ports]
             for future in as_completed(futures):
                 chunk_results.extend(future.result())
 
@@ -513,9 +733,11 @@ def _rollout_group_dynamic_chunks(
             "stage": stage,
             "prompt_version": prompt_version,
             "profile": asdict(profile),
+            "effective_runtime": _effective_runtime(profile),
             "scheduler": "dynamic_chunks",
             "chunks": len(jobs),
             "chunk_results": chunk_results,
+            "queue_retries": {f"{domain}_chunk_{chunk_index:04d}": count for (domain, chunk_index), count in retry_counts.items()},
             "domains": results,
         }
         _write_json(root / "pipeline_status.json", status)
@@ -559,11 +781,13 @@ def rollout_group(
             "stage": stage,
             "prompt_version": prompt_version,
             "profile": asdict(profile),
+            "effective_runtime": _effective_runtime(profile),
         },
     )
     try:
-        for _, gpu, port in profile.domains:
-            containers.append(_start_server(stage, gpu, port))
+        if _profile_needs_local_servers(profile):
+            for _, gpu, port in profile.domains:
+                containers.append(_start_server(stage, gpu, port))
         results: dict[str, str] = {}
         with ThreadPoolExecutor(max_workers=len(profile.domains)) as pool:
             futures = {
@@ -590,6 +814,7 @@ def rollout_group(
             "stage": stage,
             "prompt_version": prompt_version,
             "profile": asdict(profile),
+            "effective_runtime": _effective_runtime(profile),
             "domains": results,
         }
         _write_json(root / "pipeline_status.json", status)
@@ -614,14 +839,24 @@ def _sample_stage1_traces(results_dir: str, n_failed: int = 12, n_success: int =
     return "\n\n".join(default_render(trace, 2400) for trace in picked)
 
 
-def optimize_stage1(base_results: str, version: str, record_dir: str, provider: str = "longcat") -> str:
+def optimize_stage1(
+    base_results: str,
+    version: str,
+    record_dir: str,
+    provider: str = "longcat",
+    optimizer_version: str = "v1",
+) -> str:
     record = Path(record_dir)
     proposal_path = record / "stage1_proposal.json"
     if proposal_path.exists():
         try:
             saved = json.loads(proposal_path.read_text(encoding="utf-8"))
             prompt_path = Path(str(saved.get("prompt_path") or ""))
-            if saved.get("version") == version and prompt_path.is_file():
+            if (
+                saved.get("version") == version
+                and saved.get("optimizer_version", "v1") == optimizer_version
+                and prompt_path.is_file()
+            ):
                 print(f"[{time.strftime('%F %T')}] reusing Stage1 prompt {prompt_path}", flush=True)
                 return str(prompt_path)
         except (OSError, ValueError, TypeError):
@@ -630,7 +865,11 @@ def optimize_stage1(base_results: str, version: str, record_dir: str, provider: 
     base_prompt = store.load("base")
     trace_text = _sample_stage1_traces(base_results)
     metrics = Tau2MetricProvider(results_path_fn=lambda _: base_results).aggregate("base")
-    optimizer = PromptOptimizer(llm_client=make_llm_client(provider), max_growth_ratio=1.5)
+    optimizer = PromptOptimizer(
+        llm_client=make_llm_client(provider),
+        max_growth_ratio=1.5,
+        meta_prompt_version=optimizer_version,
+    )
     proposal, scores = optimizer.propose_best(
         base_prompt,
         trace_text,
@@ -640,9 +879,22 @@ def optimize_stage1(base_results: str, version: str, record_dir: str, provider: 
     )
     if proposal is None:
         raise RuntimeError(f"Stage1 optimizer produced no acceptable prompt: {scores}")
-    path = store.save(version, proposal.revised_prompt, {"proposal": proposal.to_dict(), "scores": scores})
+    path = store.save(
+        version,
+        proposal.revised_prompt,
+        {"proposal": proposal.to_dict(), "scores": scores, "optimizer_version": optimizer_version},
+    )
     record.mkdir(parents=True, exist_ok=True)
-    _write_json(proposal_path, {"version": version, "prompt_path": path, "proposal": proposal.to_dict(), "scores": scores})
+    _write_json(
+        proposal_path,
+        {
+            "version": version,
+            "prompt_path": path,
+            "proposal": proposal.to_dict(),
+            "scores": scores,
+            "optimizer_version": optimizer_version,
+        },
+    )
     return path
 
 
@@ -653,6 +905,7 @@ def optimize_stage2(
     stage2_version: str,
     record_dir: str,
     provider: str = "longcat",
+    optimizer_version: str = "v1",
 ) -> str:
     record = Path(record_dir)
     contrastive_path = record / "stage2_contrastive.json"
@@ -660,7 +913,11 @@ def optimize_stage2(
         try:
             saved = json.loads(contrastive_path.read_text(encoding="utf-8"))
             prompt_path = Path(str(saved.get("prompt_path") or ""))
-            if saved.get("version") == stage2_version and prompt_path.is_file():
+            if (
+                saved.get("version") == stage2_version
+                and saved.get("optimizer_version", "v1") == optimizer_version
+                and prompt_path.is_file()
+            ):
                 print(f"[{time.strftime('%F %T')}] reusing Stage2 prompt {prompt_path}", flush=True)
                 return str(prompt_path)
         except (OSError, ValueError, TypeError):
@@ -672,7 +929,17 @@ def optimize_stage2(
         store,
         traces,
         metrics,
-        optimizer=ContrastiveOptimizer(llm=make_llm_client(provider)),
+        optimizer=ContrastiveOptimizer(llm=make_llm_client(provider), meta_prompt_version=optimizer_version),
+    )
+    objective = (
+        "Improve all important tau2 customer-service reward metrics according to their directions. "
+        "Preserve policy compliance, correct tool/state interactions, and required communication; "
+        "only repair repeated prompt-fixable regressions and keep the static prompt general."
+        if optimizer_version == "v2"
+        else (
+            "Improve tau2 customer-service task reward across all domains. Preserve policy compliance, "
+            "correct tool/state interactions, and required communication while avoiding regressions."
+        )
     )
     result = updater.update(
         "base",
@@ -683,18 +950,28 @@ def optimize_stage2(
         n_candidates=3,
         max_tokens=8000,
         diagnose_max_tokens=6000,
-        objective=(
-            "Improve tau2 customer-service task reward across all domains. Preserve policy compliance, "
-            "correct tool/state interactions, and required communication while avoiding regressions."
-        ),
+        objective=objective,
     )
     path = store.save(
         stage2_version,
         result.revised_prompt,
-        {"result": result.to_dict(), "base_results": base_results, "stage1_results": stage1_results},
+        {
+            "result": result.to_dict(),
+            "base_results": base_results,
+            "stage1_results": stage1_results,
+            "optimizer_version": optimizer_version,
+        },
     )
     record.mkdir(parents=True, exist_ok=True)
-    _write_json(contrastive_path, {"version": stage2_version, "prompt_path": path, "result": result.to_dict()})
+    _write_json(
+        contrastive_path,
+        {
+            "version": stage2_version,
+            "prompt_path": path,
+            "result": result.to_dict(),
+            "optimizer_version": optimizer_version,
+        },
+    )
     return path
 
 
@@ -731,13 +1008,14 @@ def chain_after_base(
     stage2_version: str,
     provider: str = "longcat",
     profile: Tau2PipelineProfile = PIPELINE_PROFILES["legacy4"],
+    optimizer_version: str = "v1",
 ) -> None:
     if provider == "longcat":
         os.environ["TERRABOX_LONGCAT_THINKING"] = "disabled"
     wait_for_group(base_group, domains=profile.domains)
     wait_for_base_cleanup()
     base_rejudged = rejudge_group(base_group, provider)
-    optimize_stage1(base_rejudged, stage1_version, experiment_dir(stage1_group), provider)
+    optimize_stage1(base_rejudged, stage1_version, experiment_dir(stage1_group), provider, optimizer_version)
     rollout_group(stage1_group, stage1_version, "stage1", profile)
     stage1_rejudged = rejudge_group(stage1_group, provider)
     optimize_stage2(
@@ -747,6 +1025,7 @@ def chain_after_base(
         stage2_version,
         experiment_dir(stage2_group),
         provider,
+        optimizer_version,
     )
     rollout_group(stage2_group, stage2_version, "stage2", profile)
     rejudge_group(stage2_group, provider)
@@ -765,6 +1044,7 @@ def main() -> None:
         command.add_argument("--stage2-version", required=True)
         command.add_argument("--provider", default="longcat", choices=["longcat", "deepseek"])
         command.add_argument("--profile", default="legacy4", choices=sorted(PIPELINE_PROFILES))
+        command.add_argument("--optimizer-version", default="v1", choices=["v1", "v2"])
 
     chain = sub.add_parser("chain-after-base")
     add_chain_args(chain)
@@ -782,6 +1062,7 @@ def main() -> None:
         args.stage2_version,
         args.provider,
         profile,
+        args.optimizer_version,
     )
 
 

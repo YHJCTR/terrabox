@@ -1,0 +1,1039 @@
+{
+  "timestamp": "2026-06-29T23:37:50.212290",
+  "info": {
+    "git_commit": "8ebb7499622fc2be9b9d510d6f7a7653461f4f29",
+    "num_trials": 1,
+    "max_steps": 60,
+    "max_errors": 10,
+    "user_info": {
+      "implementation": "user_simulator",
+      "llm": "openai//model",
+      "llm_args": {
+        "temperature": 0.0,
+        "api_base": "http://localhost:9100/v1",
+        "api_key": "EMPTY",
+        "max_tokens": 512
+      },
+      "global_simulation_guidelines": "# User Simulation Guidelines\nYou are playing the role of a customer contacting a customer service representative. \nYour goal is to simulate realistic customer interactions while following specific scenario instructions.\n\n## Core Principles\n- Generate one message at a time, maintaining natural conversation flow.\n- Strictly follow the scenario instructions you have received.\n- Never make up or hallucinate information not provided in the scenario instructions. Information that is not provided in the scenario instructions should be considered unknown or unavailable.\n- Avoid repeating the exact instructions verbatim. Use paraphrasing and natural language to convey the same information\n- Disclose information progressively. Wait for the agent to ask for specific information before providing it.\n\n## Task Completion\n- The goal is to continue the conversation until the task is complete.\n- If the instruction goal is satisified, generate the '###STOP###' token to end the conversation.\n- If you are transferred to another agent, generate the '###TRANSFER###' token to indicate the transfer.\n- If you find yourself in a situation in which the scenario does not provide enough information for you to continue the conversation, generate the '###OUT-OF-SCOPE###' token to end the conversation.\nRemember: The goal is to create realistic, natural conversations while strictly adhering to the provided instructions and maintaining character consistency.\n",
+      "voice_settings": null,
+      "persona_config": null
+    },
+    "agent_info": {
+      "implementation": "llm_agent",
+      "llm": "openai//model",
+      "llm_args": {
+        "temperature": 0.0,
+        "api_base": "http://localhost:9100/v1",
+        "api_key": "EMPTY",
+        "max_tokens": 512
+      },
+      "voice_settings": null
+    },
+    "environment_info": {
+      "domain_name": "mock",
+      "policy": "# Mock Domain Policy\n\n1. Each task must have a title\n2. Task status can only be \"pending\" or \"completed\"\n3. Only existing users can create tasks \n4. You are not allowed to delete tasks. You should transfer the a human agent.\n5. If the user asks for a compliment, compliment them",
+      "tool_defs": null
+    },
+    "seed": 300,
+    "text_streaming_config": {
+      "chunk_by": "words",
+      "chunk_size": 1
+    },
+    "speech_complexity": null,
+    "audio_native_config": null,
+    "retrieval_config": null,
+    "retrieval_config_kwargs": null
+  },
+  "tasks": [
+    {
+      "id": "create_task_1",
+      "description": {
+        "purpose": "Test the create_task functionality",
+        "relevant_policies": null,
+        "notes": "Basic task creation test with a simple title"
+      },
+      "user_scenario": {
+        "persona": "Professional and direct communicator who writes in a clear and concise style",
+        "instructions": "You are a team member who needs to create a task for an upcoming meeting. Your goal is to create a task to track this important meeting. Create a new task called 'Important Meeting' for user_1."
+      },
+      "ticket": "User needs to create a task for an upcoming meeting. Create a new task called 'Important Meeting' for user_1.",
+      "initial_state": null,
+      "evaluation_criteria": {
+        "actions": [
+          {
+            "action_id": "create_1",
+            "requestor": "assistant",
+            "name": "create_task",
+            "arguments": {
+              "user_id": "user_1",
+              "title": "Important Meeting"
+            },
+            "info": "Create a new task for the meeting",
+            "compare_args": null
+          }
+        ],
+        "env_assertions": null,
+        "communicate_info": null,
+        "nl_assertions": [
+          "The agent confirmed the task was created successfully"
+        ],
+        "reward_basis": [
+          "DB",
+          "COMMUNICATE"
+        ]
+      },
+      "issues": null,
+      "required_documents": null,
+      "user_tools": null
+    },
+    {
+      "id": "create_task_1_with_env_assertions",
+      "description": {
+        "purpose": "Test the create_task functionality",
+        "relevant_policies": null,
+        "notes": "Basic task creation test with a simple title"
+      },
+      "user_scenario": {
+        "persona": "Professional and direct communicator who writes in a clear and concise style",
+        "instructions": "You are a team member who needs to create a task for an upcoming meeting. Your goal is to create a task to track this important meeting. Create a new task called 'Important Meeting' for user_1."
+      },
+      "ticket": "User needs to create a task for an upcoming meeting. Create a new task called 'Important Meeting' for user_1.",
+      "initial_state": null,
+      "evaluation_criteria": {
+        "actions": [
+          {
+            "action_id": "create_1",
+            "requestor": "assistant",
+            "name": "create_task",
+            "arguments": {
+              "user_id": "user_1",
+              "title": "Important Meeting"
+            },
+            "info": "Create a new task for the meeting",
+            "compare_args": null
+          }
+        ],
+        "env_assertions": [
+          {
+            "env_type": "assistant",
+            "func_name": "assert_task_status",
+            "arguments": {
+              "task_id": "task_2",
+              "expected_status": "pending"
+            },
+            "assert_value": true,
+            "message": null
+          }
+        ],
+        "communicate_info": null,
+        "nl_assertions": [
+          "The agent confirmed the task was created successfully"
+        ],
+        "reward_basis": [
+          "DB",
+          "ENV_ASSERTION"
+        ]
+      },
+      "issues": null,
+      "required_documents": null,
+      "user_tools": null
+    },
+    {
+      "id": "create_task_1_nl_eval",
+      "description": {
+        "purpose": "Test the create_task functionality",
+        "relevant_policies": null,
+        "notes": "Basic task creation test with a simple title"
+      },
+      "user_scenario": {
+        "persona": "Professional and direct communicator who writes in a clear and concise style",
+        "instructions": "You are a team member who needs to create a task for an upcoming meeting. Your goal is to create a task to track an important meeting. Request a new task called 'Important Meeting' for user_1. Then, request a compliment."
+      },
+      "ticket": "User needs to create a task for an upcoming meeting. Create a new task called 'Important Meeting' for user_1. Then, compliment the user.",
+      "initial_state": null,
+      "evaluation_criteria": {
+        "actions": null,
+        "env_assertions": null,
+        "communicate_info": null,
+        "nl_assertions": [
+          "The task is created successfully",
+          "The user is complimented"
+        ],
+        "reward_basis": [
+          "DB",
+          "COMMUNICATE"
+        ]
+      },
+      "issues": null,
+      "required_documents": null,
+      "user_tools": null
+    },
+    {
+      "id": "update_task_1",
+      "description": {
+        "purpose": "Test the update_task_status functionality",
+        "relevant_policies": null,
+        "notes": "Basic task status update test"
+      },
+      "user_scenario": {
+        "persona": null,
+        "instructions": "You have completed the task and need to update its status. Your goal is to mark an existing task as completed. Request that task_1 be marked as completed."
+      },
+      "ticket": "User needs to update the status of task_1 to completed.",
+      "initial_state": null,
+      "evaluation_criteria": {
+        "actions": [
+          {
+            "action_id": "update_1",
+            "requestor": "assistant",
+            "name": "update_task_status",
+            "arguments": {
+              "task_id": "task_1",
+              "status": "completed"
+            },
+            "info": "Update the task status to completed",
+            "compare_args": null
+          }
+        ],
+        "env_assertions": null,
+        "communicate_info": null,
+        "nl_assertions": [
+          "The agent confirmed the task status was updated successfully"
+        ],
+        "reward_basis": [
+          "DB",
+          "COMMUNICATE"
+        ]
+      },
+      "issues": null,
+      "required_documents": null,
+      "user_tools": null
+    },
+    {
+      "id": "update_task_with_message_history",
+      "description": {
+        "purpose": "Test the update_task_status functionality with pre-existing conversation history",
+        "relevant_policies": null,
+        "notes": "Tests updating a task status with initial message history showing previous context"
+      },
+      "user_scenario": {
+        "persona": "Professional and direct communicator",
+        "instructions": "Continue the conversation about task management. The previous discussion was about creating a task. Now you want to mark the task as completed."
+      },
+      "ticket": null,
+      "initial_state": {
+        "initialization_data": null,
+        "initialization_actions": null,
+        "message_history": [
+          {
+            "role": "user",
+            "content": "I need to create a task for the project review meeting.",
+            "tool_calls": null,
+            "is_audio": false,
+            "turn_idx": 0,
+            "timestamp": "2026-06-29T23:37:50.200830",
+            "cost": null,
+            "usage": null,
+            "raw_data": null,
+            "generation_time_seconds": null,
+            "audio_format": null,
+            "audio_path": null,
+            "audio_script_gold": null,
+            "speech_effects": null,
+            "source_effects": null,
+            "channel_effects": null,
+            "turn_taking_action": null,
+            "utterance_ids": null,
+            "chunk_id": null,
+            "is_final_chunk": true,
+            "source": null,
+            "contains_speech": true
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_1",
+                "name": "create_task",
+                "arguments": {
+                  "user_id": "user_1",
+                  "title": "Project Review",
+                  "description": "Review Q4 project status"
+                },
+                "requestor": "assistant"
+              }
+            ],
+            "is_audio": false,
+            "turn_idx": 0,
+            "timestamp": "2026-06-29T23:37:50.200859",
+            "cost": null,
+            "usage": null,
+            "raw_data": null,
+            "generation_time_seconds": null,
+            "audio_format": null,
+            "audio_path": null,
+            "audio_script_gold": null,
+            "speech_effects": null,
+            "source_effects": null,
+            "channel_effects": null,
+            "turn_taking_action": null,
+            "utterance_ids": null,
+            "chunk_id": null,
+            "is_final_chunk": true,
+            "source": null,
+            "contains_speech": true
+          },
+          {
+            "id": "call_1",
+            "role": "tool",
+            "content": "{\"task_id\":\"task_2\",\"title\":\"Project Review\",\"description\":\"Review Q4 project status\",\"status\":\"pending\"}",
+            "requestor": "assistant",
+            "error": false,
+            "turn_idx": 0,
+            "timestamp": "2026-06-29T23:37:50.200894"
+          },
+          {
+            "role": "assistant",
+            "content": "I've created a task titled 'Project Review' for you. The task has been created with ID task_2 and is currently in pending status.",
+            "tool_calls": null,
+            "is_audio": false,
+            "turn_idx": 0,
+            "timestamp": "2026-06-29T23:37:50.200903",
+            "cost": null,
+            "usage": null,
+            "raw_data": null,
+            "generation_time_seconds": null,
+            "audio_format": null,
+            "audio_path": null,
+            "audio_script_gold": null,
+            "speech_effects": null,
+            "source_effects": null,
+            "channel_effects": null,
+            "turn_taking_action": null,
+            "utterance_ids": null,
+            "chunk_id": null,
+            "is_final_chunk": true,
+            "source": null,
+            "contains_speech": true
+          }
+        ]
+      },
+      "evaluation_criteria": {
+        "actions": [
+          {
+            "action_id": "update_1",
+            "requestor": "assistant",
+            "name": "update_task_status",
+            "arguments": {
+              "task_id": "task_2",
+              "status": "completed"
+            },
+            "info": "Update the task status to completed",
+            "compare_args": null
+          }
+        ],
+        "env_assertions": null,
+        "communicate_info": null,
+        "nl_assertions": [
+          "The agent acknowledged the previous context",
+          "The agent confirmed the task status was updated successfully"
+        ],
+        "reward_basis": [
+          "DB",
+          "COMMUNICATE"
+        ]
+      },
+      "issues": null,
+      "required_documents": null,
+      "user_tools": null
+    },
+    {
+      "id": "update_task_with_initialization_data",
+      "description": {
+        "purpose": "Test the update_task_status functionality with pre-existing conversation history",
+        "relevant_policies": null,
+        "notes": "Tests updating a task status with initial message history showing previous context"
+      },
+      "user_scenario": {
+        "persona": "Professional and direct communicator",
+        "instructions": "Continue the conversation about task management. The previous discussion was about creating a task with ID task_2. Now you want to mark the task as completed."
+      },
+      "ticket": "User needs to update the status of task_2 to completed.",
+      "initial_state": {
+        "initialization_data": {
+          "agent_data": {
+            "tasks": {
+              "task_2": {
+                "task_id": "task_2",
+                "title": "Project Review",
+                "description": "Review Q4 project status",
+                "status": "pending"
+              }
+            },
+            "users": {
+              "user_1": {
+                "tasks": [
+                  "task_1",
+                  "task_2"
+                ]
+              }
+            }
+          },
+          "user_data": null
+        },
+        "initialization_actions": null,
+        "message_history": null
+      },
+      "evaluation_criteria": {
+        "actions": [
+          {
+            "action_id": "update_1",
+            "requestor": "assistant",
+            "name": "update_task_status",
+            "arguments": {
+              "task_id": "task_2",
+              "status": "completed"
+            },
+            "info": "Update the task status to completed",
+            "compare_args": null
+          }
+        ],
+        "env_assertions": null,
+        "communicate_info": [
+          "The agent acknowledged the previous context",
+          "The agent confirmed the task status was updated successfully"
+        ],
+        "nl_assertions": null,
+        "reward_basis": [
+          "DB",
+          "COMMUNICATE"
+        ]
+      },
+      "issues": null,
+      "required_documents": null,
+      "user_tools": null
+    },
+    {
+      "id": "update_task_with_initialization_actions",
+      "description": {
+        "purpose": "Test the update_task_status functionality with pre-existing conversation history",
+        "relevant_policies": null,
+        "notes": "Tests updating a task status with initial message history showing previous context"
+      },
+      "user_scenario": {
+        "persona": "Professional and direct communicator",
+        "instructions": "Continue the conversation about task management. The previous discussion was about creating a task with ID task_2. Now you want to mark the task as completed."
+      },
+      "ticket": "User needs to update the status of task_2 to completed.",
+      "initial_state": {
+        "initialization_data": null,
+        "initialization_actions": [
+          {
+            "env_type": "assistant",
+            "func_name": "create_task",
+            "arguments": {
+              "user_id": "user_1",
+              "title": "Project Review",
+              "description": "Review Q4 project status"
+            }
+          }
+        ],
+        "message_history": null
+      },
+      "evaluation_criteria": {
+        "actions": [
+          {
+            "action_id": "update_1",
+            "requestor": "assistant",
+            "name": "update_task_status",
+            "arguments": {
+              "task_id": "task_2",
+              "status": "completed"
+            },
+            "info": "Update the task status to completed",
+            "compare_args": null
+          }
+        ],
+        "env_assertions": null,
+        "communicate_info": null,
+        "nl_assertions": [
+          "The agent acknowledged the previous context",
+          "The agent confirmed the task status was updated successfully"
+        ],
+        "reward_basis": [
+          "DB",
+          "COMMUNICATE"
+        ]
+      },
+      "issues": null,
+      "required_documents": null,
+      "user_tools": null
+    },
+    {
+      "id": "update_task_with_history_and_env_assertions",
+      "description": {
+        "purpose": "Test the update_task_status functionality with pre-existing conversation history and env assertions",
+        "relevant_policies": null,
+        "notes": "Tests updating a task status with initial message history showing previous context"
+      },
+      "user_scenario": {
+        "persona": "Professional and direct communicator",
+        "instructions": "Continue the conversation about task management. The previous discussion was about creating a task with ID task_2. Now you want to mark the task as completed."
+      },
+      "ticket": null,
+      "initial_state": {
+        "initialization_data": null,
+        "initialization_actions": null,
+        "message_history": [
+          {
+            "role": "user",
+            "content": "I need to create a task for the project review meeting.",
+            "tool_calls": null,
+            "is_audio": false,
+            "turn_idx": 0,
+            "timestamp": "2026-06-29T23:37:50.200972",
+            "cost": null,
+            "usage": null,
+            "raw_data": null,
+            "generation_time_seconds": null,
+            "audio_format": null,
+            "audio_path": null,
+            "audio_script_gold": null,
+            "speech_effects": null,
+            "source_effects": null,
+            "channel_effects": null,
+            "turn_taking_action": null,
+            "utterance_ids": null,
+            "chunk_id": null,
+            "is_final_chunk": true,
+            "source": null,
+            "contains_speech": true
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_1",
+                "name": "create_task",
+                "arguments": {
+                  "user_id": "user_1",
+                  "title": "Project Review",
+                  "description": "Review Q4 project status"
+                },
+                "requestor": "assistant"
+              }
+            ],
+            "is_audio": false,
+            "turn_idx": 0,
+            "timestamp": "2026-06-29T23:37:50.200987",
+            "cost": null,
+            "usage": null,
+            "raw_data": null,
+            "generation_time_seconds": null,
+            "audio_format": null,
+            "audio_path": null,
+            "audio_script_gold": null,
+            "speech_effects": null,
+            "source_effects": null,
+            "channel_effects": null,
+            "turn_taking_action": null,
+            "utterance_ids": null,
+            "chunk_id": null,
+            "is_final_chunk": true,
+            "source": null,
+            "contains_speech": true
+          },
+          {
+            "id": "call_1",
+            "role": "tool",
+            "content": "{\"task_id\":\"task_2\",\"title\":\"Project Review\",\"description\":\"Review Q4 project status\",\"status\":\"pending\"}",
+            "requestor": "assistant",
+            "error": false,
+            "turn_idx": 0,
+            "timestamp": "2026-06-29T23:37:50.201018"
+          },
+          {
+            "role": "assistant",
+            "content": "I've created a task titled 'Project Review' for you. The task has been created with ID task_2 and is currently in pending status.",
+            "tool_calls": null,
+            "is_audio": false,
+            "turn_idx": 0,
+            "timestamp": "2026-06-29T23:37:50.201026",
+            "cost": null,
+            "usage": null,
+            "raw_data": null,
+            "generation_time_seconds": null,
+            "audio_format": null,
+            "audio_path": null,
+            "audio_script_gold": null,
+            "speech_effects": null,
+            "source_effects": null,
+            "channel_effects": null,
+            "turn_taking_action": null,
+            "utterance_ids": null,
+            "chunk_id": null,
+            "is_final_chunk": true,
+            "source": null,
+            "contains_speech": true
+          }
+        ]
+      },
+      "evaluation_criteria": {
+        "actions": null,
+        "env_assertions": [
+          {
+            "env_type": "assistant",
+            "func_name": "assert_task_status",
+            "arguments": {
+              "task_id": "task_2",
+              "expected_status": "completed"
+            },
+            "assert_value": true,
+            "message": null
+          }
+        ],
+        "communicate_info": null,
+        "nl_assertions": [
+          "The agent acknowledged the previous context",
+          "The agent confirmed the task status was updated successfully"
+        ],
+        "reward_basis": [
+          "ENV_ASSERTION"
+        ]
+      },
+      "issues": null,
+      "required_documents": null,
+      "user_tools": null
+    },
+    {
+      "id": "update_task_with_user_tools",
+      "description": {
+        "purpose": "Test user tool calling with check_notifications and dismiss_notification",
+        "relevant_policies": null,
+        "notes": "The user checks their notification inbox, sees a task assigned to them, asks the agent to mark it completed, then dismisses the notification."
+      },
+      "user_scenario": {
+        "persona": "Professional and direct communicator who writes in a clear and concise style",
+        "instructions": "You just received a notification about a task. First, use the check_notifications tool to see your notifications. You will see that task_1 ('Test task') has been assigned to you. Tell the agent you have completed this task and ask them to update the status to completed. After the agent confirms, use dismiss_notification to dismiss the notification 'notif_1'."
+      },
+      "ticket": "User checks their notifications, sees task_1 was assigned, and asks the agent to mark task_1 as completed.",
+      "initial_state": {
+        "initialization_data": null,
+        "initialization_actions": [
+          {
+            "env_type": "user",
+            "func_name": "add_notification",
+            "arguments": {
+              "notification_id": "notif_1",
+              "message": "Task 'Test task' has been assigned to you.",
+              "task_id": "task_1"
+            }
+          }
+        ],
+        "message_history": null
+      },
+      "evaluation_criteria": {
+        "actions": [
+          {
+            "action_id": "update_1",
+            "requestor": "assistant",
+            "name": "update_task_status",
+            "arguments": {
+              "task_id": "task_1",
+              "status": "completed"
+            },
+            "info": "Update the task status to completed",
+            "compare_args": null
+          }
+        ],
+        "env_assertions": [
+          {
+            "env_type": "user",
+            "func_name": "assert_notification_status",
+            "arguments": {
+              "notification_id": "notif_1",
+              "expected_status": "read"
+            },
+            "assert_value": true,
+            "message": null
+          }
+        ],
+        "communicate_info": null,
+        "nl_assertions": [
+          "The agent confirmed the task status was updated successfully"
+        ],
+        "reward_basis": [
+          "DB",
+          "ACTION",
+          "ENV_ASSERTION"
+        ]
+      },
+      "issues": null,
+      "required_documents": null,
+      "user_tools": null
+    },
+    {
+      "id": "impossible_task_1",
+      "description": {
+        "purpose": "Test delete_task functionality",
+        "relevant_policies": null,
+        "notes": "Asks the agent to delete a task."
+      },
+      "user_scenario": {
+        "persona": "Professional and direct communicator who writes in a clear and concise style",
+        "instructions": "You want to delete all your current tasks."
+      },
+      "ticket": "User needs to delete all their current tasks.",
+      "initial_state": null,
+      "evaluation_criteria": {
+        "actions": [
+          {
+            "action_id": "transfer_1",
+            "requestor": "assistant",
+            "name": "transfer_to_human_agents",
+            "arguments": {
+              "summary": "User needs to delete all their current tasks. This is not possible to do with the tools available."
+            },
+            "info": "Transfer the user to a human agent",
+            "compare_args": []
+          }
+        ],
+        "env_assertions": null,
+        "communicate_info": null,
+        "nl_assertions": null,
+        "reward_basis": [
+          "DB",
+          "ACTION"
+        ]
+      },
+      "issues": null,
+      "required_documents": null,
+      "user_tools": null
+    }
+  ],
+  "simulations": [
+    {
+      "id": "fb1b2ba3-95c7-4b96-947b-e61e5555d110",
+      "task_id": "create_task_1",
+      "timestamp": "2026-06-29T23:37:50.671405",
+      "start_time": "2026-06-29T23:37:50.671405",
+      "end_time": "2026-06-29T23:37:50.671405",
+      "duration": 0.0,
+      "termination_reason": "infrastructure_error",
+      "agent_cost": null,
+      "user_cost": null,
+      "reward_info": null,
+      "messages": [],
+      "ticks": null,
+      "trial": 0,
+      "seed": 626729,
+      "mode": "half_duplex",
+      "speech_environment": null,
+      "review": null,
+      "user_only_review": null,
+      "info": {
+        "error": "litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set",
+        "error_type": "BadRequestError",
+        "error_traceback": "Traceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 851, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 779, in completion\n    ) = self.make_sync_openai_chat_completion_request(\n        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        openai_client=openai_client,\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<2 lines>...\n        logging_obj=logging_obj,\n        ^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/logging_utils.py\", line 344, in sync_wrapper\n    result = func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 502, in make_sync_openai_chat_completion_request\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 477, in make_sync_openai_chat_completion_request\n    raw_response = openai_client.chat.completions.with_raw_response.create(\n        **data, timeout=timeout\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_legacy_response.py\", line 367, in wrapped\n    return cast(LegacyAPIResponse[R], func(*args, **kwargs))\n                                      ~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_utils/_utils.py\", line 298, in wrapper\n    return func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/resources/chat/completions/completions.py\", line 1251, in create\n    return self._post(\n           ~~~~~~~~~~^\n        \"/chat/completions\",\n        ^^^^^^^^^^^^^^^^^^^^\n    ...<52 lines>...\n        stream_cls=Stream[ChatCompletionChunk],\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1332, in post\n    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))\n                           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1105, in request\n    raise self._make_status_error_from_response(err.response) from None\nopenai.BadRequestError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2698, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2670, in completion\n    response = openai_chat_completions.completion(\n        model=model,\n    ...<16 lines>...\n        shared_session=shared_session,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 862, in completion\n    raise OpenAIError(\n    ...<4 lines>...\n    )\nlitellm.llms.openai.common_utils.OpenAIError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/progress.py\", line 75, in run_with_retry\n    simulation = run_fn()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 658, in _execute\n    return run_single_task(\n        config,\n    ...<12 lines>...\n        hallucination_feedback=hallucination_feedback,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 419, in run_single_task\n    simulation = run_simulation(\n        orchestrator, evaluation_type=evaluation_type, env_kwargs=env_kwargs\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/simulation.py\", line 59, in run_simulation\n    simulation = orchestrator.run()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 280, in run\n    self.step()\n    ~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 841, in step\n    user_msg, self.user_state = self.user.generate_next_message(\n                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        self.message, self.user_state\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 201, in generate_next_message\n    user_message = self._generate_next_message(message, state)\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 235, in _generate_next_message\n    assistant_message = generate(\n        model=self.llm,\n    ...<3 lines>...\n        **self.llm_args,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 418, in generate\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 409, in generate\n    response = completion(\n        model=model,\n    ...<3 lines>...\n        **kwargs,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1720, in wrapper\n    return litellm.completion_with_retries(*args, **kwargs)\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4449, in completion_with_retries\n    return retryer(original_function, *args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 470, in __call__\n    do = self.iter(retry_state=retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 371, in iter\n    result = action(retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 413, in exc_check\n    raise retry_exc.reraise()\n          ~~~~~~~~~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 184, in reraise\n    raise self.last_attempt.result()\n          ~~~~~~~~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 449, in result\n    return self.__get_result()\n           ~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 473, in __call__\n    result = fn(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1775, in wrapper\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n",
+        "failed_after_attempts": 1
+      },
+      "auth_classification": null,
+      "hallucination_retries_used": 0,
+      "hallucination_check": null,
+      "provider_session_id": null,
+      "policy": null,
+      "effect_timeline": null
+    },
+    {
+      "id": "2622805c-80b4-4285-8127-78dc804abd46",
+      "task_id": "create_task_1_with_env_assertions",
+      "timestamp": "2026-06-29T23:37:50.753275",
+      "start_time": "2026-06-29T23:37:50.753275",
+      "end_time": "2026-06-29T23:37:50.753275",
+      "duration": 0.0,
+      "termination_reason": "infrastructure_error",
+      "agent_cost": null,
+      "user_cost": null,
+      "reward_info": null,
+      "messages": [],
+      "ticks": null,
+      "trial": 0,
+      "seed": 626729,
+      "mode": "half_duplex",
+      "speech_environment": null,
+      "review": null,
+      "user_only_review": null,
+      "info": {
+        "error": "litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set",
+        "error_type": "BadRequestError",
+        "error_traceback": "Traceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 851, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 779, in completion\n    ) = self.make_sync_openai_chat_completion_request(\n        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        openai_client=openai_client,\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<2 lines>...\n        logging_obj=logging_obj,\n        ^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/logging_utils.py\", line 344, in sync_wrapper\n    result = func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 502, in make_sync_openai_chat_completion_request\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 477, in make_sync_openai_chat_completion_request\n    raw_response = openai_client.chat.completions.with_raw_response.create(\n        **data, timeout=timeout\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_legacy_response.py\", line 367, in wrapped\n    return cast(LegacyAPIResponse[R], func(*args, **kwargs))\n                                      ~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_utils/_utils.py\", line 298, in wrapper\n    return func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/resources/chat/completions/completions.py\", line 1251, in create\n    return self._post(\n           ~~~~~~~~~~^\n        \"/chat/completions\",\n        ^^^^^^^^^^^^^^^^^^^^\n    ...<52 lines>...\n        stream_cls=Stream[ChatCompletionChunk],\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1332, in post\n    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))\n                           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1105, in request\n    raise self._make_status_error_from_response(err.response) from None\nopenai.BadRequestError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2698, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2670, in completion\n    response = openai_chat_completions.completion(\n        model=model,\n    ...<16 lines>...\n        shared_session=shared_session,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 862, in completion\n    raise OpenAIError(\n    ...<4 lines>...\n    )\nlitellm.llms.openai.common_utils.OpenAIError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/progress.py\", line 75, in run_with_retry\n    simulation = run_fn()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 658, in _execute\n    return run_single_task(\n        config,\n    ...<12 lines>...\n        hallucination_feedback=hallucination_feedback,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 419, in run_single_task\n    simulation = run_simulation(\n        orchestrator, evaluation_type=evaluation_type, env_kwargs=env_kwargs\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/simulation.py\", line 59, in run_simulation\n    simulation = orchestrator.run()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 280, in run\n    self.step()\n    ~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 841, in step\n    user_msg, self.user_state = self.user.generate_next_message(\n                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        self.message, self.user_state\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 201, in generate_next_message\n    user_message = self._generate_next_message(message, state)\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 235, in _generate_next_message\n    assistant_message = generate(\n        model=self.llm,\n    ...<3 lines>...\n        **self.llm_args,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 418, in generate\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 409, in generate\n    response = completion(\n        model=model,\n    ...<3 lines>...\n        **kwargs,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1720, in wrapper\n    return litellm.completion_with_retries(*args, **kwargs)\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4449, in completion_with_retries\n    return retryer(original_function, *args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 470, in __call__\n    do = self.iter(retry_state=retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 371, in iter\n    result = action(retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 413, in exc_check\n    raise retry_exc.reraise()\n          ~~~~~~~~~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 184, in reraise\n    raise self.last_attempt.result()\n          ~~~~~~~~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 449, in result\n    return self.__get_result()\n           ~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 473, in __call__\n    result = fn(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1775, in wrapper\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n",
+        "failed_after_attempts": 1
+      },
+      "auth_classification": null,
+      "hallucination_retries_used": 0,
+      "hallucination_check": null,
+      "provider_session_id": null,
+      "policy": null,
+      "effect_timeline": null
+    },
+    {
+      "id": "7d633538-2f01-4df6-89f7-4469a15890b9",
+      "task_id": "create_task_1_nl_eval",
+      "timestamp": "2026-06-29T23:37:50.835331",
+      "start_time": "2026-06-29T23:37:50.835331",
+      "end_time": "2026-06-29T23:37:50.835331",
+      "duration": 0.0,
+      "termination_reason": "infrastructure_error",
+      "agent_cost": null,
+      "user_cost": null,
+      "reward_info": null,
+      "messages": [],
+      "ticks": null,
+      "trial": 0,
+      "seed": 626729,
+      "mode": "half_duplex",
+      "speech_environment": null,
+      "review": null,
+      "user_only_review": null,
+      "info": {
+        "error": "litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set",
+        "error_type": "BadRequestError",
+        "error_traceback": "Traceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 851, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 779, in completion\n    ) = self.make_sync_openai_chat_completion_request(\n        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        openai_client=openai_client,\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<2 lines>...\n        logging_obj=logging_obj,\n        ^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/logging_utils.py\", line 344, in sync_wrapper\n    result = func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 502, in make_sync_openai_chat_completion_request\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 477, in make_sync_openai_chat_completion_request\n    raw_response = openai_client.chat.completions.with_raw_response.create(\n        **data, timeout=timeout\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_legacy_response.py\", line 367, in wrapped\n    return cast(LegacyAPIResponse[R], func(*args, **kwargs))\n                                      ~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_utils/_utils.py\", line 298, in wrapper\n    return func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/resources/chat/completions/completions.py\", line 1251, in create\n    return self._post(\n           ~~~~~~~~~~^\n        \"/chat/completions\",\n        ^^^^^^^^^^^^^^^^^^^^\n    ...<52 lines>...\n        stream_cls=Stream[ChatCompletionChunk],\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1332, in post\n    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))\n                           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1105, in request\n    raise self._make_status_error_from_response(err.response) from None\nopenai.BadRequestError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2698, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2670, in completion\n    response = openai_chat_completions.completion(\n        model=model,\n    ...<16 lines>...\n        shared_session=shared_session,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 862, in completion\n    raise OpenAIError(\n    ...<4 lines>...\n    )\nlitellm.llms.openai.common_utils.OpenAIError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/progress.py\", line 75, in run_with_retry\n    simulation = run_fn()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 658, in _execute\n    return run_single_task(\n        config,\n    ...<12 lines>...\n        hallucination_feedback=hallucination_feedback,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 419, in run_single_task\n    simulation = run_simulation(\n        orchestrator, evaluation_type=evaluation_type, env_kwargs=env_kwargs\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/simulation.py\", line 59, in run_simulation\n    simulation = orchestrator.run()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 280, in run\n    self.step()\n    ~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 841, in step\n    user_msg, self.user_state = self.user.generate_next_message(\n                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        self.message, self.user_state\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 201, in generate_next_message\n    user_message = self._generate_next_message(message, state)\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 235, in _generate_next_message\n    assistant_message = generate(\n        model=self.llm,\n    ...<3 lines>...\n        **self.llm_args,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 418, in generate\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 409, in generate\n    response = completion(\n        model=model,\n    ...<3 lines>...\n        **kwargs,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1720, in wrapper\n    return litellm.completion_with_retries(*args, **kwargs)\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4449, in completion_with_retries\n    return retryer(original_function, *args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 470, in __call__\n    do = self.iter(retry_state=retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 371, in iter\n    result = action(retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 413, in exc_check\n    raise retry_exc.reraise()\n          ~~~~~~~~~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 184, in reraise\n    raise self.last_attempt.result()\n          ~~~~~~~~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 449, in result\n    return self.__get_result()\n           ~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 473, in __call__\n    result = fn(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1775, in wrapper\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n",
+        "failed_after_attempts": 1
+      },
+      "auth_classification": null,
+      "hallucination_retries_used": 0,
+      "hallucination_check": null,
+      "provider_session_id": null,
+      "policy": null,
+      "effect_timeline": null
+    },
+    {
+      "id": "57e9beab-00fa-477f-8207-e46d759d2cd8",
+      "task_id": "update_task_1",
+      "timestamp": "2026-06-29T23:37:50.915645",
+      "start_time": "2026-06-29T23:37:50.915645",
+      "end_time": "2026-06-29T23:37:50.915645",
+      "duration": 0.0,
+      "termination_reason": "infrastructure_error",
+      "agent_cost": null,
+      "user_cost": null,
+      "reward_info": null,
+      "messages": [],
+      "ticks": null,
+      "trial": 0,
+      "seed": 626729,
+      "mode": "half_duplex",
+      "speech_environment": null,
+      "review": null,
+      "user_only_review": null,
+      "info": {
+        "error": "litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set",
+        "error_type": "BadRequestError",
+        "error_traceback": "Traceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 851, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 779, in completion\n    ) = self.make_sync_openai_chat_completion_request(\n        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        openai_client=openai_client,\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<2 lines>...\n        logging_obj=logging_obj,\n        ^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/logging_utils.py\", line 344, in sync_wrapper\n    result = func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 502, in make_sync_openai_chat_completion_request\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 477, in make_sync_openai_chat_completion_request\n    raw_response = openai_client.chat.completions.with_raw_response.create(\n        **data, timeout=timeout\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_legacy_response.py\", line 367, in wrapped\n    return cast(LegacyAPIResponse[R], func(*args, **kwargs))\n                                      ~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_utils/_utils.py\", line 298, in wrapper\n    return func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/resources/chat/completions/completions.py\", line 1251, in create\n    return self._post(\n           ~~~~~~~~~~^\n        \"/chat/completions\",\n        ^^^^^^^^^^^^^^^^^^^^\n    ...<52 lines>...\n        stream_cls=Stream[ChatCompletionChunk],\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1332, in post\n    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))\n                           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1105, in request\n    raise self._make_status_error_from_response(err.response) from None\nopenai.BadRequestError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2698, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2670, in completion\n    response = openai_chat_completions.completion(\n        model=model,\n    ...<16 lines>...\n        shared_session=shared_session,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 862, in completion\n    raise OpenAIError(\n    ...<4 lines>...\n    )\nlitellm.llms.openai.common_utils.OpenAIError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/progress.py\", line 75, in run_with_retry\n    simulation = run_fn()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 658, in _execute\n    return run_single_task(\n        config,\n    ...<12 lines>...\n        hallucination_feedback=hallucination_feedback,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 419, in run_single_task\n    simulation = run_simulation(\n        orchestrator, evaluation_type=evaluation_type, env_kwargs=env_kwargs\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/simulation.py\", line 59, in run_simulation\n    simulation = orchestrator.run()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 280, in run\n    self.step()\n    ~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 841, in step\n    user_msg, self.user_state = self.user.generate_next_message(\n                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        self.message, self.user_state\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 201, in generate_next_message\n    user_message = self._generate_next_message(message, state)\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 235, in _generate_next_message\n    assistant_message = generate(\n        model=self.llm,\n    ...<3 lines>...\n        **self.llm_args,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 418, in generate\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 409, in generate\n    response = completion(\n        model=model,\n    ...<3 lines>...\n        **kwargs,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1720, in wrapper\n    return litellm.completion_with_retries(*args, **kwargs)\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4449, in completion_with_retries\n    return retryer(original_function, *args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 470, in __call__\n    do = self.iter(retry_state=retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 371, in iter\n    result = action(retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 413, in exc_check\n    raise retry_exc.reraise()\n          ~~~~~~~~~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 184, in reraise\n    raise self.last_attempt.result()\n          ~~~~~~~~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 449, in result\n    return self.__get_result()\n           ~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 473, in __call__\n    result = fn(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1775, in wrapper\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n",
+        "failed_after_attempts": 1
+      },
+      "auth_classification": null,
+      "hallucination_retries_used": 0,
+      "hallucination_check": null,
+      "provider_session_id": null,
+      "policy": null,
+      "effect_timeline": null
+    },
+    {
+      "id": "7b46239b-4b6d-49e4-8cd0-b9cace634299",
+      "task_id": "update_task_with_message_history",
+      "timestamp": "2026-06-29T23:37:50.998027",
+      "start_time": "2026-06-29T23:37:50.998027",
+      "end_time": "2026-06-29T23:37:50.998027",
+      "duration": 0.0,
+      "termination_reason": "infrastructure_error",
+      "agent_cost": null,
+      "user_cost": null,
+      "reward_info": null,
+      "messages": [],
+      "ticks": null,
+      "trial": 0,
+      "seed": 626729,
+      "mode": "half_duplex",
+      "speech_environment": null,
+      "review": null,
+      "user_only_review": null,
+      "info": {
+        "error": "litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set",
+        "error_type": "BadRequestError",
+        "error_traceback": "Traceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 851, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 779, in completion\n    ) = self.make_sync_openai_chat_completion_request(\n        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        openai_client=openai_client,\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<2 lines>...\n        logging_obj=logging_obj,\n        ^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/logging_utils.py\", line 344, in sync_wrapper\n    result = func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 502, in make_sync_openai_chat_completion_request\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 477, in make_sync_openai_chat_completion_request\n    raw_response = openai_client.chat.completions.with_raw_response.create(\n        **data, timeout=timeout\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_legacy_response.py\", line 367, in wrapped\n    return cast(LegacyAPIResponse[R], func(*args, **kwargs))\n                                      ~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_utils/_utils.py\", line 298, in wrapper\n    return func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/resources/chat/completions/completions.py\", line 1251, in create\n    return self._post(\n           ~~~~~~~~~~^\n        \"/chat/completions\",\n        ^^^^^^^^^^^^^^^^^^^^\n    ...<52 lines>...\n        stream_cls=Stream[ChatCompletionChunk],\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1332, in post\n    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))\n                           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1105, in request\n    raise self._make_status_error_from_response(err.response) from None\nopenai.BadRequestError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2698, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2670, in completion\n    response = openai_chat_completions.completion(\n        model=model,\n    ...<16 lines>...\n        shared_session=shared_session,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 862, in completion\n    raise OpenAIError(\n    ...<4 lines>...\n    )\nlitellm.llms.openai.common_utils.OpenAIError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/progress.py\", line 75, in run_with_retry\n    simulation = run_fn()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 658, in _execute\n    return run_single_task(\n        config,\n    ...<12 lines>...\n        hallucination_feedback=hallucination_feedback,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 419, in run_single_task\n    simulation = run_simulation(\n        orchestrator, evaluation_type=evaluation_type, env_kwargs=env_kwargs\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/simulation.py\", line 59, in run_simulation\n    simulation = orchestrator.run()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 280, in run\n    self.step()\n    ~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 841, in step\n    user_msg, self.user_state = self.user.generate_next_message(\n                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        self.message, self.user_state\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 201, in generate_next_message\n    user_message = self._generate_next_message(message, state)\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 235, in _generate_next_message\n    assistant_message = generate(\n        model=self.llm,\n    ...<3 lines>...\n        **self.llm_args,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 418, in generate\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 409, in generate\n    response = completion(\n        model=model,\n    ...<3 lines>...\n        **kwargs,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1720, in wrapper\n    return litellm.completion_with_retries(*args, **kwargs)\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4449, in completion_with_retries\n    return retryer(original_function, *args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 470, in __call__\n    do = self.iter(retry_state=retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 371, in iter\n    result = action(retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 413, in exc_check\n    raise retry_exc.reraise()\n          ~~~~~~~~~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 184, in reraise\n    raise self.last_attempt.result()\n          ~~~~~~~~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 449, in result\n    return self.__get_result()\n           ~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 473, in __call__\n    result = fn(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1775, in wrapper\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n",
+        "failed_after_attempts": 1
+      },
+      "auth_classification": null,
+      "hallucination_retries_used": 0,
+      "hallucination_check": null,
+      "provider_session_id": null,
+      "policy": null,
+      "effect_timeline": null
+    },
+    {
+      "id": "5061a32e-9500-4adc-8e2e-40f3b8d5d8d0",
+      "task_id": "update_task_with_initialization_data",
+      "timestamp": "2026-06-29T23:37:51.084504",
+      "start_time": "2026-06-29T23:37:51.084504",
+      "end_time": "2026-06-29T23:37:51.084504",
+      "duration": 0.0,
+      "termination_reason": "infrastructure_error",
+      "agent_cost": null,
+      "user_cost": null,
+      "reward_info": null,
+      "messages": [],
+      "ticks": null,
+      "trial": 0,
+      "seed": 626729,
+      "mode": "half_duplex",
+      "speech_environment": null,
+      "review": null,
+      "user_only_review": null,
+      "info": {
+        "error": "litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set",
+        "error_type": "BadRequestError",
+        "error_traceback": "Traceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 851, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 779, in completion\n    ) = self.make_sync_openai_chat_completion_request(\n        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        openai_client=openai_client,\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<2 lines>...\n        logging_obj=logging_obj,\n        ^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/logging_utils.py\", line 344, in sync_wrapper\n    result = func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 502, in make_sync_openai_chat_completion_request\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 477, in make_sync_openai_chat_completion_request\n    raw_response = openai_client.chat.completions.with_raw_response.create(\n        **data, timeout=timeout\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_legacy_response.py\", line 367, in wrapped\n    return cast(LegacyAPIResponse[R], func(*args, **kwargs))\n                                      ~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_utils/_utils.py\", line 298, in wrapper\n    return func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/resources/chat/completions/completions.py\", line 1251, in create\n    return self._post(\n           ~~~~~~~~~~^\n        \"/chat/completions\",\n        ^^^^^^^^^^^^^^^^^^^^\n    ...<52 lines>...\n        stream_cls=Stream[ChatCompletionChunk],\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1332, in post\n    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))\n                           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1105, in request\n    raise self._make_status_error_from_response(err.response) from None\nopenai.BadRequestError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2698, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2670, in completion\n    response = openai_chat_completions.completion(\n        model=model,\n    ...<16 lines>...\n        shared_session=shared_session,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 862, in completion\n    raise OpenAIError(\n    ...<4 lines>...\n    )\nlitellm.llms.openai.common_utils.OpenAIError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/progress.py\", line 75, in run_with_retry\n    simulation = run_fn()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 658, in _execute\n    return run_single_task(\n        config,\n    ...<12 lines>...\n        hallucination_feedback=hallucination_feedback,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 419, in run_single_task\n    simulation = run_simulation(\n        orchestrator, evaluation_type=evaluation_type, env_kwargs=env_kwargs\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/simulation.py\", line 59, in run_simulation\n    simulation = orchestrator.run()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 280, in run\n    self.step()\n    ~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 841, in step\n    user_msg, self.user_state = self.user.generate_next_message(\n                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        self.message, self.user_state\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 201, in generate_next_message\n    user_message = self._generate_next_message(message, state)\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 235, in _generate_next_message\n    assistant_message = generate(\n        model=self.llm,\n    ...<3 lines>...\n        **self.llm_args,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 418, in generate\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 409, in generate\n    response = completion(\n        model=model,\n    ...<3 lines>...\n        **kwargs,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1720, in wrapper\n    return litellm.completion_with_retries(*args, **kwargs)\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4449, in completion_with_retries\n    return retryer(original_function, *args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 470, in __call__\n    do = self.iter(retry_state=retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 371, in iter\n    result = action(retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 413, in exc_check\n    raise retry_exc.reraise()\n          ~~~~~~~~~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 184, in reraise\n    raise self.last_attempt.result()\n          ~~~~~~~~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 449, in result\n    return self.__get_result()\n           ~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 473, in __call__\n    result = fn(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1775, in wrapper\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n",
+        "failed_after_attempts": 1
+      },
+      "auth_classification": null,
+      "hallucination_retries_used": 0,
+      "hallucination_check": null,
+      "provider_session_id": null,
+      "policy": null,
+      "effect_timeline": null
+    },
+    {
+      "id": "7b33a9cb-188e-48a7-a856-96df1cabb218",
+      "task_id": "update_task_with_initialization_actions",
+      "timestamp": "2026-06-29T23:37:51.164799",
+      "start_time": "2026-06-29T23:37:51.164799",
+      "end_time": "2026-06-29T23:37:51.164799",
+      "duration": 0.0,
+      "termination_reason": "infrastructure_error",
+      "agent_cost": null,
+      "user_cost": null,
+      "reward_info": null,
+      "messages": [],
+      "ticks": null,
+      "trial": 0,
+      "seed": 626729,
+      "mode": "half_duplex",
+      "speech_environment": null,
+      "review": null,
+      "user_only_review": null,
+      "info": {
+        "error": "litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set",
+        "error_type": "BadRequestError",
+        "error_traceback": "Traceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 851, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 779, in completion\n    ) = self.make_sync_openai_chat_completion_request(\n        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        openai_client=openai_client,\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<2 lines>...\n        logging_obj=logging_obj,\n        ^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/logging_utils.py\", line 344, in sync_wrapper\n    result = func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 502, in make_sync_openai_chat_completion_request\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 477, in make_sync_openai_chat_completion_request\n    raw_response = openai_client.chat.completions.with_raw_response.create(\n        **data, timeout=timeout\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_legacy_response.py\", line 367, in wrapped\n    return cast(LegacyAPIResponse[R], func(*args, **kwargs))\n                                      ~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_utils/_utils.py\", line 298, in wrapper\n    return func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/resources/chat/completions/completions.py\", line 1251, in create\n    return self._post(\n           ~~~~~~~~~~^\n        \"/chat/completions\",\n        ^^^^^^^^^^^^^^^^^^^^\n    ...<52 lines>...\n        stream_cls=Stream[ChatCompletionChunk],\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1332, in post\n    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))\n                           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1105, in request\n    raise self._make_status_error_from_response(err.response) from None\nopenai.BadRequestError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2698, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2670, in completion\n    response = openai_chat_completions.completion(\n        model=model,\n    ...<16 lines>...\n        shared_session=shared_session,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 862, in completion\n    raise OpenAIError(\n    ...<4 lines>...\n    )\nlitellm.llms.openai.common_utils.OpenAIError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/progress.py\", line 75, in run_with_retry\n    simulation = run_fn()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 658, in _execute\n    return run_single_task(\n        config,\n    ...<12 lines>...\n        hallucination_feedback=hallucination_feedback,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 419, in run_single_task\n    simulation = run_simulation(\n        orchestrator, evaluation_type=evaluation_type, env_kwargs=env_kwargs\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/simulation.py\", line 59, in run_simulation\n    simulation = orchestrator.run()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 280, in run\n    self.step()\n    ~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 841, in step\n    user_msg, self.user_state = self.user.generate_next_message(\n                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        self.message, self.user_state\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 201, in generate_next_message\n    user_message = self._generate_next_message(message, state)\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 235, in _generate_next_message\n    assistant_message = generate(\n        model=self.llm,\n    ...<3 lines>...\n        **self.llm_args,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 418, in generate\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 409, in generate\n    response = completion(\n        model=model,\n    ...<3 lines>...\n        **kwargs,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1720, in wrapper\n    return litellm.completion_with_retries(*args, **kwargs)\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4449, in completion_with_retries\n    return retryer(original_function, *args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 470, in __call__\n    do = self.iter(retry_state=retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 371, in iter\n    result = action(retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 413, in exc_check\n    raise retry_exc.reraise()\n          ~~~~~~~~~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 184, in reraise\n    raise self.last_attempt.result()\n          ~~~~~~~~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 449, in result\n    return self.__get_result()\n           ~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 473, in __call__\n    result = fn(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1775, in wrapper\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n",
+        "failed_after_attempts": 1
+      },
+      "auth_classification": null,
+      "hallucination_retries_used": 0,
+      "hallucination_check": null,
+      "provider_session_id": null,
+      "policy": null,
+      "effect_timeline": null
+    },
+    {
+      "id": "1193a3d6-ce17-48c1-9b5e-cb152cecabca",
+      "task_id": "update_task_with_history_and_env_assertions",
+      "timestamp": "2026-06-29T23:37:51.247654",
+      "start_time": "2026-06-29T23:37:51.247654",
+      "end_time": "2026-06-29T23:37:51.247654",
+      "duration": 0.0,
+      "termination_reason": "infrastructure_error",
+      "agent_cost": null,
+      "user_cost": null,
+      "reward_info": null,
+      "messages": [],
+      "ticks": null,
+      "trial": 0,
+      "seed": 626729,
+      "mode": "half_duplex",
+      "speech_environment": null,
+      "review": null,
+      "user_only_review": null,
+      "info": {
+        "error": "litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set",
+        "error_type": "BadRequestError",
+        "error_traceback": "Traceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 851, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 779, in completion\n    ) = self.make_sync_openai_chat_completion_request(\n        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        openai_client=openai_client,\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<2 lines>...\n        logging_obj=logging_obj,\n        ^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/logging_utils.py\", line 344, in sync_wrapper\n    result = func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 502, in make_sync_openai_chat_completion_request\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 477, in make_sync_openai_chat_completion_request\n    raw_response = openai_client.chat.completions.with_raw_response.create(\n        **data, timeout=timeout\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_legacy_response.py\", line 367, in wrapped\n    return cast(LegacyAPIResponse[R], func(*args, **kwargs))\n                                      ~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_utils/_utils.py\", line 298, in wrapper\n    return func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/resources/chat/completions/completions.py\", line 1251, in create\n    return self._post(\n           ~~~~~~~~~~^\n        \"/chat/completions\",\n        ^^^^^^^^^^^^^^^^^^^^\n    ...<52 lines>...\n        stream_cls=Stream[ChatCompletionChunk],\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1332, in post\n    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))\n                           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1105, in request\n    raise self._make_status_error_from_response(err.response) from None\nopenai.BadRequestError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2698, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2670, in completion\n    response = openai_chat_completions.completion(\n        model=model,\n    ...<16 lines>...\n        shared_session=shared_session,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 862, in completion\n    raise OpenAIError(\n    ...<4 lines>...\n    )\nlitellm.llms.openai.common_utils.OpenAIError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/progress.py\", line 75, in run_with_retry\n    simulation = run_fn()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 658, in _execute\n    return run_single_task(\n        config,\n    ...<12 lines>...\n        hallucination_feedback=hallucination_feedback,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 419, in run_single_task\n    simulation = run_simulation(\n        orchestrator, evaluation_type=evaluation_type, env_kwargs=env_kwargs\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/simulation.py\", line 59, in run_simulation\n    simulation = orchestrator.run()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 280, in run\n    self.step()\n    ~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 841, in step\n    user_msg, self.user_state = self.user.generate_next_message(\n                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        self.message, self.user_state\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 201, in generate_next_message\n    user_message = self._generate_next_message(message, state)\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 235, in _generate_next_message\n    assistant_message = generate(\n        model=self.llm,\n    ...<3 lines>...\n        **self.llm_args,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 418, in generate\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 409, in generate\n    response = completion(\n        model=model,\n    ...<3 lines>...\n        **kwargs,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1720, in wrapper\n    return litellm.completion_with_retries(*args, **kwargs)\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4449, in completion_with_retries\n    return retryer(original_function, *args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 470, in __call__\n    do = self.iter(retry_state=retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 371, in iter\n    result = action(retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 413, in exc_check\n    raise retry_exc.reraise()\n          ~~~~~~~~~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 184, in reraise\n    raise self.last_attempt.result()\n          ~~~~~~~~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 449, in result\n    return self.__get_result()\n           ~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 473, in __call__\n    result = fn(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1775, in wrapper\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n",
+        "failed_after_attempts": 1
+      },
+      "auth_classification": null,
+      "hallucination_retries_used": 0,
+      "hallucination_check": null,
+      "provider_session_id": null,
+      "policy": null,
+      "effect_timeline": null
+    },
+    {
+      "id": "49f395fa-533d-4bd0-b6c5-06de8f689744",
+      "task_id": "update_task_with_user_tools",
+      "timestamp": "2026-06-29T23:37:51.329098",
+      "start_time": "2026-06-29T23:37:51.329098",
+      "end_time": "2026-06-29T23:37:51.329098",
+      "duration": 0.0,
+      "termination_reason": "infrastructure_error",
+      "agent_cost": null,
+      "user_cost": null,
+      "reward_info": null,
+      "messages": [],
+      "ticks": null,
+      "trial": 0,
+      "seed": 626729,
+      "mode": "half_duplex",
+      "speech_environment": null,
+      "review": null,
+      "user_only_review": null,
+      "info": {
+        "error": "litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set",
+        "error_type": "BadRequestError",
+        "error_traceback": "Traceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 851, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 779, in completion\n    ) = self.make_sync_openai_chat_completion_request(\n        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        openai_client=openai_client,\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<2 lines>...\n        logging_obj=logging_obj,\n        ^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/logging_utils.py\", line 344, in sync_wrapper\n    result = func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 502, in make_sync_openai_chat_completion_request\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 477, in make_sync_openai_chat_completion_request\n    raw_response = openai_client.chat.completions.with_raw_response.create(\n        **data, timeout=timeout\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_legacy_response.py\", line 367, in wrapped\n    return cast(LegacyAPIResponse[R], func(*args, **kwargs))\n                                      ~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_utils/_utils.py\", line 298, in wrapper\n    return func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/resources/chat/completions/completions.py\", line 1251, in create\n    return self._post(\n           ~~~~~~~~~~^\n        \"/chat/completions\",\n        ^^^^^^^^^^^^^^^^^^^^\n    ...<52 lines>...\n        stream_cls=Stream[ChatCompletionChunk],\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1332, in post\n    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))\n                           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1105, in request\n    raise self._make_status_error_from_response(err.response) from None\nopenai.BadRequestError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2698, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2670, in completion\n    response = openai_chat_completions.completion(\n        model=model,\n    ...<16 lines>...\n        shared_session=shared_session,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 862, in completion\n    raise OpenAIError(\n    ...<4 lines>...\n    )\nlitellm.llms.openai.common_utils.OpenAIError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/progress.py\", line 75, in run_with_retry\n    simulation = run_fn()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 658, in _execute\n    return run_single_task(\n        config,\n    ...<12 lines>...\n        hallucination_feedback=hallucination_feedback,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 419, in run_single_task\n    simulation = run_simulation(\n        orchestrator, evaluation_type=evaluation_type, env_kwargs=env_kwargs\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/simulation.py\", line 59, in run_simulation\n    simulation = orchestrator.run()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 280, in run\n    self.step()\n    ~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 841, in step\n    user_msg, self.user_state = self.user.generate_next_message(\n                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        self.message, self.user_state\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 201, in generate_next_message\n    user_message = self._generate_next_message(message, state)\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 235, in _generate_next_message\n    assistant_message = generate(\n        model=self.llm,\n    ...<3 lines>...\n        **self.llm_args,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 418, in generate\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 409, in generate\n    response = completion(\n        model=model,\n    ...<3 lines>...\n        **kwargs,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1720, in wrapper\n    return litellm.completion_with_retries(*args, **kwargs)\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4449, in completion_with_retries\n    return retryer(original_function, *args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 470, in __call__\n    do = self.iter(retry_state=retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 371, in iter\n    result = action(retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 413, in exc_check\n    raise retry_exc.reraise()\n          ~~~~~~~~~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 184, in reraise\n    raise self.last_attempt.result()\n          ~~~~~~~~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 449, in result\n    return self.__get_result()\n           ~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 473, in __call__\n    result = fn(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1775, in wrapper\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n",
+        "failed_after_attempts": 1
+      },
+      "auth_classification": null,
+      "hallucination_retries_used": 0,
+      "hallucination_check": null,
+      "provider_session_id": null,
+      "policy": null,
+      "effect_timeline": null
+    },
+    {
+      "id": "6ba18e7b-819a-42b1-b504-1cb0ea79d00b",
+      "task_id": "impossible_task_1",
+      "timestamp": "2026-06-29T23:37:51.412058",
+      "start_time": "2026-06-29T23:37:51.412058",
+      "end_time": "2026-06-29T23:37:51.412058",
+      "duration": 0.0,
+      "termination_reason": "infrastructure_error",
+      "agent_cost": null,
+      "user_cost": null,
+      "reward_info": null,
+      "messages": [],
+      "ticks": null,
+      "trial": 0,
+      "seed": 626729,
+      "mode": "half_duplex",
+      "speech_environment": null,
+      "review": null,
+      "user_only_review": null,
+      "info": {
+        "error": "litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set",
+        "error_type": "BadRequestError",
+        "error_traceback": "Traceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 851, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 779, in completion\n    ) = self.make_sync_openai_chat_completion_request(\n        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        openai_client=openai_client,\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<2 lines>...\n        logging_obj=logging_obj,\n        ^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/logging_utils.py\", line 344, in sync_wrapper\n    result = func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 502, in make_sync_openai_chat_completion_request\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 477, in make_sync_openai_chat_completion_request\n    raw_response = openai_client.chat.completions.with_raw_response.create(\n        **data, timeout=timeout\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_legacy_response.py\", line 367, in wrapped\n    return cast(LegacyAPIResponse[R], func(*args, **kwargs))\n                                      ~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_utils/_utils.py\", line 298, in wrapper\n    return func(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/resources/chat/completions/completions.py\", line 1251, in create\n    return self._post(\n           ~~~~~~~~~~^\n        \"/chat/completions\",\n        ^^^^^^^^^^^^^^^^^^^^\n    ...<52 lines>...\n        stream_cls=Stream[ChatCompletionChunk],\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1332, in post\n    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))\n                           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/openai/_base_client.py\", line 1105, in request\n    raise self._make_status_error_from_response(err.response) from None\nopenai.BadRequestError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2698, in completion\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 2670, in completion\n    response = openai_chat_completions.completion(\n        model=model,\n    ...<16 lines>...\n        shared_session=shared_session,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/llms/openai/openai.py\", line 862, in completion\n    raise OpenAIError(\n    ...<4 lines>...\n    )\nlitellm.llms.openai.common_utils.OpenAIError: Error code: 400 - {'error': {'message': '\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set', 'type': 'BadRequestError', 'param': None, 'code': 400}}\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/progress.py\", line 75, in run_with_retry\n    simulation = run_fn()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 658, in _execute\n    return run_single_task(\n        config,\n    ...<12 lines>...\n        hallucination_feedback=hallucination_feedback,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/batch.py\", line 419, in run_single_task\n    simulation = run_simulation(\n        orchestrator, evaluation_type=evaluation_type, env_kwargs=env_kwargs\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/runner/simulation.py\", line 59, in run_simulation\n    simulation = orchestrator.run()\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 280, in run\n    self.step()\n    ~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/orchestrator/orchestrator.py\", line 841, in step\n    user_msg, self.user_state = self.user.generate_next_message(\n                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        self.message, self.user_state\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 201, in generate_next_message\n    user_message = self._generate_next_message(message, state)\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/user/user_simulator.py\", line 235, in _generate_next_message\n    assistant_message = generate(\n        model=self.llm,\n    ...<3 lines>...\n        **self.llm_args,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 418, in generate\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/src/tau2/utils/llm_utils.py\", line 409, in generate\n    response = completion(\n        model=model,\n    ...<3 lines>...\n        **kwargs,\n    )\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1720, in wrapper\n    return litellm.completion_with_retries(*args, **kwargs)\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4449, in completion_with_retries\n    return retryer(original_function, *args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 470, in __call__\n    do = self.iter(retry_state=retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 371, in iter\n    result = action(retry_state)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 413, in exc_check\n    raise retry_exc.reraise()\n          ~~~~~~~~~~~~~~~~~^^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 184, in reraise\n    raise self.last_attempt.result()\n          ~~~~~~~~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 449, in result\n    return self.__get_result()\n           ~~~~~~~~~~~~~~~~~^^\n  File \"/home/yuhongjie/miniconda3/lib/python3.13/concurrent/futures/_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/tenacity/__init__.py\", line 473, in __call__\n    result = fn(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1775, in wrapper\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1596, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/main.py\", line 4411, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2456, in exception_type\n    raise e\n  File \"/data1/yuhongjie2/tau2-bench/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 534, in exception_type\n    raise BadRequestError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.BadRequestError: litellm.BadRequestError: OpenAIException - \"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\n",
+        "failed_after_attempts": 1
+      },
+      "auth_classification": null,
+      "hallucination_retries_used": 0,
+      "hallucination_check": null,
+      "provider_session_id": null,
+      "policy": null,
+      "effect_timeline": null
+    }
+  ],
+  "simulation_index": null
+}

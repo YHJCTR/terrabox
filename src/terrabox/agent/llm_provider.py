@@ -21,8 +21,14 @@ import json
 import logging
 import os
 import re
+import random
+import fcntl
+import socket
+import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -91,6 +97,180 @@ def remote_llm_timeout_seconds() -> int:
         return max(30, int(raw))
     except (TypeError, ValueError):
         return 120
+
+
+_REMOTE_RETRYABLE_MARKERS = (
+    "rate limit",
+    "ratelimit",
+    "too many requests",
+    "too_many_requests",
+    "request limit",
+    "throttle",
+    "throttled",
+    "temporarily unavailable",
+    "service unavailable",
+    "server overloaded",
+    "overloaded",
+    "timeout",
+    "timed out",
+    "read timed out",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "remote end closed",
+    "bad gateway",
+    "gateway timeout",
+    "api connection error",
+    "apiconnectionerror",
+    "api timeout error",
+    "apitimeouterror",
+    "econnreset",
+)
+
+_REMOTE_RETRYABLE_STATUS_RE = re.compile(
+    r"(?:"
+    r"http/\d(?:\.\d)?\s+|"
+    r"http\s+status\s+|"
+    r"status(?:_code)?['\"]?\s*[:=]\s*['\"]?|"
+    r"error\s+code\s*[:=]?\s*|"
+    r"code['\"]?\s*[:=]\s*['\"]?"
+    r")(408|409|425|429|500|502|503|504)\b",
+    re.IGNORECASE,
+)
+
+
+def is_retryable_remote_error_text(text: str) -> bool:
+    """Return True for provider/network errors worth retrying later.
+
+    This is intentionally text-based because many benchmark subprocesses wrap
+    OpenAI-compatible errors into stderr strings before the adapter sees them.
+    It should not match deterministic prompt/model failures such as context
+    limits or invalid tool schemas.
+    """
+    lower = str(text or "").lower()
+    if not lower:
+        return False
+    if any(
+        marker in lower
+        for marker in (
+            "context_length_exceeded",
+            "maximum context length",
+            "input tokens",
+            "reduce the length",
+            "invalid_request_error",
+            "unprocessableentity",
+            "badrequesterror",
+        )
+    ):
+        return False
+    if any(marker in lower for marker in _REMOTE_RETRYABLE_MARKERS):
+        return True
+    # Do not match bare numbers like prices, ZIP codes, flight numbers, etc. A
+    # provider status code is retryable only when it appears in an HTTP/error
+    # context.
+    return bool(_REMOTE_RETRYABLE_STATUS_RE.search(str(text or "")))
+
+
+def is_retryable_remote_error(exc: BaseException | str) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code in {408, 409, 425, 429, 500, 502, 503, 504}:
+            return True
+    if isinstance(exc, (urllib.error.URLError, TimeoutError, socket.timeout)):
+        return True
+    return is_retryable_remote_error_text(repr(exc) if isinstance(exc, BaseException) else str(exc))
+
+
+def remote_llm_max_retries() -> int:
+    raw = (
+        os.environ.get("TERRABOX_REMOTE_LLM_MAX_RETRIES")
+        or _yaml_get("remote_llm_max_retries")
+        or "5"
+    )
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 5
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def remote_llm_min_interval_seconds(provider: str) -> float:
+    """Minimum gap between external-provider requests across processes.
+
+    This is intentionally configurable, not a permanent concurrency ban. Set
+    provider-specific env/yaml keys, or set the value to 0 to disable pacing.
+    LongCat defaults higher because AgentDojo single-worker rollouts can still
+    issue rapid multi-turn calls and trigger 429s.
+    """
+
+    provider = (provider or "remote").strip().lower()
+    raw = (
+        os.environ.get(f"TERRABOX_{provider.upper()}_MIN_INTERVAL_SECONDS")
+        or os.environ.get("TERRABOX_REMOTE_LLM_MIN_INTERVAL_SECONDS")
+        or _yaml_get(f"{provider}_min_interval_seconds")
+        or _yaml_get("remote_llm_min_interval_seconds")
+        or ("8.0" if provider == "longcat" else "1.0")
+    )
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 8.0 if provider == "longcat" else 1.0
+
+
+def _remote_llm_rate_lock_path(provider: str) -> Path:
+    provider = re.sub(r"[^a-zA-Z0-9_.-]+", "_", (provider or "remote").strip().lower())
+    explicit = os.environ.get("TERRABOX_REMOTE_LLM_RATE_LOCK")
+    if explicit:
+        return Path(explicit)
+    lock_dir = (
+        os.environ.get("TERRABOX_REMOTE_LLM_RATE_LOCK_DIR")
+        or _yaml_get("remote_llm_rate_lock_dir")
+        or str(_repo_root() / "tmp" / "service_locks")
+    )
+    return Path(lock_dir) / f"remote_llm_{provider}.lock"
+
+
+def _pace_remote_llm_request(provider: str) -> None:
+    interval = remote_llm_min_interval_seconds(provider)
+    if interval <= 0:
+        return
+    lock_path = _remote_llm_rate_lock_path(provider)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        handle.seek(0)
+        raw = handle.read().strip()
+        try:
+            last = float(raw) if raw else 0.0
+        except ValueError:
+            last = 0.0
+        now = time.monotonic()
+        wait_s = interval - (now - last)
+        if wait_s > 0:
+            time.sleep(wait_s)
+            now = time.monotonic()
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"{now:.6f}")
+        handle.flush()
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _retry_after_seconds(exc: BaseException) -> float | None:
+    if not isinstance(exc, urllib.error.HTTPError):
+        return None
+    try:
+        raw = exc.headers.get("Retry-After")
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass
@@ -214,8 +394,28 @@ class RemoteChatClient:
             self.spec.base_url + "/chat/completions", data=body,
             headers={"Content-Type": "application/json",
                      "Authorization": f"Bearer {self.spec.api_key}"})
-        with urllib.request.urlopen(req, timeout=remote_llm_timeout_seconds()) as r:  # 默认 opener → 用代理
-            data = json.loads(r.read().decode())
+        max_retries = remote_llm_max_retries()
+        for attempt in range(max_retries + 1):
+            try:
+                _pace_remote_llm_request(self.spec.name)
+                with urllib.request.urlopen(req, timeout=remote_llm_timeout_seconds()) as r:  # 默认 opener → 用代理
+                    data = json.loads(r.read().decode())
+                break
+            except Exception as exc:
+                if attempt >= max_retries or not is_retryable_remote_error(exc):
+                    raise
+                retry_after = _retry_after_seconds(exc)
+                if retry_after is None:
+                    retry_after = min(120.0, 2.0 ** attempt + random.uniform(0.5, 3.0))
+                logger.warning(
+                    "Remote LLM provider %s transient error on attempt %s/%s: %r; retrying in %.1fs",
+                    self.spec.name,
+                    attempt + 1,
+                    max_retries + 1,
+                    exc,
+                    retry_after,
+                )
+                time.sleep(retry_after)
         if data.get("usage"):
             self.cost.add(data["usage"])
         choice = data["choices"][0]

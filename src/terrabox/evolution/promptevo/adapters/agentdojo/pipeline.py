@@ -12,6 +12,7 @@ import json
 import os
 import random
 import re
+import shutil
 import subprocess
 import time
 import urllib.request
@@ -20,7 +21,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import Any
 
-from terrabox.agent.llm_provider import make_llm_client
+from terrabox.agent.llm_provider import is_retryable_remote_error_text, make_llm_client, resolve_provider
 from terrabox.evolution.promptevo.contrastive_optimizer import ContrastiveOptimizer
 from terrabox.evolution.promptevo.contrastive_sampler import default_render
 from terrabox.evolution.promptevo.loop import ContrastiveUpdater
@@ -48,6 +49,12 @@ NO_THINK_PATCH = "terrabox.evolution.promptevo.adapters.agentdojo.qwen_no_think"
 GPU_LANES = ((0, 9200), (1, 9201), (2, 9202), (3, 9203))
 ROLLOUT_LOCK_PATH = Path(__file__).resolve().parents[6] / "tmp" / "agentdojo_rollout.lock"
 SMOKE_OUTPUT_DIR = Path(__file__).resolve().parents[6] / "tmp" / "agentdojo_smoke"
+DEFAULT_API_WORKERS = 1
+DEFAULT_QUEUE_RETRIES = 12
+
+
+class QueueRetryLimitExceeded(RuntimeError):
+    """Raised when retryable provider failures outlive the queue retry cap."""
 
 
 def experiment_dir(name: str, output_dir: str = DEFAULT_AGENTDOJO_EXPERIMENTS_DIR) -> str:
@@ -67,6 +74,66 @@ def _read_status(path: Path) -> str:
         return str(json.loads(path.read_text(encoding="utf-8")).get("status") or "unknown")
     except (OSError, json.JSONDecodeError):
         return "invalid"
+
+
+def _queue_retry_limit(env_name: str, default: int = DEFAULT_QUEUE_RETRIES) -> int:
+    raw = os.getenv(env_name, str(default))
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+def _queue_retry_delay(attempt: int) -> float:
+    return min(300.0, 10.0 * max(1, attempt) + random.uniform(1.0, 8.0))
+
+
+def _job_failure_text(adapter_dir: Path, exc: BaseException) -> str:
+    parts = [repr(exc)]
+    for name in ("stderr.log", "stdout.log", "run_status.json"):
+        path = adapter_dir / name
+        if path.is_file():
+            try:
+                parts.append(path.read_text(encoding="utf-8", errors="ignore")[-12000:])
+            except OSError:
+                pass
+    return "\n".join(parts)
+
+
+def _agentdojo_result_has_retryable_provider_failure(path: Path) -> bool:
+    try:
+        row = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(row, dict):
+        return False
+    # AgentDojo and the OpenAI SDK can serialize provider failures in several
+    # places depending on where the exception was raised. Scan the compact JSON
+    # record, while the retry classifier excludes deterministic errors such as
+    # context_length_exceeded / invalid_request.
+    if is_retryable_remote_error_text(json.dumps(row, ensure_ascii=False)):
+        return True
+    return False
+
+
+def _job_has_retryable_provider_failure(adapter_dir: Path) -> bool:
+    if not adapter_dir.exists():
+        return False
+    if _read_status(adapter_dir / "run_status.json") == "failed" and is_retryable_remote_error_text(
+        _job_failure_text(adapter_dir, RuntimeError("failed_job_audit"))
+    ):
+        return True
+    runs_dir = adapter_dir / "runs"
+    if runs_dir.is_dir():
+        for path in runs_dir.glob("**/*.json"):
+            if _agentdojo_result_has_retryable_provider_failure(path):
+                return True
+    return False
+
+
+def _clear_agentdojo_job_outputs(adapter_dir: Path) -> None:
+    if adapter_dir.exists() or adapter_dir.is_symlink():
+        shutil.rmtree(adapter_dir, ignore_errors=True)
 
 
 def group_status(group: str, output_dir: str = DEFAULT_AGENTDOJO_EXPERIMENTS_DIR) -> dict[str, str]:
@@ -262,6 +329,7 @@ def _run_job(
     job: dict[str, Any],
     prompt: str,
     port: int,
+    agent_provider: str = "qwen",
 ) -> str:
     experiment = f"{group}/{job['name']}"
     status_path = Path(experiment_dir(experiment, runner.output_dir), "run_status.json")
@@ -269,7 +337,10 @@ def _run_job(
     if _read_status(status_path) == "complete":
         actual_results = _job_result_count(status_path.parent)
         if actual_results == expected_results:
-            return str(status_path.parent)
+            if _job_has_retryable_provider_failure(status_path.parent):
+                _clear_agentdojo_job_outputs(status_path.parent)
+            else:
+                return str(status_path.parent)
         _write_json(
             status_path,
             {
@@ -279,14 +350,53 @@ def _run_job(
                 "actual_results": actual_results,
             },
         )
+    modules_to_load = [NO_THINK_PATCH]
+    run_env = {"LOCAL_LLM_PORT": str(port)}
+    model = "VLLM_PARSED"
+    model_id = None
+    if agent_provider == "longcat":
+        spec = resolve_provider("longcat")
+        model = "OPENAI_COMPATIBLE"
+        model_id = spec.model
+        run_env = {
+            "OPENAI_COMPATIBLE_BASE_URL": spec.base_url,
+            "OPENAI_COMPATIBLE_API_KEY": spec.api_key,
+            "TERRABOX_AGENTDOJO_REQUEST_PROFILE": "longcat",
+            "TERRABOX_AGENTDOJO_QWEN_MAX_TOKENS": os.getenv(
+                "TERRABOX_AGENTDOJO_LONGCAT_MAX_TOKENS", "4096"
+            ),
+            "TERRABOX_AGENTDOJO_API_MIN_INTERVAL_SECONDS": os.getenv(
+                "TERRABOX_AGENTDOJO_API_MIN_INTERVAL_SECONDS",
+                os.getenv("TERRABOX_AGENTDOJO_LONGCAT_MIN_INTERVAL_SECONDS", "8.0"),
+            ),
+            "TERRABOX_AGENTDOJO_LONGCAT_MIN_INTERVAL_SECONDS": os.getenv(
+                "TERRABOX_AGENTDOJO_LONGCAT_MIN_INTERVAL_SECONDS",
+                os.getenv("TERRABOX_AGENTDOJO_API_MIN_INTERVAL_SECONDS", "8.0"),
+            ),
+            "TERRABOX_AGENTDOJO_API_RATE_LOCK": os.getenv(
+                "TERRABOX_AGENTDOJO_API_RATE_LOCK",
+                os.getenv(
+                    "TERRABOX_AGENTDOJO_LONGCAT_RATE_LOCK",
+                    str(Path("tmp/service_locks/agentdojo_longcat_rate.lock").resolve()),
+                ),
+            ),
+            "TERRABOX_AGENTDOJO_LONGCAT_RATE_LOCK": os.getenv(
+                "TERRABOX_AGENTDOJO_LONGCAT_RATE_LOCK",
+                os.getenv(
+                    "TERRABOX_AGENTDOJO_API_RATE_LOCK",
+                    str(Path("tmp/service_locks/agentdojo_longcat_rate.lock").resolve()),
+                ),
+            ),
+        }
     config = AgentDojoRunConfig(
         suite=str(job["suite"]),
-        model="VLLM_PARSED",
+        model=model,
+        model_id=model_id,
         benchmark_version="v1.2.2",
         attack=job["attack"],
         user_tasks=list(job.get("user_tasks") or []),
         injection_tasks=list(job["injection_tasks"]),
-        modules_to_load=[NO_THINK_PATCH],
+        modules_to_load=modules_to_load,
         max_workers=1,
         force_rerun=False,
     )
@@ -298,12 +408,14 @@ def _run_job(
                 prompt,
                 experiment=experiment,
                 run_config=config,
-                env={"LOCAL_LLM_PORT": str(port)},
+                env=run_env,
                 timeout=24 * 60 * 60,
             )
             break
-        except RuntimeError:
+        except RuntimeError as exc:
             adapter_dir_path = Path(experiment_dir(experiment, runner.output_dir))
+            if is_retryable_remote_error_text(_job_failure_text(adapter_dir_path, exc)):
+                raise
             synthetic_path = _synthesize_context_limit_result(adapter_dir_path, job)
             reason = "context limit"
             if not synthetic_path:
@@ -321,6 +433,9 @@ def _run_job(
                 flush=True,
             )
     actual_results = _job_result_count(Path(adapter_dir))
+    if _job_has_retryable_provider_failure(Path(adapter_dir)):
+        _clear_agentdojo_job_outputs(Path(adapter_dir))
+        raise RuntimeError(f"rate limit/provider transient error in completed AgentDojo job {experiment}")
     if actual_results != expected_results:
         _write_json(
             status_path,
@@ -648,12 +763,15 @@ def smoke(group: str = "qwen3_8b_v1") -> dict[str, Any]:
 def _run_lane(
     group: str,
     jobs: Queue,
+    retry_counts: dict[str, int],
+    max_queue_retries: int,
     gpu: int,
     port: int,
     prompt: str,
     agentdojo_root: str,
     output_dir: str,
     python_executable: str,
+    agent_provider: str = "qwen",
 ) -> dict[str, str]:
     runner = AgentDojoRolloutRunner(
         agentdojo_root=agentdojo_root,
@@ -668,10 +786,37 @@ def _run_lane(
         except Empty:
             return completed
         try:
-            completed[job["name"]] = _run_job(runner, group, job, prompt, port)
-            print(f"[{time.strftime('%F %T')}] GPU{gpu} completed {group}/{job['name']}", flush=True)
+            completed[job["name"]] = _run_job(runner, group, job, prompt, port, agent_provider)
+            lane = f"GPU{gpu}" if agent_provider == "qwen" else f"api-lane{gpu}"
+            print(f"[{time.strftime('%F %T')}] {lane} completed {group}/{job['name']}", flush=True)
+        except Exception as exc:
+            name = str(job["name"])
+            retry_counts[name] = retry_counts.get(name, 0) + 1
+            attempt = retry_counts[name]
+            adapter_dir = Path(experiment_dir(f"{group}/{name}", output_dir))
+            if is_retryable_remote_error_text(_job_failure_text(adapter_dir, exc)) and attempt <= max_queue_retries:
+                delay = _queue_retry_delay(attempt)
+                lane = f"GPU{gpu}" if agent_provider == "qwen" else f"api-lane{gpu}"
+                print(
+                    f"[{time.strftime('%F %T')}] {lane} retryable provider/API failure in "
+                    f"{group}/{name}; requeue attempt {attempt}/{max_queue_retries} "
+                    f"after {delay:.1f}s",
+                    flush=True,
+                )
+                _clear_agentdojo_job_outputs(adapter_dir)
+                time.sleep(delay)
+                jobs.put(job)
+            else:
+                raise
         finally:
             jobs.task_done()
+
+
+def _rollout_lanes(agent_provider: str) -> tuple[tuple[int, int], ...]:
+    if agent_provider != "longcat":
+        return GPU_LANES
+    requested = int(os.getenv("TERRABOX_AGENTDOJO_API_WORKERS", str(DEFAULT_API_WORKERS)))
+    return tuple((index, 9200 + index) for index in range(max(1, requested)))
 
 
 def rollout_group(
@@ -684,6 +829,7 @@ def rollout_group(
     output_dir: str = DEFAULT_AGENTDOJO_EXPERIMENTS_DIR,
     python_executable: str = AGENTDOJO_PYTHON,
     model_path: str = MODEL_PATH,
+    agent_provider: str = "qwen",
 ) -> dict[str, Any]:
     root = Path(experiment_dir(group, output_dir))
     root.mkdir(parents=True, exist_ok=True)
@@ -707,6 +853,12 @@ def rollout_group(
     )
     prompt = store.load(prompt_version)
     (root / "active_system_message.txt").write_text(prompt.strip() + "\n", encoding="utf-8")
+    model_label = "Qwen3 8B"
+    provider_label = "vllm_parsed"
+    if agent_provider == "longcat":
+        model_label = resolve_provider("longcat").model
+        provider_label = "openai-compatible"
+    lanes = _rollout_lanes(agent_provider)
     _write_json(
         root / "experiment_meta.json",
         {
@@ -715,39 +867,48 @@ def rollout_group(
             "prompt_version": prompt_version,
             "benchmark_version": "v1.2.2",
             "attack": attack,
-            "model": "Qwen3 8B",
-            "agentdojo_provider": "vllm_parsed",
+            "model": model_label,
+            "agentdojo_provider": provider_label,
+            "agent_provider": agent_provider,
             "suites": sorted(check["suite_inventory"]),
             "suite_counts": check.get("suite_counts", {}),
             "expected_results": check.get("expected_results"),
             "jobs": jobs,
+            "parallel_workers": len(lanes),
         },
     )
     rollout_lock = _acquire_rollout_lock()
     containers: list[str] = []
     try:
-        _cleanup_stale_agentdojo_containers()
+        if agent_provider == "qwen":
+            _cleanup_stale_agentdojo_containers()
         _write_json(status_path, {"status": "starting", "stage": stage, "prompt_version": prompt_version})
-        for gpu, port in GPU_LANES:
-            containers.append(_start_server(stage, f"lane{gpu}", gpu, port, model_path))
+        if agent_provider == "qwen":
+            for gpu, port in GPU_LANES:
+                containers.append(_start_server(stage, f"lane{gpu}", gpu, port, model_path))
         queue: Queue = Queue()
         for job in jobs:
             queue.put(job)
         results: dict[str, Any] = {}
-        with ThreadPoolExecutor(max_workers=len(GPU_LANES)) as pool:
+        retry_counts: dict[str, int] = {}
+        max_queue_retries = _queue_retry_limit("TERRABOX_AGENTDOJO_QUEUE_RETRIES")
+        with ThreadPoolExecutor(max_workers=len(lanes)) as pool:
             futures = [
                 pool.submit(
                     _run_lane,
                     group,
                     queue,
+                    retry_counts,
+                    max_queue_retries,
                     gpu,
                     port,
                     prompt,
                     agentdojo_root,
                     output_dir,
                     python_executable,
+                    agent_provider,
                 )
-                for gpu, port in GPU_LANES
+                for gpu, port in lanes
             ]
             for future in futures:
                 results.update(future.result())
@@ -772,6 +933,7 @@ def rollout_group(
             "jobs": results,
             "expected_results": expected_results,
             "actual_results": actual_results,
+            "queue_retries": retry_counts,
         }
         _write_json(status_path, status)
         return status
@@ -808,6 +970,7 @@ def optimize_stage1(
     provider: str = "longcat",
     output_dir: str = DEFAULT_AGENTDOJO_EXPERIMENTS_DIR,
     optimizer_version: str = "v1",
+    base_prompt_version: str = "base",
 ) -> str:
     record = Path(experiment_dir(record_group, output_dir))
     proposal_path = record / "stage1_proposal.json"
@@ -822,7 +985,7 @@ def optimize_stage1(
             pass
     base_results = agentdojo_adapter_results_path(base_group, output_dir)
     store = AgentDojoPromptStore()
-    base_prompt = store.load("base")
+    base_prompt = store.load(base_prompt_version)
     metrics = AgentDojoMetricProvider(results_path_fn=lambda _exp: base_results).aggregate("base")
     optimizer = PromptOptimizer(
         llm_client=make_llm_client(provider),
@@ -845,6 +1008,7 @@ def optimize_stage1(
             "proposal": proposal.to_dict(),
             "scores": scores,
             "base_group": base_group,
+            "base_prompt_version": base_prompt_version,
             "optimizer_version": optimizer_version,
         },
     )
@@ -857,6 +1021,7 @@ def optimize_stage1(
             "proposal": proposal.to_dict(),
             "scores": scores,
             "optimizer_version": optimizer_version,
+            "base_prompt_version": base_prompt_version,
         },
     )
     return prompt_path
@@ -871,6 +1036,7 @@ def optimize_stage2(
     provider: str = "longcat",
     output_dir: str = DEFAULT_AGENTDOJO_EXPERIMENTS_DIR,
     optimizer_version: str = "v1",
+    base_prompt_version: str = "base",
 ) -> str:
     record = Path(experiment_dir(record_group, output_dir))
     contrastive_path = record / "stage2_contrastive.json"
@@ -907,7 +1073,7 @@ def optimize_stage2(
         )
     )
     result = updater.update(
-        "base",
+        base_prompt_version,
         stage1_version,
         base_results,
         stage1_results,
@@ -925,6 +1091,7 @@ def optimize_stage2(
             "base_group": base_group,
             "stage1_group": stage1_group,
             "optimizer_version": optimizer_version,
+            "base_prompt_version": base_prompt_version,
         },
     )
     record.mkdir(parents=True, exist_ok=True)
@@ -935,6 +1102,7 @@ def optimize_stage2(
             "prompt_path": prompt_path,
             "result": result.to_dict(),
             "optimizer_version": optimizer_version,
+            "base_prompt_version": base_prompt_version,
         },
     )
     return prompt_path
@@ -949,12 +1117,22 @@ def chain_after_base(
     provider: str = "longcat",
     output_dir: str = DEFAULT_AGENTDOJO_EXPERIMENTS_DIR,
     optimizer_version: str = "v1",
+    agent_provider: str = "qwen",
+    base_prompt_version: str = "base",
 ) -> None:
     if provider == "longcat":
         os.environ["TERRABOX_LONGCAT_THINKING"] = "disabled"
     wait_for_group(base_group, output_dir)
-    optimize_stage1(base_group, stage1_version, stage1_group, provider, output_dir, optimizer_version)
-    rollout_group(stage1_group, stage1_version, "stage1", output_dir=output_dir)
+    optimize_stage1(
+        base_group,
+        stage1_version,
+        stage1_group,
+        provider,
+        output_dir,
+        optimizer_version,
+        base_prompt_version,
+    )
+    rollout_group(stage1_group, stage1_version, "stage1", output_dir=output_dir, agent_provider=agent_provider)
     optimize_stage2(
         base_group,
         stage1_group,
@@ -964,8 +1142,9 @@ def chain_after_base(
         provider,
         output_dir,
         optimizer_version,
+        base_prompt_version,
     )
-    rollout_group(stage2_group, stage2_version, "stage2", output_dir=output_dir)
+    rollout_group(stage2_group, stage2_version, "stage2", output_dir=output_dir, agent_provider=agent_provider)
     print(f"[{time.strftime('%F %T')}] AgentDojo Base -> Stage1 -> Stage2 chain complete", flush=True)
 
 
@@ -983,6 +1162,7 @@ def main() -> None:
     rollout.add_argument("--prompt-version", required=True)
     rollout.add_argument("--stage", required=True, choices=["base", "stage1", "stage2"])
     rollout.add_argument("--attack", default=DEFAULT_ATTACK)
+    rollout.add_argument("--agent-provider", default="qwen", choices=["qwen", "longcat"])
 
     chain = sub.add_parser("chain-after-base")
     chain.add_argument("--base-group", required=True)
@@ -992,6 +1172,12 @@ def main() -> None:
     chain.add_argument("--stage2-version", required=True)
     chain.add_argument("--provider", default="longcat", choices=["longcat", "deepseek"])
     chain.add_argument("--optimizer-version", default="v1", choices=["v1", "v2"])
+    chain.add_argument("--agent-provider", default="qwen", choices=["qwen", "longcat"])
+    chain.add_argument(
+        "--base-prompt-version",
+        default="base",
+        help="Prompt version used by the Base rollout; default keeps historical official-base behavior.",
+    )
 
     args = parser.parse_args()
     if args.command == "preflight":
@@ -999,7 +1185,13 @@ def main() -> None:
     elif args.command == "smoke":
         print(json.dumps(smoke(args.group), ensure_ascii=False, indent=2))
     elif args.command == "rollout":
-        result = rollout_group(args.group, args.prompt_version, args.stage, attack=args.attack)
+        result = rollout_group(
+            args.group,
+            args.prompt_version,
+            args.stage,
+            attack=args.attack,
+            agent_provider=args.agent_provider,
+        )
         print(json.dumps(result, ensure_ascii=False, indent=2))
     elif args.command == "chain-after-base":
         chain_after_base(
@@ -1010,6 +1202,8 @@ def main() -> None:
             args.stage2_version,
             args.provider,
             optimizer_version=args.optimizer_version,
+            agent_provider=args.agent_provider,
+            base_prompt_version=args.base_prompt_version,
         )
 
 
