@@ -611,7 +611,11 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
     logger.debug(f"parsed image_paths: {image_paths}")
 
     prompt = arguments.get("prompt", "Analyze these images.")
-    max_tokens = arguments.get("max_tokens", 8192)
+    try:
+        default_max_tokens = int(os.environ.get("TERRABOX_VLM_ANALYZE_DEFAULT_MAX_TOKENS", "8192"))
+    except Exception:
+        default_max_tokens = 8192
+    max_tokens = arguments.get("max_tokens", default_max_tokens)
     try:
         max_tokens = int(max_tokens)
     except Exception:
@@ -1334,6 +1338,44 @@ def _coerce_bbox(b: Any) -> dict | None:
     return None
 
 
+def _normalize_bbox_for_image(bbox: dict, width: int, height: int) -> tuple[dict | None, str | None]:
+    """Normalize an OEA-style bbox against image dimensions.
+
+    Gold traces occasionally use a full-image bbox with width/height swapped, or
+    coordinates that exceed the image edge by a small amount. Clamp boxes that
+    still overlap the image; keep fully invalid boxes as errors.
+    """
+
+    x1, y1 = float(bbox["x1"]), float(bbox["y1"])
+    x2, y2 = float(bbox["x2"]), float(bbox["y2"])
+
+    if not (x2 > x1 and y2 > y1):
+        return None, "non_positive_area"
+
+    if 0 <= x1 < width and 0 <= x2 <= width and 0 <= y1 < height and 0 <= y2 <= height:
+        return {"x1": x1, "y1": y1, "x2": x2, "y2": y2}, None
+
+    if (
+        x1 == 0
+        and y1 == 0
+        and abs(x2 - height) <= 1
+        and abs(y2 - width) <= 1
+        and width != height
+    ):
+        return {"x1": 0.0, "y1": 0.0, "x2": float(width), "y2": float(height)}, "swapped_full_image_bbox"
+
+    clipped = {
+        "x1": max(0.0, min(float(width), x1)),
+        "y1": max(0.0, min(float(height), y1)),
+        "x2": max(0.0, min(float(width), x2)),
+        "y2": max(0.0, min(float(height), y2)),
+    }
+    if clipped["x2"] > clipped["x1"] and clipped["y2"] > clipped["y1"]:
+        return clipped, "clipped_to_image_bounds"
+
+    return None, "outside_image_bounds"
+
+
 def _auto_output_path(prefix: str, ext: str = "png") -> str:
     out_dir = os.environ.get("TERRABOX_TOOL_ARTIFACT_DIR", "tmp/tool_artifacts")
     os.makedirs(out_dir, exist_ok=True)
@@ -1679,7 +1721,12 @@ def change_os_detect_handler(arguments: Dict[str, Any], context: Any, account: A
 def count_given_object_handler(arguments: Dict[str, Any], context: Any, account: Any) -> Dict[str, Any]:
     """Count instances of a named object class in an image (OpenEarthAgent
     `CountGivenObject`). Thin wrapper over InstructSAM detection: detect the
-    requested class, return the count + boxes."""
+    requested class, return the count + boxes.
+
+    OpenEarthAgent also allows ``bbox`` to restrict counting to a region. Match
+    that contract by cropping before detection, then translating returned boxes
+    back to the original image coordinates.
+    """
     obj = (
         arguments.get("object")
         or arguments.get("text_prompt")
@@ -1690,16 +1737,76 @@ def count_given_object_handler(arguments: Dict[str, Any], context: Any, account:
     )
     is_args = dict(arguments)
     is_args["text_prompt"] = obj
+    bbox = _coerce_bbox(arguments.get("bbox") or arguments.get("region") or arguments.get("box"))
+    bbox_offset: tuple[float, float] | None = None
+    if arguments.get("bbox") is not None and bbox is None:
+        return {"status": "error", "message": f"could not parse bbox: {arguments.get('bbox')!r}"}
+    if bbox is not None:
+        try:
+            from PIL import Image
+
+            image_path = _resolve_image_path(arguments)
+            with Image.open(image_path) as img:
+                width, height = img.size
+                normalized_bbox, bbox_normalization = _normalize_bbox_for_image(bbox, width, height)
+                if normalized_bbox is None:
+                    x1, y1 = float(bbox["x1"]), float(bbox["y1"])
+                    x2, y2 = float(bbox["x2"]), float(bbox["y2"])
+                    return {
+                        "status": "error",
+                        "message": (
+                            f"Invalid bbox coordinates: {(x1, y1, x2, y2)} outside image size "
+                            f"{(width, height)} ({bbox_normalization})"
+                        ),
+                    }
+                x1, y1 = float(normalized_bbox["x1"]), float(normalized_bbox["y1"])
+                x2, y2 = float(normalized_bbox["x2"]), float(normalized_bbox["y2"])
+                crop_path = _auto_output_path("count_bbox_crop")
+                img.crop((int(x1), int(y1), int(x2), int(y2))).save(crop_path)
+            is_args["image"] = crop_path
+            is_args.pop("bbox", None)
+            is_args.pop("region", None)
+            is_args.pop("box", None)
+            bbox_offset = (x1, y1)
+        except Exception as exc:
+            return {"status": "error", "message": f"Error preparing CountGivenObject bbox crop: {exc}"}
+
     result = instructsam_handler(is_args, context, account)
     if not isinstance(result, dict) or result.get("status") == "error":
         return result if isinstance(result, dict) else {"status": "error", "message": str(result)}
     count = result.get("count", 0)
+
+    def _translate(items: Any) -> Any:
+        if bbox_offset is None or not isinstance(items, list):
+            return items
+        dx, dy = bbox_offset
+        out = []
+        for item in items:
+            if not isinstance(item, dict):
+                out.append(item)
+                continue
+            new = dict(item)
+            bb = _coerce_bbox(new.get("bbox") or new)
+            if bb is not None:
+                x1 = float(bb["x1"]) + dx
+                y1 = float(bb["y1"]) + dy
+                x2 = float(bb["x2"]) + dx
+                y2 = float(bb["y2"]) + dy
+                new["bbox"] = [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)]
+                new["x1"], new["y1"], new["x2"], new["y2"] = new["bbox"]
+            out.append(new)
+        return out
+
+    objects = _translate(result.get("objects", []))
+    detections = _translate(result.get("detections", []))
     return {
         "status": "success",
         "object": obj,
         "count": count,
-        "objects": result.get("objects", []),
-        "detections": result.get("detections", []),
+        "objects": objects,
+        "detections": detections,
+        "bbox": arguments.get("bbox"),
+        "bbox_normalization": bbox_normalization if bbox is not None else None,
         "output": f"Found {count} instance(s) of '{obj}'.",
     }
 
@@ -1986,6 +2093,8 @@ def setup(registrar):
                     "image": {"type": "string", "description": "Path to the input image."},
                     "text": {"type": "string", "description": "Text to overlay (single-annotation form)."},
                     "position": {"type": "string", "description": "Placement for 'text': keyword 'lt'/'rt'/'lb'/'rb'/'center'/'top'/'bottom', or '[x, y]' pixel coords."},
+                    "color": {"type": "string", "default": "white", "description": "Text color for the single-annotation form."},
+                    "font_size": {"type": "integer", "default": 16, "description": "Font size for the single-annotation form."},
                     "annotations": {
                         "type": "array",
                         "items": {
@@ -2232,6 +2341,13 @@ def setup(registrar):
                     "image": {"type": "string", "description": "Path to the image."},
                     "object": {"type": "string", "description": "The object class to count."},
                     "text": {"type": "string", "description": "The object class to count (alias of 'object')."},
+                    "text_prompt": {"type": "string", "description": "The object class to count (alias of 'object')."},
+                    "category": {"type": "string", "description": "The object class to count (alias of 'object')."},
+                    "class": {"type": "string", "description": "The object class to count (alias of 'object')."},
+                    "bbox": {
+                        "type": "string",
+                        "description": "Optional region to count within, in OpenEarthAgent format '(x1,y1,x2,y2)'.",
+                    },
                 },
                 "required": ["image"],
             },

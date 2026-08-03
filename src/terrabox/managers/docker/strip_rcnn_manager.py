@@ -79,6 +79,23 @@ class StripRCNNDockerManager(BaseServiceManager):
         return result.returncode == 0 and result.stdout.strip() == "true"
 
     @classmethod
+    def _apply_env_overrides(cls):
+        if os.environ.get("STRIP_RCNN_PORT"):
+            cls.API_URL = f"http://127.0.0.1:{int(os.environ['STRIP_RCNN_PORT'])}"
+        if os.environ.get("STRIP_RCNN_GPU_DEVICES"):
+            cls.GPU_DEVICES = os.environ["STRIP_RCNN_GPU_DEVICES"]
+        if os.environ.get("STRIP_RCNN_CKPT_HOST"):
+            cls.CKPT_HOST = os.environ["STRIP_RCNN_CKPT_HOST"]
+        if os.environ.get("STRIP_RCNN_CONFIG_HOST"):
+            cls.CONFIG_HOST = os.environ["STRIP_RCNN_CONFIG_HOST"]
+        if os.environ.get("STRIP_RCNN_CONFIG_IN_CONTAINER"):
+            cls.CONFIG_IN_CONTAINER = os.environ["STRIP_RCNN_CONFIG_IN_CONTAINER"]
+        if os.environ.get("STRIP_RCNN_CHECKPOINT_IN_CONTAINER"):
+            cls.CHECKPOINT_IN_CONTAINER = os.environ["STRIP_RCNN_CHECKPOINT_IN_CONTAINER"]
+        if os.environ.get("DATA_MOUNT_HOST"):
+            cls.DATA_MOUNT_HOST = os.environ["DATA_MOUNT_HOST"]
+
+    @classmethod
     def _start_docker(cls):
         if cls._container_is_running():
             logger.info(f"Container {cls.CONTAINER_NAME} is running but service is not healthy; rebuilding it.")
@@ -147,6 +164,7 @@ class StripRCNNDockerManager(BaseServiceManager):
             if "strip_rcnn_port"          in d: cls.API_URL         = f"http://127.0.0.1:{int(d['strip_rcnn_port'])}"
         except Exception:
             pass
+        cls._apply_env_overrides()
 
         if cls.is_running():
             return

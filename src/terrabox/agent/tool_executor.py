@@ -610,6 +610,12 @@ _gpkg_by_scope: dict[str, str] = {}
 GPKG_REQUIRED_SLUGS = frozenset({
     "osm_gis.add_pois_layer",
     "osm_gis.compute_route_dist",
+    "osm_gis.add_index_layer",
+    "osm_gis.compute_index_change",
+    "osm_gis.show_index_layer",
+    "osm_gis.display_on_map",
+    "osm_gis.display_on_geotiff",
+    "osm_gis.get_bbox_from_raster",
 })
 
 
@@ -634,7 +640,11 @@ def _set_current_gpkg(gpkg: str) -> None:
 
 def _inject_gpkg(slug: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Auto-inject current_gpkg for tools that need it (like OpenEarthAgent)."""
-    if slug in GPKG_REQUIRED_SLUGS:
+    needs_gpkg = slug in GPKG_REQUIRED_SLUGS
+    if slug == "osm_gis.get_bbox_from_raster":
+        has_raster_input = bool(arguments.get("input_path") or arguments.get("geotiff"))
+        needs_gpkg = bool(arguments.get("layer")) and not has_raster_input
+    if needs_gpkg:
         gpkg_val = arguments.get("gpkg")
         # Inject if missing, placeholder (e.g. "gpkg_1"), or not an existing file
         if not gpkg_val or (isinstance(gpkg_val, str) and not os.path.exists(gpkg_val)):

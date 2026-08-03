@@ -68,6 +68,19 @@ class SAM2DockerManager(BaseServiceManager):
         return result.returncode == 0 and result.stdout.strip() == "true"
 
     @classmethod
+    def _apply_env_overrides(cls):
+        if os.environ.get("SAM2_PORT"):
+            cls.API_URL = f"http://127.0.0.1:{int(os.environ['SAM2_PORT'])}"
+        if os.environ.get("SAM2_GPU_DEVICES"):
+            cls.GPU_DEVICES = os.environ["SAM2_GPU_DEVICES"]
+        if os.environ.get("SAM2_CHECKPOINT_HOST"):
+            cls.CHECKPOINT_HOST = os.environ["SAM2_CHECKPOINT_HOST"]
+        if os.environ.get("SAM2_CONFIG_HOST"):
+            cls.CONFIG_HOST = os.environ["SAM2_CONFIG_HOST"]
+        if os.environ.get("DATA_MOUNT_HOST"):
+            cls.DATA_MOUNT_HOST = os.environ["DATA_MOUNT_HOST"]
+
+    @classmethod
     def _start_docker(cls):
         if cls._container_is_running():
             logger.info(f"Container {cls.CONTAINER_NAME} is running but service is not healthy; rebuilding it.")
@@ -130,6 +143,7 @@ class SAM2DockerManager(BaseServiceManager):
             if "sam2_port"            in d: cls.API_URL         = f"http://127.0.0.1:{int(d['sam2_port'])}"
         except Exception:
             pass
+        cls._apply_env_overrides()
 
         if cls.is_running():
             return

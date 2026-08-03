@@ -110,7 +110,13 @@ def _template_tool(
 ) -> ToolPolicy:
     target_text = ", ".join(targets)
     reasons = sorted(
-        {reason for event in events for reason in event.evidence.risk_reasons}
+        {
+            reason
+            for event in events
+            if not event.evidence.infra_error and event.evidence.risk_observed > 0
+            for reason in event.evidence.risk_reasons
+            if reason and reason != "infra_error"
+        }
     )
     recovery = ["Correct artifact and parameter bindings before retrying this tool."]
     if reasons:
@@ -298,6 +304,7 @@ def build_transition_families(
     allow_template_fallback: bool = False,
     alpha0: float = 1.0,
     risk_alpha0: float = 1.0,
+    skip_family_ids: set[str] | None = None,
     progress: Callable[[int, int, TransitionFamily], None] | None = None,
 ) -> list[TransitionFamily]:
     targets = _resolved_targets(events)
@@ -331,8 +338,12 @@ def build_transition_families(
         candidates = candidates[:max_families]
 
     families: list[TransitionFamily] = []
+    skip_family_ids = skip_family_ids or set()
     for index, (key, family_events) in enumerate(candidates, 1):
         task_type, intent, input_state, target_state = key
+        family_id = _family_id(task_type, intent, list(input_state), list(target_state))
+        if family_id in skip_family_ids:
+            continue
         qsig, nsig, rsig = _running_statistics(
             family_events, alpha0=alpha0, risk_alpha0=risk_alpha0
         )
@@ -366,7 +377,7 @@ def build_transition_families(
         elif rsig >= 0.5:
             status = "negative"
         family = TransitionFamily(
-            family_id=_family_id(task_type, intent, list(input_state), list(target_state)),
+            family_id=family_id,
             schema_version=2,
             task_type=task_type,
             intent_signature=intent,

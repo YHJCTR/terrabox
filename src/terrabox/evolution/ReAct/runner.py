@@ -95,18 +95,19 @@ def build_rollout_env(
         # (~2 min); give it headroom so the tool call doesn't time out.
         env.setdefault("TERRABOX_TOOL_TIMEOUT_GEO_PERCEPTION_INSTRUCTSAM", "600")
         if len(vlm_list) == 1:
-            # Single-GPU light profile. 17GB bf16 weights leave ~5GB for KV on a
-            # 24GB card, so cap the context: instructsam counting feeds 1 image +
-            # short prompt/output, which fits 4096 (DIOR-class 800px images ≈ 1k
-            # vision tokens). MUST also lower VLM_MIN_IMAGE_MODEL_LEN, else the
-            # manager's image-context guard bumps max-model-len back to 16384.
+            # Single-GPU profile. 8192 covers most OEA visual prompts without
+            # falling back to context retries; keep one sequence per batch to
+            # avoid spiky KV-cache allocation on 24GB cards. MUST also lower
+            # VLM_MIN_IMAGE_MODEL_LEN, else the manager's image-context guard
+            # bumps max-model-len back to 16384.
             # These env vars only affect THIS rollout subprocess; global/normal
             # VLM use (e.g. vlm_analyze at 2-GPU 16384) is untouched.
-            mlen = str(int(vlm_max_model_len) if vlm_max_model_len else 4096)
+            mlen = str(int(vlm_max_model_len) if vlm_max_model_len else 8192)
             env["VLM_MAX_MODEL_LEN"] = mlen
             env["VLM_MIN_IMAGE_MODEL_LEN"] = mlen
-            env.setdefault("VLM_GPU_MEMORY_UTILIZATION", "0.88")
-            env.setdefault("VLM_MAX_NUM_SEQS", "4")
+            env.setdefault("VLM_GPU_MEMORY_UTILIZATION", "0.95")
+            env.setdefault("VLM_MAX_NUM_SEQS", "1")
+            env.setdefault("TERRABOX_VLM_ANALYZE_DEFAULT_MAX_TOKENS", "4096")
         all_gpus = []
         for g in [str(agent_gpu), str(tool_gpu), *vlm_list]:
             if g not in all_gpus:

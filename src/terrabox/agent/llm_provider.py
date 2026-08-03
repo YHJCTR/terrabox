@@ -126,6 +126,22 @@ _REMOTE_RETRYABLE_MARKERS = (
     "apitimeouterror",
     "econnreset",
 )
+_REMOTE_NONRETRYABLE_MARKERS = (
+    "payment required",
+    "insufficient_quota",
+    "quota exceeded",
+    "billing",
+    "balance",
+    "credit exhausted",
+    "token 额度不足",
+    "额度不足",
+    "unauthorized",
+    "forbidden",
+    "invalid api key",
+    "invalid_api_key",
+    "authentication",
+    "permission denied",
+)
 
 _REMOTE_RETRYABLE_STATUS_RE = re.compile(
     r"(?:"
@@ -150,6 +166,8 @@ def is_retryable_remote_error_text(text: str) -> bool:
     lower = str(text or "").lower()
     if not lower:
         return False
+    if any(marker in lower for marker in _REMOTE_NONRETRYABLE_MARKERS):
+        return False
     if any(
         marker in lower
         for marker in (
@@ -173,6 +191,8 @@ def is_retryable_remote_error_text(text: str) -> bool:
 
 def is_retryable_remote_error(exc: BaseException | str) -> bool:
     if isinstance(exc, urllib.error.HTTPError):
+        if exc.code in {400, 401, 402, 403, 404, 422}:
+            return False
         if exc.code in {408, 409, 425, 429, 500, 502, 503, 504}:
             return True
     if isinstance(exc, (urllib.error.URLError, TimeoutError, socket.timeout)):

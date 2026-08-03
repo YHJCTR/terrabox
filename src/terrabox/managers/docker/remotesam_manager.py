@@ -79,6 +79,25 @@ class RemoteSAMDockerManager(BaseServiceManager):
         return result.returncode == 0 and result.stdout.strip() == "true"
 
     @classmethod
+    def _apply_env_overrides(cls):
+        if os.environ.get("REMOTESAM_PORT"):
+            cls.API_URL = f"http://127.0.0.1:{int(os.environ['REMOTESAM_PORT'])}"
+        if os.environ.get("REMOTESAM_GPU_DEVICES"):
+            cls.GPU_DEVICES = os.environ["REMOTESAM_GPU_DEVICES"]
+        if os.environ.get("REMOTESAM_CHECKPOINT_HOST"):
+            cls.CHECKPOINT_HOST = os.environ["REMOTESAM_CHECKPOINT_HOST"]
+        if os.environ.get("REMOTESAM_BERT_PATH"):
+            cls.BERT_PATH = os.environ["REMOTESAM_BERT_PATH"]
+        if os.environ.get("REMOTESAM_USE_EPOC"):
+            cls.USE_EPOC = os.environ["REMOTESAM_USE_EPOC"].lower()
+        if os.environ.get("REMOTESAM_SERVER_HOST"):
+            cls.SERVER_HOST = os.environ["REMOTESAM_SERVER_HOST"]
+        if os.environ.get("HF_CACHE_HOST"):
+            cls.HF_CACHE_HOST = os.environ["HF_CACHE_HOST"]
+        if os.environ.get("DATA_MOUNT_HOST"):
+            cls.DATA_MOUNT_HOST = os.environ["DATA_MOUNT_HOST"]
+
+    @classmethod
     def _start_docker(cls):
         if cls._container_is_running():
             logger.info(f"Container {cls.CONTAINER_NAME} is running but service is not healthy; rebuilding it.")
@@ -148,6 +167,7 @@ class RemoteSAMDockerManager(BaseServiceManager):
             if "remotesam_port"            in d: cls.API_URL         = f"http://127.0.0.1:{int(d['remotesam_port'])}"
         except Exception:
             pass
+        cls._apply_env_overrides()
 
         if cls.is_running():
             return

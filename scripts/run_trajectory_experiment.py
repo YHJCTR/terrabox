@@ -43,6 +43,7 @@ import re
 import sys
 import time
 import traceback
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
 from collections import Counter
 from datetime import datetime
@@ -64,6 +65,8 @@ os.environ.setdefault("TERRABOX_TOOL_TIMEOUT_OSM_GIS_ADD_POIS_LAYER", "240")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
+
+_ROLLOUT_WORKER_CTX: dict[str, Any] = {}
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Tool filtering constants used by rollout task filtering.
@@ -181,6 +184,16 @@ _TRANSIENT_TOOL_TIMEOUT_MARKERS = (
 _NONRETRYABLE_MARKERS = (
     "maximum context length",
     "context length",
+    "payment required",
+    "insufficient_quota",
+    "quota exceeded",
+    "billing",
+    "balance",
+    "credit exhausted",
+    "token 额度不足",
+    "额度不足",
+    "error code: 402",
+    "http error 402",
     "selected unavailable tool",
     "invalid action format",
     "missing required",
@@ -795,6 +808,167 @@ def run_single_task(
     }
 
 
+def _get_evolution_prompt(task: dict, augmenter) -> str:
+    """Retrieve the method-specific prompt block for one task."""
+    if augmenter is None:
+        return ""
+    try:
+        return augmenter.augment(task.get("question", ""))
+    except Exception as e:
+        log.warning("Evolution augment failed for %s: %s", task.get("task_id") or task.get("id"), e)
+        return ""
+
+
+def _run_task_with_retries(
+    task: dict,
+    *,
+    mode: str,
+    config,
+    allowed_slugs: list[str] | None,
+    augmenter,
+    max_transient: int,
+    max_transient_retry_seconds: int,
+    previous_transient_attempts: int,
+    progress_label: str,
+) -> dict:
+    """Run one rollout task with whole-episode transient retry."""
+    task_id = task.get("task_id") or task.get("id")
+    evo_prompt = _get_evolution_prompt(task, augmenter)
+
+    retry_started_at = time.monotonic()
+    transient_retry_time_exhausted = False
+    attempt = previous_transient_attempts
+
+    while True:
+        attempt += 1
+        try:
+            llm, tracer = build_llm(config)
+            result = run_single_task(
+                task,
+                mode=mode,
+                config=config,
+                llm=llm,
+                tracer=tracer,
+                allowed_slugs=allowed_slugs,
+                evolution_prompt=evo_prompt,
+            )
+            cleanup_gpu_memory()
+        except Exception as e:
+            log.error("Task %s failed with exception: %s", task_id, e)
+            traceback.print_exc()
+            cleanup_gpu_memory()
+            result = {
+                "task_id": task_id,
+                "source": task.get("source", "unknown"),
+                "question": task["question"],
+                "expected_tools": task.get("expected_tools", []),
+                "tool_calls": [],
+                "tool_calls_deduped": [],
+                "metrics": {"precision": 0, "recall": 0, "f1": 0, "exact_match": False},
+                "status": "exception",
+                "success": False,
+                "error": str(e),
+            }
+
+        retry_elapsed = time.monotonic() - retry_started_at
+        retry_seconds = max(0, int(max_transient_retry_seconds or 0))
+        if retry_seconds and is_transient_failure(result) and retry_elapsed >= retry_seconds:
+            transient_retry_time_exhausted = True
+            log.warning(
+                "%s %s transient retry time budget exhausted after %.0fs; "
+                "keeping this failed result and continuing.",
+                progress_label,
+                task_id,
+                retry_elapsed,
+            )
+            break
+        if is_transient_failure(result) and attempt <= max_transient:
+            backoff = min(30, 3 * attempt)
+            log.warning(
+                "%s %s transient failure (attempt %s/%s, status=%s): "
+                "discarding attempt and re-running whole task in %ss ...",
+                progress_label,
+                task_id,
+                attempt,
+                max_transient + 1,
+                result.get("status"),
+                backoff,
+            )
+            time.sleep(backoff)
+            continue
+        break
+
+    result["transient_attempts"] = attempt
+    result["max_transient_retries"] = max_transient
+    result["transient_retried"] = attempt > 1
+    result["transient_retry_exhausted"] = bool(
+        is_transient_failure(result) and attempt >= max_transient + 1
+    )
+    result["transient_retry_time_exhausted"] = transient_retry_time_exhausted
+    if previous_transient_attempts:
+        result["resumed_from_transient_failure"] = True
+    return result
+
+
+def _write_result_atomic(result_path: Path, result: dict) -> None:
+    """Write one result file via atomic rename so parallel writers never leave a partial JSON."""
+    tmp_path = result_path.with_name(f".{result_path.name}.tmp.{os.getpid()}.{time.time_ns()}")
+    with open(tmp_path, "w") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, result_path)
+
+
+def _init_rollout_worker(ctx: dict[str, Any]) -> None:
+    """Initialize one process worker with its own config/augmenter/registry."""
+    global _ROLLOUT_WORKER_CTX
+    if ctx["use_docker"]:
+        os.environ.setdefault("TERRABOX_TOOL_SERVICE_SCOPE", "call")
+        os.environ.setdefault("TERRABOX_TOOL_MAX_GPUS", "1")
+    os.environ.setdefault("TERRABOX_OEA_EXPERIMENT_TOOL_DESCRIPTIONS", "1")
+
+    config, _registry = setup_agent(
+        port=ctx["port"],
+        use_docker=ctx["use_docker"],
+        gpu_devices=ctx["gpu_devices"],
+        max_iterations=ctx["max_iterations"],
+        llm_provider=ctx["llm_provider"],
+    )
+    augmenter = None
+    if ctx["evolution_method"]:
+        from terrabox.evolution import get_prompt_augmenter
+        augmenter = get_prompt_augmenter(
+            ctx["evolution_method"],
+            store_dir=ctx["evolution_store"],
+        )
+        log.info("Evolution augmenter loaded in worker: %s", ctx["evolution_method"])
+
+    _ROLLOUT_WORKER_CTX = dict(ctx)
+    _ROLLOUT_WORKER_CTX["config"] = config
+    _ROLLOUT_WORKER_CTX["augmenter"] = augmenter
+
+
+def _rollout_worker_run(item: tuple[int, int, dict, int]) -> tuple[int, str, dict]:
+    """Run one pending task inside a process-pool worker."""
+    if not _ROLLOUT_WORKER_CTX:
+        raise RuntimeError("rollout worker was not initialized")
+    i, total, task, previous_transient_attempts = item
+    task_id = task.get("task_id") or task.get("id", f"task_{i}")
+    progress_label = f"[{i + 1}/{total}]"
+    log.info("%s Running %s ...", progress_label, task_id)
+    result = _run_task_with_retries(
+        task,
+        mode=_ROLLOUT_WORKER_CTX["mode"],
+        config=_ROLLOUT_WORKER_CTX["config"],
+        allowed_slugs=_ROLLOUT_WORKER_CTX["allowed_slugs"],
+        augmenter=_ROLLOUT_WORKER_CTX["augmenter"],
+        max_transient=_ROLLOUT_WORKER_CTX["max_transient_retries"],
+        max_transient_retry_seconds=_ROLLOUT_WORKER_CTX["max_transient_retry_seconds"],
+        previous_transient_attempts=previous_transient_attempts,
+        progress_label=progress_label,
+    )
+    return i, task_id, result
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Rollout subcommand
 # ──────────────────────────────────────────────────────────────────────────────
@@ -902,20 +1076,30 @@ def cmd_rollout(args):
         log.info(f"Dataset tools: {len(all_expected)} total, {len(excluded)} excluded, "
                  f"{len(allowed_slugs)} allowed: {allowed_slugs}")
 
-    # Load evolution augmenter if specified
-    evolution_prompt = ""
-    if args.evolution_method:
+    workers_requested = max(1, int(getattr(args, "workers", 1) or 1))
+
+    # Load evolution augmenter if specified. In multi-worker mode each child
+    # process loads its own augmenter to avoid shared DB/client state.
+    augmenter = None
+    if args.evolution_method and workers_requested == 1:
         from terrabox.evolution import get_prompt_augmenter
         augmenter = get_prompt_augmenter(
             args.evolution_method,
             store_dir=args.evolution_store,
         )
         log.info(f"Evolution augmenter loaded: {args.evolution_method}")
+    elif args.evolution_method:
+        log.info(
+            "Evolution augmenter will be loaded separately in each worker: %s",
+            args.evolution_method,
+        )
 
-    # Run rollouts
+    # Run rollouts. `pending_tasks` contains only tasks that really need this
+    # invocation; existing clean results are loaded into `results` immediately.
     results = []
     success_count = 0
     total_tokens = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    pending_tasks: list[tuple[int, dict, int]] = []
 
     for i, task in enumerate(tasks):
         task_id = task.get("task_id") or task.get("id", f"task_{i}")
@@ -952,85 +1136,25 @@ def cmd_rollout(args):
                         success_count += 1
                 continue
 
-        log.info(f"[{i+1}/{len(tasks)}] Running {task_id} ...")
+        pending_tasks.append((i, task, previous_transient_attempts))
 
-        # Get evolution prompt for this query
-        evo_prompt = ""
-        if args.evolution_method:
-            try:
-                evo_prompt = augmenter.augment(task.get("question", ""))
-            except Exception as e:
-                log.warning(f"Evolution augment failed: {e}")
+    workers = workers_requested
+    if workers > 1 and len(pending_tasks) > 1:
+        log.info("Running %d pending tasks with %d process workers", len(pending_tasks), workers)
+        if getattr(config, "use_local_llm", False):
+            log.warning(
+                "--workers > 1 with local LLM shares the same local vLLM endpoint; "
+                "prefer external providers or manually separated ports for heavy runs."
+            )
+    else:
+        workers = 1
+        log.info("Running %d pending tasks sequentially", len(pending_tasks))
 
-        # Transient-failure retry: re-run the whole task on network jitter and
-        # DISCARD the failed attempt (never written), so jitter never inflates the
-        # recorded tool calls / metrics. Capped by --max-transient-retries.
-        retry_started_at = time.monotonic()
-        transient_retry_time_exhausted = False
-        attempt = previous_transient_attempts
-        while True:
-            attempt += 1
-            try:
-                llm, tracer = build_llm(config)
-                result = run_single_task(
-                    task,
-                    mode=args.mode,
-                    config=config,
-                    llm=llm,
-                    tracer=tracer,
-                    allowed_slugs=allowed_slugs,
-                    evolution_prompt=evo_prompt,
-                )
-                # 清理GPU显存（释放perception模型占用的容器）
-                cleanup_gpu_memory()
-            except Exception as e:
-                log.error(f"Task {task_id} failed with exception: {e}")
-                traceback.print_exc()
-                # 即使出错也要清理GPU
-                cleanup_gpu_memory()
-                result = {
-                    "task_id": task_id,
-                    "source": task.get("source", "unknown"),
-                    "question": task["question"],
-                    "expected_tools": task.get("expected_tools", []),
-                    "tool_calls": [],
-                    "tool_calls_deduped": [],
-                    "metrics": {"precision": 0, "recall": 0, "f1": 0, "exact_match": False},
-                    "status": "exception",
-                    "success": False,
-                    "error": str(e),
-                }
-            retry_elapsed = time.monotonic() - retry_started_at
-            retry_seconds = max(0, int(getattr(args, "max_transient_retry_seconds", 1200) or 0))
-            if retry_seconds and is_transient_failure(result) and retry_elapsed >= retry_seconds:
-                transient_retry_time_exhausted = True
-                log.warning(
-                    f"[{i+1}/{len(tasks)}] {task_id} transient retry time budget exhausted "
-                    f"after {retry_elapsed:.0f}s; keeping this failed result and continuing."
-                )
-                break
-            if is_transient_failure(result) and attempt <= max_transient:
-                backoff = min(30, 3 * attempt)
-                log.warning(
-                    f"[{i+1}/{len(tasks)}] {task_id} transient failure "
-                    f"(attempt {attempt}/{max_transient + 1}, status={result.get('status')}): "
-                    f"discarding attempt and re-running whole task in {backoff}s …"
-                )
-                time.sleep(backoff)
-                continue
-            break
-        result["transient_attempts"] = attempt
-        result["max_transient_retries"] = max_transient
-        result["transient_retried"] = attempt > 1
-        result["transient_retry_exhausted"] = bool(is_transient_failure(result) and attempt >= max_transient + 1)
-        result["transient_retry_time_exhausted"] = transient_retry_time_exhausted
-        if previous_transient_attempts:
-            result["resumed_from_transient_failure"] = True
-
-        # Save per-task result
-        with open(result_path, "w") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-
+    def record_result(i: int, task: dict, result: dict) -> None:
+        nonlocal success_count
+        task_id = task.get("task_id") or task.get("id", f"task_{i}")
+        result_path = results_dir / f"{task_id}.json"
+        _write_result_atomic(result_path, result)
         results.append(result)
         if result.get("success"):
             success_count += 1
@@ -1039,10 +1163,80 @@ def cmd_rollout(args):
 
         f1 = result.get("metrics", {}).get("f1", 0)
         log.info(
-            f"  → {result['status']} | F1={f1:.2f} | "
-            f"tools={result.get('tool_calls_deduped', [])} | "
-            f"time={result.get('time', 0):.1f}s"
+            "[%s/%s] %s -> %s | F1=%.2f | tools=%s | time=%.1fs",
+            i + 1,
+            len(tasks),
+            task_id,
+            result.get("status"),
+            f1,
+            result.get("tool_calls_deduped", []),
+            result.get("time", 0),
         )
+
+    if workers == 1:
+        for i, task, previous_transient_attempts in pending_tasks:
+            task_id = task.get("task_id") or task.get("id", f"task_{i}")
+            progress_label = f"[{i + 1}/{len(tasks)}]"
+            log.info("%s Running %s ...", progress_label, task_id)
+            result = _run_task_with_retries(
+                task,
+                mode=args.mode,
+                config=config,
+                allowed_slugs=allowed_slugs,
+                augmenter=augmenter,
+                max_transient=getattr(args, "max_transient_retries", 5),
+                max_transient_retry_seconds=getattr(args, "max_transient_retry_seconds", 1200),
+                previous_transient_attempts=previous_transient_attempts,
+                progress_label=progress_label,
+            )
+            record_result(i, task, result)
+    else:
+        worker_ctx = {
+            "mode": args.mode,
+            "port": args.port,
+            "use_docker": args.use_docker,
+            "gpu_devices": gpu_devices,
+            "max_iterations": args.max_iterations,
+            "llm_provider": args.llm_provider,
+            "allowed_slugs": allowed_slugs,
+            "evolution_method": args.evolution_method,
+            "evolution_store": args.evolution_store,
+            "max_transient_retries": getattr(args, "max_transient_retries", 5),
+            "max_transient_retry_seconds": getattr(args, "max_transient_retry_seconds", 1200),
+        }
+        future_to_task: dict[Any, tuple[int, dict]] = {}
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=_init_rollout_worker,
+            initargs=(worker_ctx,),
+        ) as pool:
+            for i, task, previous_transient_attempts in pending_tasks:
+                future = pool.submit(
+                    _rollout_worker_run,
+                    (i, len(tasks), task, previous_transient_attempts),
+                )
+                future_to_task[future] = (i, task)
+            for future in as_completed(future_to_task):
+                i, task = future_to_task[future]
+                task_id = task.get("task_id") or task.get("id", f"task_{i}")
+                try:
+                    _worker_i, _worker_task_id, result = future.result()
+                except Exception as e:
+                    log.error("Worker task %s failed with exception: %s", task_id, e)
+                    traceback.print_exc()
+                    result = {
+                        "task_id": task_id,
+                        "source": task.get("source", "unknown"),
+                        "question": task["question"],
+                        "expected_tools": task.get("expected_tools", []),
+                        "tool_calls": [],
+                        "tool_calls_deduped": [],
+                        "metrics": {"precision": 0, "recall": 0, "f1": 0, "exact_match": False},
+                        "status": "exception",
+                        "success": False,
+                        "error": str(e),
+                    }
+                record_result(i, task, result)
 
     # Rebuild derived outputs from the complete results/ directory. This keeps
     # report.json and trajectories*.jsonl correct after --resume, sharded runs,
@@ -1121,6 +1315,7 @@ def cmd_rollout(args):
         "filter_settings": filter_kwargs,
         "skip_stats": dict(skip_stats),
         "evolution_method": args.evolution_method or None,
+        "workers": workers,
         "derived_from_results": True,
     }
     report_path = out_dir / "report.json"
@@ -1422,6 +1617,12 @@ def main():
     p_rollout.add_argument("--start-index", type=int, default=0, help="起始任务索引")
     p_rollout.add_argument("--end-index", type=int, default=None, help="结束任务索引")
     p_rollout.add_argument("--limit", type=int, default=None, help="最多跑 N 条")
+    p_rollout.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="同一 rollout 进程内的任务级进程 worker 数；默认 1。适合外部 API + 慢工具等待的 online-nogpu 补跑。",
+    )
     p_rollout.add_argument("--port", type=int, default=9100, help="LLM 端口")
     p_rollout.add_argument("--max-iterations", type=int, default=15, help="Agent 最大迭代次数")
     p_rollout.add_argument("--max-transient-retries", type=int, default=5,

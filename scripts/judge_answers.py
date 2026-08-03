@@ -57,8 +57,16 @@ PROVIDER_LIMIT_PATTERNS = (
 
 
 def _load_task_info(task_file: str) -> dict[str, dict]:
-    data = json.load(open(task_file))
-    tasks = data.get("tasks", data) if isinstance(data, dict) else data
+    if task_file.endswith(".jsonl"):
+        tasks = []
+        with open(task_file, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    tasks.append(json.loads(line))
+    else:
+        data = json.load(open(task_file))
+        tasks = data.get("tasks", data) if isinstance(data, dict) else data
     info = {}
     for t in tasks:
         tid = t.get("task_id") or t.get("id")

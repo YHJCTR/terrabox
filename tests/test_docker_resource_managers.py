@@ -76,6 +76,7 @@ class DockerResourceManagerTests(unittest.TestCase):
         recorder = RunRecorder()
         lease = _lease("instructsam", 9016, 9006)
         with (
+            mock.patch.dict("os.environ", {"INSTRUCTSAM_PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}),
             mock.patch.object(mod.InstructSAMDockerManager, "_container_is_running", classmethod(lambda cls: False)),
             mock.patch.object(mod, "acquire_docker_lease", return_value=lease),
             mock.patch.object(mod, "remove_container_if_exists", return_value=False),
@@ -87,8 +88,35 @@ class DockerResourceManagerTests(unittest.TestCase):
         self.assertIn("terrabox.service=instructsam", run_cmd)
         self.assertIn("9016:9006", run_cmd)
         self.assertIn("DEVICE=cuda:0", run_cmd)
+        self.assertIn("PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True", run_cmd)
         self.assertTrue(any(str(arg).startswith("VLLM_API_URL=") for arg in run_cmd))
         self.assertEqual(mod.InstructSAMDockerManager.API_URL, "http://127.0.0.1:9016")
+
+    def test_tool_manager_env_port_overrides_yaml_defaults(self):
+        from terrabox.managers.docker import changeos_manager as changeos_mod
+        from terrabox.managers.docker import instructsam_manager as instructsam_mod
+
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "INSTRUCTSAM_PORT": "9016",
+                "INSTRUCTSAM_GPU_DEVICES": "2",
+                "CHANGEOS_PORT": "9017",
+                "CHANGEOS_GPU_DEVICES": "2",
+            },
+        ):
+            instructsam_mod.InstructSAMDockerManager.API_URL = "http://127.0.0.1:9006"
+            instructsam_mod.InstructSAMDockerManager.GPU_DEVICES = "0"
+            changeos_mod.ChangeOSDockerManager.API_URL = "http://127.0.0.1:9007"
+            changeos_mod.ChangeOSDockerManager.GPU_DEVICES = "0"
+
+            instructsam_mod.InstructSAMDockerManager._apply_env_overrides()
+            changeos_mod.ChangeOSDockerManager._apply_env_overrides()
+
+        self.assertEqual(instructsam_mod.InstructSAMDockerManager.API_URL, "http://127.0.0.1:9016")
+        self.assertEqual(instructsam_mod.InstructSAMDockerManager.GPU_DEVICES, "2")
+        self.assertEqual(changeos_mod.ChangeOSDockerManager.API_URL, "http://127.0.0.1:9017")
+        self.assertEqual(changeos_mod.ChangeOSDockerManager.GPU_DEVICES, "2")
 
     def test_remoteclip_docker_manager_uses_resource_lease(self):
         from terrabox.managers.docker import remoteclip_manager as mod
@@ -159,7 +187,9 @@ class DockerResourceManagerTests(unittest.TestCase):
 
         run_cmd = next(cmd for cmd in recorder.commands if cmd[:3] == ["docker", "run", "-d"])
         self.assertIn("terrabox.service=vlm", run_cmd)
-        self.assertIn("CUDA_VISIBLE_DEVICES=3", run_cmd)
+        self.assertIn("--gpus", run_cmd)
+        self.assertIn("device=3", run_cmd)
+        self.assertIn("CUDA_VISIBLE_DEVICES=0", run_cmd)
         self.assertIn("9010:8000", run_cmd)
         self.assertEqual(mod.VLLMDockerManager.API_BASE, "http://127.0.0.1:9010/v1")
 

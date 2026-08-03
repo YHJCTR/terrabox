@@ -111,5 +111,5 @@ without modifying that checkout.
   this, Stage1/Stage2 optimization will intentionally keep historical official
   `base` behavior and the ablation recovery result will be invalid.
 - Keep `AGENTS.md`, `CLAUDE.md`, this adapter README, the shared adapter README,
-  and `EXPERIMENT_TODO.md` synchronized when changing scope, metrics, provider,
-  GPU layout, or output paths.
+  and the current Chinese experiment record synchronized when changing scope,
+  metrics, provider, GPU layout, or output paths.

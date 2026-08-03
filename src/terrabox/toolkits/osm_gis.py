@@ -23,6 +23,7 @@ import copy
 from contextlib import contextmanager
 from datetime import datetime
 from functools import wraps
+from math import cos, radians
 from typing import Any, Dict, List, Optional
 
 from ..core.registry import ToolSpec
@@ -33,11 +34,80 @@ CRS = "EPSG:4326"
 DEFAULT_ROUTE_DIST_MAX_PAIRS = int(os.environ.get("TERRABOX_ROUTE_DIST_MAX_PAIRS", "5000"))
 
 
+_GENERIC_POI_TAGS: dict[str, dict[str, str]] = {
+    "atm": {"amenity": "atm"},
+    "atms": {"amenity": "atm"},
+    "bank": {"amenity": "bank"},
+    "banks": {"amenity": "bank"},
+    "bar": {"amenity": "bar"},
+    "bars": {"amenity": "bar"},
+    "bus stop": {"highway": "bus_stop"},
+    "bus stops": {"highway": "bus_stop"},
+    "cafe": {"amenity": "cafe"},
+    "cafes": {"amenity": "cafe"},
+    "charging station": {"amenity": "charging_station"},
+    "charging stations": {"amenity": "charging_station"},
+    "church": {"amenity": "place_of_worship"},
+    "churches": {"amenity": "place_of_worship"},
+    "department store": {"shop": "department_store"},
+    "department stores": {"shop": "department_store"},
+    "fast food": {"amenity": "fast_food"},
+    "fire station": {"amenity": "fire_station"},
+    "fire stations": {"amenity": "fire_station"},
+    "fuel": {"amenity": "fuel"},
+    "gas station": {"amenity": "fuel"},
+    "gas stations": {"amenity": "fuel"},
+    "hospital": {"amenity": "hospital"},
+    "hospitals": {"amenity": "hospital"},
+    "hotel": {"tourism": "hotel"},
+    "hotels": {"tourism": "hotel"},
+    "kindergarten": {"amenity": "kindergarten"},
+    "kindergartens": {"amenity": "kindergarten"},
+    "library": {"amenity": "library"},
+    "libraries": {"amenity": "library"},
+    "museum": {"tourism": "museum"},
+    "museums": {"tourism": "museum"},
+    "nightclub": {"amenity": "nightclub"},
+    "nightclubs": {"amenity": "nightclub"},
+    "park": {"leisure": "park"},
+    "parks": {"leisure": "park"},
+    "parking": {"amenity": "parking"},
+    "pharmacy": {"amenity": "pharmacy"},
+    "pharmacies": {"amenity": "pharmacy"},
+    "police": {"amenity": "police"},
+    "police station": {"amenity": "police"},
+    "police stations": {"amenity": "police"},
+    "pub": {"amenity": "pub"},
+    "pubs": {"amenity": "pub"},
+    "restaurant": {"amenity": "restaurant"},
+    "restaurants": {"amenity": "restaurant"},
+    "school": {"amenity": "school"},
+    "schools": {"amenity": "school"},
+    "supermarket": {"shop": "supermarket"},
+    "supermarkets": {"shop": "supermarket"},
+    "toilet": {"amenity": "toilets"},
+    "toilets": {"amenity": "toilets"},
+    "university": {"amenity": "university"},
+    "universities": {"amenity": "university"},
+}
+
+
 def _env_bool(name: str, default: bool) -> bool:
     value = os.environ.get(name)
     if value is None:
         return default
     return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        logger.warning("Invalid float env %s=%r; using %s", name, value, default)
+        return default
 
 
 def _direct_requests_kwargs() -> dict:
@@ -78,6 +148,10 @@ def _osm_proxy_context(ox):
     no_proxy = os.environ.get("TERRABOX_OSM_NO_PROXY", "localhost,127.0.0.1,::1").strip()
 
     updated_kwargs = copy.deepcopy(original_kwargs)
+    # OSMnx passes settings.requests_timeout as the explicit timeout argument.
+    # If a migrated shell or earlier code leaves timeout in requests_kwargs,
+    # requests.get receives two timeout values and geocoding fails deterministically.
+    updated_kwargs.pop("timeout", None)
     proxies = dict(updated_kwargs.get("proxies") or {})
     proxies["http"] = http_proxy or None
     proxies["https"] = https_proxy or None
@@ -85,11 +159,17 @@ def _osm_proxy_context(ox):
         proxies["no_proxy"] = no_proxy
     updated_kwargs["proxies"] = proxies
 
+    original_timeout = getattr(settings, "requests_timeout", None)
+    if hasattr(settings, "requests_timeout"):
+        settings.requests_timeout = int(os.environ.get("TERRABOX_OSM_REQUEST_TIMEOUT", str(original_timeout or 30)))
+
     settings.requests_kwargs = updated_kwargs
     try:
         yield
     finally:
         settings.requests_kwargs = original_kwargs
+        if hasattr(settings, "requests_timeout"):
+            settings.requests_timeout = original_timeout
 
 
 def _with_osm_proxy(handler):
@@ -129,6 +209,126 @@ def _is_valid_bbox(bbox):
     return (-180 <= west <= 180 and -180 <= east <= 180
             and -90 <= south <= 90 and -90 <= north <= 90
             and west < east and south < north)
+
+
+def _bbox_area_km2(bounds: list[float] | tuple[float, float, float, float]) -> float:
+    west, south, east, north = [float(v) for v in bounds]
+    mid_lat = max(min((south + north) / 2.0, 89.0), -89.0)
+    width_km = abs(east - west) * 111.320 * max(cos(radians(mid_lat)), 0.01)
+    height_km = abs(north - south) * 110.574
+    return width_km * height_km
+
+
+def _aoi_limit_error(bounds: list[float] | tuple[float, float, float, float]) -> Optional[Dict[str, Any]]:
+    max_km2 = _env_float("TERRABOX_OSM_MAX_AOI_KM2", 50000.0)
+    if max_km2 <= 0:
+        return None
+    try:
+        area_km2 = _bbox_area_km2(bounds)
+    except Exception:
+        return None
+    if area_km2 <= max_km2:
+        return None
+    return {
+        "status": "error",
+        "error_type": "osm_aoi_too_large",
+        "message": (
+            f"AOI bbox is about {area_km2:.0f} km^2, above TERRABOX_OSM_MAX_AOI_KM2={max_km2:.0f}. "
+            "Use a smaller bbox/place or an explicit radius/buffer around a point."
+        ),
+        "bbox": [float(v) for v in bounds],
+        "area_km2_estimate": area_km2,
+    }
+
+
+def _direct_osm_proxies() -> dict:
+    http_proxy = os.environ.get("TERRABOX_OSM_HTTP_PROXY", "").strip()
+    https_proxy = os.environ.get("TERRABOX_OSM_HTTPS_PROXY", "").strip()
+    return {"http": http_proxy or None, "https": https_proxy or None}
+
+
+def _nominatim_geocode_point(area: str) -> tuple[float, float]:
+    import requests
+
+    timeout = _env_float("TERRABOX_OSM_GEOCODE_TIMEOUT", 20.0)
+    url = os.environ.get("TERRABOX_NOMINATIM_SEARCH_URL", "https://nominatim.openstreetmap.org/search")
+    response = requests.get(
+        url,
+        params={"q": area, "format": "json", "limit": 1},
+        headers={"User-Agent": os.environ.get("TERRABOX_OSM_USER_AGENT", "terrabox-osm-gis/1.0")},
+        timeout=timeout,
+        proxies=_direct_osm_proxies(),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not payload:
+        raise ValueError(f"Nominatim returned no point for {area!r}")
+    first = payload[0]
+    return float(first["lat"]), float(first["lon"])
+
+
+def _geocode_point(area: str, ox: Any) -> tuple[float, float]:
+    direct_error: Exception | None = None
+    if _env_bool("TERRABOX_OSM_FAST_NOMINATIM", True):
+        try:
+            return _nominatim_geocode_point(area)
+        except Exception as exc:
+            direct_error = exc
+            if "timeout" in str(exc).lower() or exc.__class__.__name__.lower().endswith("timeout"):
+                raise
+    try:
+        return ox.geocode(area)
+    except Exception as exc:
+        if direct_error is not None:
+            raise RuntimeError(f"direct point geocode failed ({direct_error}); osmnx geocode failed ({exc})") from exc
+        raise
+
+
+def _normalise_generic_query_key(raw: str) -> str:
+    key = raw.strip().lower().replace("&", " and ")
+    key = re.sub(r"[_-]+", " ", key)
+    key = re.sub(r"\s+", " ", key)
+    return key.strip()
+
+
+def _normalise_poi_query(query: Any) -> tuple[Any, Optional[str]]:
+    if not isinstance(query, str):
+        return query, None
+
+    raw = query.strip()
+    if not raw:
+        return query, None
+    try:
+        return json.loads(raw), None
+    except Exception:
+        pass
+
+    if "=" in raw and "," not in raw and "{" not in raw:
+        key, value = raw.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if key and value:
+            return {key: value}, f"Normalized OSM query string {raw!r} to tag dict {{{key!r}: {value!r}}}."
+
+    key = _normalise_generic_query_key(raw)
+    tags = _GENERIC_POI_TAGS.get(key)
+    if tags:
+        return dict(tags), f"Normalized generic POI query {raw!r} to OSM tags {tags}."
+    return query, None
+
+
+def _positive_int_arg(arguments: Dict[str, Any], *keys: str) -> Optional[int]:
+    for key in keys:
+        value = arguments.get(key)
+        if value in (None, "", False):
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return None
 
 
 def _get_save_dir() -> str:
@@ -216,12 +416,30 @@ def get_area_boundary_handler(arguments: Dict[str, Any], context: Any, account: 
     """
     ox = _lazy_osmnx()
     gpd = _lazy_gpd()
-    from shapely.geometry import box as shapely_box
+    from shapely.geometry import Point, box as shapely_box
 
     # Accept both "area" (OpenEarthAgent compat) and "place_name" (legacy)
     area = arguments.get("area") or arguments.get("place_name")
     bbox = arguments.get("bbox")
     buffer_m = arguments.get("buffer_m")
+    buffer_distance_m = 0.0
+    if buffer_m not in (None, "", False):
+        try:
+            buffer_distance_m = float(buffer_m)
+        except (TypeError, ValueError):
+            return {"status": "error", "message": f"Invalid buffer_m: {buffer_m}"}
+        if buffer_distance_m < 0:
+            return {"status": "error", "message": "buffer_m must be non-negative."}
+        max_buffer_m = _env_float("TERRABOX_OSM_MAX_BUFFER_M", 10000.0)
+        if max_buffer_m > 0 and buffer_distance_m > max_buffer_m:
+            return {
+                "status": "error",
+                "error_type": "osm_buffer_too_large",
+                "message": (
+                    f"buffer_m={buffer_distance_m:g} exceeds TERRABOX_OSM_MAX_BUFFER_M={max_buffer_m:g}. "
+                    "Use a smaller radius/buffer or an explicit bbox."
+                ),
+            }
     output_path = arguments.get("output_path")
     if isinstance(output_path, str) and _is_placeholder_path(output_path):
         output_path = None
@@ -238,11 +456,45 @@ def get_area_boundary_handler(arguments: Dict[str, Any], context: Any, account: 
                 pass
 
     if area and isinstance(area, str):
-        try:
-            gdf = ox.geocode_to_gdf(area).to_crs(CRS)
-        except Exception as e:
-            return {"status": "error", "message": f"Failed to geocode '{area}': {e}"}
-        geom = gdf.geometry.union_all()
+        point_first = buffer_distance_m > 0 and _env_bool("TERRABOX_OSM_BUFFER_POINT_FIRST", True)
+        polygon_error: Exception | None = None
+        if point_first:
+            try:
+                lat, lon = _geocode_point(area, ox)
+            except Exception as point_error:
+                try:
+                    gdf = ox.geocode_to_gdf(area).to_crs(CRS)
+                except Exception as e:
+                    return {
+                        "status": "error",
+                        "message": (
+                            f"Failed to geocode '{area}' as point for buffer_m={buffer_m} "
+                            f"({point_error}) or polygon ({e})."
+                        ),
+                    }
+                geom = gdf.geometry.union_all()
+            else:
+                geom = Point(float(lon), float(lat))
+        else:
+            try:
+                gdf = ox.geocode_to_gdf(area).to_crs(CRS)
+            except Exception as e:
+                polygon_error = e
+                if buffer_distance_m <= 0:
+                    return {"status": "error", "message": f"Failed to geocode '{area}': {e}"}
+                try:
+                    lat, lon = _geocode_point(area, ox)
+                except Exception as point_error:
+                    return {
+                        "status": "error",
+                        "message": (
+                            f"Failed to geocode '{area}' as polygon ({polygon_error}) or point "
+                            f"for buffer_m={buffer_m}: {point_error}"
+                        ),
+                    }
+                geom = Point(float(lon), float(lat))
+            else:
+                geom = gdf.geometry.union_all()
         name = area
     elif bbox and _is_valid_bbox(bbox):
         west, south, east, north = [float(v) for v in bbox]
@@ -254,11 +506,14 @@ def get_area_boundary_handler(arguments: Dict[str, Any], context: Any, account: 
         return {"status": "error", "message": "Provide either 'area' (place name) or 'bbox'."}
 
     # Apply buffer if requested
-    if buffer_m and float(buffer_m) > 0:
-        buffer_m = float(buffer_m)
+    if buffer_distance_m > 0:
         gseries = gpd.GeoSeries([geom], crs=CRS).to_crs("EPSG:3857")
-        geom = gseries.buffer(buffer_m).to_crs(CRS).iloc[0]
-        name = f"{name}_buffer{int(buffer_m)}m"
+        geom = gseries.buffer(buffer_distance_m).to_crs(CRS).iloc[0]
+        name = f"{name}_buffer{int(buffer_distance_m)}m"
+
+    limit_error = _aoi_limit_error(list(geom.bounds))
+    if limit_error is not None:
+        return limit_error
 
     gdf_out = gpd.GeoDataFrame(
         {"name": [name], "created_at": [datetime.now().isoformat()], "year": [datetime.now().year]},
@@ -303,11 +558,36 @@ def add_pois_layer_handler(arguments: Dict[str, Any], context: Any, account: Any
     query = arguments.get("query") or arguments.get("tags", {"amenity": True})
     layer_name = arguments.get("layer_name", "pois")
 
-    # Legacy compat: if no gpkg but place_name given, fall back
+    # OpenEarthAgent compat: some gold calls start from AddPoisLayer(area=...)
+    # without a preceding GetAreaBoundary. Materialize the boundary first, then
+    # continue through the normal gpkg-backed path so downstream tools can reuse
+    # the captured GeoPackage.
     if not gpkg:
+        area = arguments.get("area")
+        if area:
+            boundary_args = {"area": area}
+            if arguments.get("buffer_m") is not None:
+                boundary_args["buffer_m"] = arguments.get("buffer_m")
+            boundary = get_area_boundary_handler(boundary_args, context, account)
+            if not isinstance(boundary, dict) or boundary.get("status") == "error":
+                return boundary if isinstance(boundary, dict) else {"status": "error", "message": str(boundary)}
+            gpkg = boundary.get("gpkg")
         place_name = arguments.get("place_name")
-        if place_name:
+        if not gpkg and place_name:
+            boundary_args = {"area": place_name}
+            if arguments.get("buffer_m") is not None:
+                boundary_args["buffer_m"] = arguments.get("buffer_m")
+            boundary = get_area_boundary_handler(boundary_args, context, account)
+            if not isinstance(boundary, dict) or boundary.get("status") == "error":
+                return boundary if isinstance(boundary, dict) else {"status": "error", "message": str(boundary)}
+            gpkg = boundary.get("gpkg")
+        # Legacy compat for callers that still expect place-based POI querying
+        # without a boundary GeoPackage.
+        if not gpkg and place_name:
             return _add_pois_legacy(arguments, context, account)
+    if gpkg:
+        arguments = {**arguments, "gpkg": gpkg}
+    else:
         return {"status": "error", "message": "Missing 'gpkg' parameter. Run get_area_boundary first."}
 
     if not os.path.exists(gpkg):
@@ -320,31 +600,44 @@ def add_pois_layer_handler(arguments: Dict[str, Any], context: Any, account: Any
     except Exception as e:
         return {"status": "error", "message": f"Failed to read area_boundary from gpkg: {e}"}
 
-    # Parse query
+    # Parse query. Common lowercase category names ("bar", "schools",
+    # "bus stops") are OSM tag filters, not named places; normalise them before
+    # falling back to named-POI geocoding, which can otherwise burn the full
+    # outer tool timeout on public OSM endpoints.
+    query, query_note = _normalise_poi_query(query)
     if isinstance(query, str):
-        try:
-            query = json.loads(query)
-        except Exception:
-            # Treat as POI name
-            try:
-                pois = ox.geocode_to_gdf(query).to_crs(CRS)
-                pois = pois[pois.geometry.within(geom)]
-                if pois.empty:
-                    return {"status": "error", "message": f"POI '{query}' not found inside study area."}
-            except Exception as e:
-                return {"status": "error", "message": f"OSM query failed: {e}"}
-            pois["display_name"] = pois.apply(_get_name_from_row, axis=1)
-            pois = pois[pois["display_name"] != ""]
-            pois = pois.drop_duplicates(subset="display_name", keep="first")
-            pois = _clean_for_gpkg(pois)
-            pois.to_file(gpkg, layer=layer_name, driver="GPKG")
-            gpkg_basename = os.path.basename(gpkg)
+        if os.environ.get("TERRABOX_OSM_ALLOW_STRING_POI_GEOCODE", "1").strip().lower() in {"", "0", "false", "no", "off"}:
             return {
-                "status": "success",
-                "text": f"Saved {len(pois)} POIs to layer '{layer_name}' in {gpkg_basename}",
-                "gpkg": gpkg,
-                "poi_count": len(pois),
+                "status": "error",
+                "error_type": "invalid_osm_query",
+                "message": (
+                    f"query={query!r} is a POI name string. For category searches use OSM tags, "
+                    "for example {'amenity': 'school'} or {'shop': 'supermarket'}."
+                ),
             }
+        # Treat as POI name.
+        try:
+            pois = ox.geocode_to_gdf(query).to_crs(CRS)
+            pois = pois[pois.geometry.within(geom)]
+            if pois.empty:
+                return {"status": "error", "message": f"POI '{query}' not found inside study area."}
+        except Exception as e:
+            return {"status": "error", "message": f"OSM query failed: {e}"}
+        pois["display_name"] = pois.apply(_get_name_from_row, axis=1)
+        pois = pois[pois["display_name"] != ""]
+        pois = pois.drop_duplicates(subset="display_name", keep="first")
+        limit = _positive_int_arg(arguments, "count", "max_results", "limit")
+        if limit is not None and len(pois) > limit:
+            pois = pois.head(limit)
+        pois = _clean_for_gpkg(pois)
+        pois.to_file(gpkg, layer=layer_name, driver="GPKG")
+        gpkg_basename = os.path.basename(gpkg)
+        return {
+            "status": "success",
+            "text": f"Saved {len(pois)} POIs to layer '{layer_name}' in {gpkg_basename}",
+            "gpkg": gpkg,
+            "poi_count": len(pois),
+        }
 
     if not isinstance(query, dict):
         return {"status": "error", "message": f"query must be dict or str, got {type(query).__name__}"}
@@ -364,6 +657,9 @@ def add_pois_layer_handler(arguments: Dict[str, Any], context: Any, account: Any
     pois["display_name"] = pois.apply(_get_name_from_row, axis=1)
     pois = pois[pois["display_name"] != ""]
     pois = pois.drop_duplicates(subset="display_name", keep="first")
+    limit = _positive_int_arg(arguments, "count", "max_results", "limit")
+    if limit is not None and len(pois) > limit:
+        pois = pois.head(limit)
 
     if pois.empty:
         return {"status": "error", "message": f"No named POIs found for {query} inside boundary."}
@@ -372,9 +668,12 @@ def add_pois_layer_handler(arguments: Dict[str, Any], context: Any, account: Any
     pois.to_file(gpkg, layer=layer_name, driver="GPKG")
 
     gpkg_basename = os.path.basename(gpkg)
+    text = f"Saved {len(pois)} POIs to layer '{layer_name}' in {gpkg_basename}"
+    if query_note:
+        text = f"{text}. {query_note}"
     return {
         "status": "success",
-        "text": f"Saved {len(pois)} POIs to layer '{layer_name}' in {gpkg_basename}",
+        "text": text,
         "gpkg": gpkg,
         "poi_count": len(pois),
     }
@@ -1046,9 +1345,19 @@ def display_on_geotiff_handler(arguments: Dict[str, Any], context: Any, account:
                 nm = _get_name_from_row(row)
                 if not nm:
                     continue
-                pt = geom if geom.geom_type == "Point" else geom.representative_point()
-                col, rowi = ~transform * (pt.x, pt.y)
-                labels.append((int(col), int(rowi), nm))
+                try:
+                    pt = geom if geom.geom_type == "Point" else geom.representative_point()
+                    if pt is None or pt.is_empty:
+                        continue
+                    x, y = float(pt.x), float(pt.y)
+                    if not (np.isfinite(x) and np.isfinite(y)):
+                        continue
+                    col, rowi = ~transform * (x, y)
+                    if not (np.isfinite(col) and np.isfinite(rowi)):
+                        continue
+                    labels.append((int(col), int(rowi), nm))
+                except Exception as exc:
+                    logger.debug("Skipping display_on_geotiff label for invalid geometry: %s", exc)
     overlay = np.any(color_mask > 0, axis=0)
     blended = base.copy()
     for c in range(3):
@@ -1306,7 +1615,7 @@ def setup(registrar):
                     },
                     "buffer_m": {
                         "type": "number",
-                        "description": "Optional buffer distance in meters around the boundary."
+                        "description": "Optional buffer distance in meters around the boundary; if a place geocodes only to a point/landmark, a positive buffer creates an area around it."
                     },
                     "output_path": {
                         "type": "string",
@@ -1339,7 +1648,7 @@ def setup(registrar):
                 "properties": {
                     "gpkg": {
                         "type": "string",
-                        "description": "Path to the GeoPackage (auto-injected from get_area_boundary)."
+                        "description": "Path to the GeoPackage (auto-injected from get_area_boundary). If omitted, provide 'area' to create a boundary first."
                     },
                     "query": {
                         "description": "OSM tags as dict (e.g. {\"amenity\": \"fire_station\"}) or POI name as string."
@@ -1348,10 +1657,10 @@ def setup(registrar):
                         "type": "string",
                         "description": "Layer name for saving POIs in the GeoPackage (e.g. 'fire_stations')."
                     },
-                    "area": {"type": "string", "description": "Optional area name (the boundary is normally taken from the gpkg)."},
+                    "area": {"type": "string", "description": "Optional area name used to create a boundary when gpkg is not provided."},
                     "count": {"type": "integer", "description": "Optional cap on the number of POIs to keep."},
                 },
-                "required": ["gpkg", "query", "layer_name"]
+                "required": ["query", "layer_name"]
             },
             requires_connection=False
         ),

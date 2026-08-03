@@ -1,6 +1,7 @@
 """CausalEvo: Counterfactual Causal Skill Discovery for Self-Evolving Tool-Calling Agents.
 
-Novel self-evolution method proposed as original research (see OVERVIEW.md §6).
+Original self-evolution prototype; current positioning is summarized in
+``自进化相关工作综述.md`` and ``经验自进化_产物转移方案.md``.
 
 Key components:
   CCA  — Counterfactual Credit Attribution: measures which tool calls are causally

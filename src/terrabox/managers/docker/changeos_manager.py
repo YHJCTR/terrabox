@@ -79,6 +79,19 @@ class ChangeOSDockerManager(BaseServiceManager):
         return result.returncode == 0 and result.stdout.strip() == "true"
 
     @classmethod
+    def _apply_env_overrides(cls):
+        if os.environ.get("CHANGEOS_PORT"):
+            cls.API_URL = f"http://127.0.0.1:{int(os.environ['CHANGEOS_PORT'])}"
+        if os.environ.get("CHANGEOS_GPU_DEVICES"):
+            cls.GPU_DEVICES = os.environ["CHANGEOS_GPU_DEVICES"]
+        if os.environ.get("CHANGEOS_CKPT_HOST"):
+            cls.CKPT_HOST = os.environ["CHANGEOS_CKPT_HOST"]
+        if os.environ.get("CHANGEOS_CHECKPOINT_IN_CONTAINER"):
+            cls.CHECKPOINT_IN_CONTAINER = os.environ["CHANGEOS_CHECKPOINT_IN_CONTAINER"]
+        if os.environ.get("DATA_MOUNT_HOST"):
+            cls.DATA_MOUNT_HOST = os.environ["DATA_MOUNT_HOST"]
+
+    @classmethod
     def _start_docker(cls):
         if cls._container_is_running():
             logger.info(f"Container {cls.CONTAINER_NAME} is running but service is not healthy; rebuilding it.")
@@ -145,6 +158,7 @@ class ChangeOSDockerManager(BaseServiceManager):
                 cls.API_URL = f"http://127.0.0.1:{int(d['changeos_port'])}"
         except Exception:
             pass
+        cls._apply_env_overrides()
 
         if cls.is_running():
             return

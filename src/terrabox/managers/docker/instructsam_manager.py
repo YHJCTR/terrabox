@@ -79,6 +79,17 @@ class InstructSAMDockerManager(BaseServiceManager):
         return result.returncode == 0 and result.stdout.strip() == "true"
 
     @classmethod
+    def _apply_env_overrides(cls):
+        if os.environ.get("INSTRUCTSAM_PORT"):
+            cls.API_URL = f"http://127.0.0.1:{int(os.environ['INSTRUCTSAM_PORT'])}"
+        if os.environ.get("INSTRUCTSAM_GPU_DEVICES"):
+            cls.GPU_DEVICES = os.environ["INSTRUCTSAM_GPU_DEVICES"]
+        if os.environ.get("INSTRUCTSAM_MODELS_HOST"):
+            cls.MODELS_HOST = os.environ["INSTRUCTSAM_MODELS_HOST"]
+        if os.environ.get("DATA_MOUNT_HOST"):
+            cls.DATA_MOUNT_HOST = os.environ["DATA_MOUNT_HOST"]
+
+    @classmethod
     def _start_docker(cls):
         if cls._container_is_running():
             logger.info(f"Container {cls.CONTAINER_NAME} is running but service is not healthy; rebuilding it.")
@@ -110,6 +121,11 @@ class InstructSAMDockerManager(BaseServiceManager):
             except Exception:
                 vllm_api_url = "http://host.docker.internal:9000"
 
+        pytorch_cuda_alloc_conf = os.environ.get(
+            "INSTRUCTSAM_PYTORCH_CUDA_ALLOC_CONF",
+            os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"),
+        )
+
         cmd = [
             "docker", "run", "-d",
             "--name", cls.CONTAINER_NAME,
@@ -122,6 +138,7 @@ class InstructSAMDockerManager(BaseServiceManager):
             "-v", f"{cls.MODELS_HOST}:/models:ro",
             "-e", "DEVICE=cuda:0",  # Use first GPU visible to container
             "-e", f"VLLM_API_URL={vllm_api_url}",
+            "-e", f"PYTORCH_CUDA_ALLOC_CONF={pytorch_cuda_alloc_conf}",
             cls.DOCKER_IMAGE,
         ]
 
@@ -146,6 +163,7 @@ class InstructSAMDockerManager(BaseServiceManager):
             if "instructsam_port"        in d: cls.API_URL         = f"http://127.0.0.1:{int(d['instructsam_port'])}"
         except Exception:
             pass
+        cls._apply_env_overrides()
 
         if cls.is_running():
             return

@@ -79,6 +79,9 @@ def _safe_eval(expression: str) -> Any:
         "abs": abs, "pow": pow, "len": len,
         **math_methods,
     }
+    # OpenEarth gold traces sometimes call math functions as math.floor(...)
+    # while ordinary agent prompts usually call floor(...). Support both forms.
+    allowed["math"] = math
     allowed["__builtins__"] = None
     return eval(expression, allowed, allowed)
 

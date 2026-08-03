@@ -20,6 +20,7 @@ DEFAULT_STORE = "evolution_store/experience_evo/oea_longcat_base_offline"
 DEFAULT_STORE_V2 = "evolution_store/experience_evo/oea_train2000_v2"
 DEFAULT_TRAIN_JSONL = "data/oea_full_sft/openearth/train.jsonl"
 DEFAULT_TRAIN_SUBSET = "tmp/experience_evo/oea_train_coverage_2000_seed42_tasks.json"
+DEFAULT_TOOL_CATALOG = None
 
 
 def _levels(value: str) -> tuple[str, ...]:
@@ -185,9 +186,14 @@ def cmd_distill_v2(args: argparse.Namespace) -> None:
     if not events:
         raise SystemExit(f"no v2 events found in {store.events_path}; run extract-v2 first")
     llm = _make_llm(args.provider, args.template_only)
+    existing_families = store.load_families()
+    existing_family_ids = {family.family_id for family in existing_families}
+    new_families: list = []
 
-    def _progress(index: int, total: int, _family) -> None:
+    def _progress(index: int, total: int, family) -> None:
+        new_families.append(family)
         if args.progress_every > 0 and (index == total or index % args.progress_every == 0):
+            store.write_families(existing_families + new_families)
             print(f"[experience_evo_v2] distilled {index}/{total} families", flush=True)
 
     families = build_transition_families(
@@ -199,8 +205,10 @@ def cmd_distill_v2(args: argparse.Namespace) -> None:
         allow_template_fallback=args.allow_template_fallback,
         alpha0=args.alpha0,
         risk_alpha0=args.risk_alpha0,
+        skip_family_ids=existing_family_ids,
         progress=_progress,
     )
+    families = existing_families + families
     store.write_families(families)
     store.write_manifest(
         {
@@ -212,6 +220,7 @@ def cmd_distill_v2(args: argparse.Namespace) -> None:
             "min_support": args.min_support,
             "max_families": args.max_families,
             "num_families": len(families),
+            "resumed_from_families": len(existing_families),
             "alpha0": args.alpha0,
             "risk_alpha0": args.risk_alpha0,
         }
@@ -351,6 +360,40 @@ def cmd_select_train(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_gold_audit(args: argparse.Namespace) -> None:
+    from .gold_replay import write_gold_audit
+
+    summary = write_gold_audit(
+        args.data,
+        out_dir=args.out_dir,
+        catalog_path=args.catalog,
+        subset_file=args.subset_file,
+        limit=args.limit,
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
+def cmd_gold_replay(args: argparse.Namespace) -> None:
+    from .gold_replay import replay_gold_data
+
+    report = replay_gold_data(
+        args.data,
+        out_dir=args.out_dir,
+        start_index=args.start_index,
+        end_index=args.end_index,
+        limit=args.limit,
+        subset_file=args.subset_file,
+        task_ids=args.task_id,
+        resume=not args.no_resume,
+        use_docker=args.use_docker,
+        scope=args.scope,
+        gpu_class=args.gpu_class,
+        max_transient_retries=args.max_transient_retries,
+        progress_every=args.progress_every,
+    )
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Offline artifact-transition experience evolution")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -457,6 +500,58 @@ def build_parser() -> argparse.ArgumentParser:
     p_select.add_argument("--limit", type=int, default=2000)
     p_select.add_argument("--seed", type=int, default=42)
     p_select.set_defaults(func=cmd_select_train)
+
+    p_gold_audit = sub.add_parser(
+        "gold-audit",
+        help="Statically audit OEA gold_tool_calls before teacher-forced replay",
+    )
+    p_gold_audit.add_argument("--data", default=DEFAULT_TRAIN_JSONL)
+    p_gold_audit.add_argument(
+        "--catalog",
+        default=DEFAULT_TOOL_CATALOG,
+        help=(
+            "Optional tool catalog JSON. Defaults to the live Terrabox registry so "
+            "static audit matches current executable tool schemas; pass a path to "
+            "reproduce an older catalog snapshot."
+        ),
+    )
+    p_gold_audit.add_argument("--subset-file", default=None)
+    p_gold_audit.add_argument("--out-dir", default="tmp/experience_evo/gold_replay/static_audit")
+    p_gold_audit.add_argument("--limit", type=int, default=None)
+    p_gold_audit.set_defaults(func=cmd_gold_audit)
+
+    p_gold_replay = sub.add_parser(
+        "gold-replay",
+        help="Teacher-forced real tool replay of OEA gold_tool_calls",
+    )
+    p_gold_replay.add_argument("--data", default=DEFAULT_TRAIN_JSONL)
+    p_gold_replay.add_argument("--out-dir", default="tmp/experience_evo/gold_replay/replay")
+    p_gold_replay.add_argument("--start-index", type=int, default=0)
+    p_gold_replay.add_argument("--end-index", type=int, default=None)
+    p_gold_replay.add_argument("--limit", type=int, default=None)
+    p_gold_replay.add_argument(
+        "--subset-file",
+        default=None,
+        help="Optional task/id file used only to filter rows from --data; gold calls are still read from --data.",
+    )
+    p_gold_replay.add_argument(
+        "--task-id",
+        action="append",
+        default=[],
+        help="Replay only a specific task id. Repeat for multiple task ids.",
+    )
+    p_gold_replay.add_argument("--no-resume", action="store_true")
+    p_gold_replay.add_argument("--use-docker", action="store_true")
+    p_gold_replay.add_argument("--scope", choices=["all", "online", "offline"], default="all")
+    p_gold_replay.add_argument("--gpu-class", choices=["any", "gpu", "nogpu"], default="any")
+    p_gold_replay.add_argument(
+        "--max-transient-retries",
+        type=int,
+        default=5,
+        help="Retry transient replay failures such as infra/provider timeout up to N times.",
+    )
+    p_gold_replay.add_argument("--progress-every", type=int, default=10)
+    p_gold_replay.set_defaults(func=cmd_gold_replay)
     return parser
 
 
