@@ -58,8 +58,10 @@ class StandardEvalRunner:
             HumanMessage(content=context.question),
         ]
         t0 = time.time()
+        extra = {}
         try:
             if context.sequential_tool_turns:
+                evolution_trace: list[dict] = []
                 all_messages, final = run_sequential_react_loop(
                     llm=context.llm,
                     tools=tools,
@@ -67,8 +69,13 @@ class StandardEvalRunner:
                     max_steps=context.config.max_iterations,
                     user=context.user,
                     verbose=context.verbose,
+                    evolution_augmenter=context.evolution_augmenter,
+                    task_metadata=context.task_metadata,
+                    evolution_trace=evolution_trace,
                 )
                 result_messages = all_messages
+                if evolution_trace:
+                    extra["evolution_trace"] = evolution_trace
             else:
                 graph = create_react_agent(context.llm, tools)
                 result = graph.invoke(
@@ -82,4 +89,4 @@ class StandardEvalRunner:
             elapsed = time.time() - t0
             result_messages = messages
             final = f"ERROR: {exc}"
-        return EvalModeResult(messages=result_messages, final=final, elapsed=elapsed)
+        return EvalModeResult(messages=result_messages, final=final, elapsed=elapsed, extra=extra)

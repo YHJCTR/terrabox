@@ -1,6 +1,8 @@
 import unittest
 
 from terrabox.agent.artifacts.readiness import ready_slugs_by_category
+from terrabox.agent.artifacts.extractors import update_artifact_state
+from terrabox.agent.artifacts.signatures import product_state_tokens
 from terrabox.agent.artifacts.state import extract_paths_from_text, initial_artifact_state
 from terrabox.core.registry import ToolSpec, registry
 
@@ -70,6 +72,41 @@ class ArtifactProgressiveTests(unittest.TestCase):
         )
 
         self.assertEqual(ready["osm_gis"], ["osm_gis.get_area_boundary", "osm_gis.add_pois_layer"])
+
+    def test_tool_error_does_not_create_success_product_state(self):
+        state = initial_artifact_state("task")
+
+        update_artifact_state(
+            state,
+            "compute.calculator",
+            {"expression": "bad"},
+            "Error in calculator: invalid syntax (<string>, line 1)",
+        )
+
+        self.assertEqual(state["successful_calls"], [])
+        self.assertEqual(state["failed_calls"][0]["tool"], "compute.calculator")
+        self.assertNotIn("result:from:compute.calculator", product_state_tokens(state))
+
+    def test_successful_call_records_keep_arguments_for_runtime_guards(self):
+        state = initial_artifact_state("task")
+
+        update_artifact_state(
+            state,
+            "geo_perception.instructsam",
+            {"image": "/tmp/a.jpg", "text": "garbage pile"},
+            '{"status": "success", "count": 1}',
+        )
+
+        self.assertEqual(state["successful_calls"], ["geo_perception.instructsam"])
+        self.assertEqual(
+            state["successful_call_records"],
+            [
+                {
+                    "tool": "geo_perception.instructsam",
+                    "args": {"image": "/tmp/a.jpg", "text": "garbage pile"},
+                }
+            ],
+        )
 
 
 if __name__ == "__main__":

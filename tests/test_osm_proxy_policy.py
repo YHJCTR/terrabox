@@ -76,7 +76,9 @@ def test_osm_proxy_context_uses_osmnx_timeout_setting_without_duplicate_kwarg(mo
 def test_normalise_poi_query_maps_generic_categories():
     assert osm_gis._normalise_poi_query("bar")[0] == {"amenity": "bar"}
     assert osm_gis._normalise_poi_query("bus stops")[0] == {"highway": "bus_stop"}
+    assert osm_gis._normalise_poi_query("marketplaces")[0] == {"amenity": "marketplace"}
     assert osm_gis._normalise_poi_query("shop=supermarket")[0] == {"shop": "supermarket"}
+    assert osm_gis._normalise_poi_query({"shop": "marketplace"})[0] == {"amenity": "marketplace"}
     assert osm_gis._normalise_poi_query('{"amenity": "school"}')[0] == {"amenity": "school"}
 
 

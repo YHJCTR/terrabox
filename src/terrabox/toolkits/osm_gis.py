@@ -65,6 +65,8 @@ _GENERIC_POI_TAGS: dict[str, dict[str, str]] = {
     "kindergartens": {"amenity": "kindergarten"},
     "library": {"amenity": "library"},
     "libraries": {"amenity": "library"},
+    "marketplace": {"amenity": "marketplace"},
+    "marketplaces": {"amenity": "marketplace"},
     "museum": {"tourism": "museum"},
     "museums": {"tourism": "museum"},
     "nightclub": {"amenity": "nightclub"},
@@ -292,6 +294,15 @@ def _normalise_generic_query_key(raw: str) -> str:
 
 
 def _normalise_poi_query(query: Any) -> tuple[Any, Optional[str]]:
+    if isinstance(query, dict):
+        normalized = {
+            str(key).strip().lower(): str(value).strip().lower()
+            for key, value in query.items()
+            if isinstance(key, str) and isinstance(value, str)
+        }
+        if normalized == {"shop": "marketplace"}:
+            tags = {"amenity": "marketplace"}
+            return tags, f"Normalized OSM query dict {query!r} to tag dict {tags}."
     if not isinstance(query, str):
         return query, None
 

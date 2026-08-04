@@ -269,6 +269,30 @@ def cmd_preview_v2(args: argparse.Namespace) -> None:
     print(injector.augment(args.query))
 
 
+def cmd_preview_v3(args: argparse.Namespace) -> None:
+    from .v3.runtime import ExperienceEvoV3Runtime
+
+    injector = ExperienceEvoV3Runtime(
+        args.store_dir,
+        top_k=args.top_k,
+        min_q=args.min_q,
+        max_risk=args.max_risk,
+        q_use_smoothing_k=args.q_use_smoothing_k,
+    )
+    current_state = [item.strip() for item in (args.current_state or "").split(",") if item.strip()]
+    if current_state:
+        print(
+            injector.step_hint(
+                args.query,
+                current_product_state=current_state,
+                images=args.images,
+                data_files=args.data_files,
+            )
+        )
+        return
+    print(injector.augment(args.query, images=args.images, data_files=args.data_files))
+
+
 def cmd_stats_v2(args: argparse.Namespace) -> None:
     from .v2.store import ExperienceEvoV2Store
 
@@ -489,6 +513,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_preview_v2.add_argument("--max-risk", type=float, default=0.75)
     p_preview_v2.add_argument("--q-use-smoothing-k", type=float, default=5.0)
     p_preview_v2.set_defaults(func=cmd_preview_v2)
+
+    p_preview_v3 = sub.add_parser("preview-v3", help="Preview the v3 filtered product-transition block")
+    p_preview_v3.add_argument("--store-dir", default=DEFAULT_STORE_V2)
+    p_preview_v3.add_argument("--query", required=True)
+    p_preview_v3.add_argument("--top-k", type=int, default=3)
+    p_preview_v3.add_argument("--min-q", type=float, default=0.0)
+    p_preview_v3.add_argument("--max-risk", type=float, default=0.75)
+    p_preview_v3.add_argument("--q-use-smoothing-k", type=float, default=5.0)
+    p_preview_v3.add_argument("--images", nargs="*", default=[])
+    p_preview_v3.add_argument("--data-files", nargs="*", default=[])
+    p_preview_v3.add_argument(
+        "--current-state",
+        default="",
+        help="Comma-separated product-state tokens for dynamic step-hint preview",
+    )
+    p_preview_v3.set_defaults(func=cmd_preview_v3)
 
     p_stats_v2 = sub.add_parser("stats-v2", help="Print v2 store stats")
     p_stats_v2.add_argument("--store-dir", default=DEFAULT_STORE_V2)

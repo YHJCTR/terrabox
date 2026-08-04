@@ -14,6 +14,8 @@ class EvalModeContext:
     allowed_slugs: list[str] | None = None
     image_paths: list[str] = field(default_factory=list)
     sequential_tool_turns: bool = False
+    evolution_augmenter: Any = None
+    task_metadata: dict[str, Any] = field(default_factory=dict)
     user: Any = None
     verbose: bool = True
 

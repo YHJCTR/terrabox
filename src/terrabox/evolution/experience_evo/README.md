@@ -275,11 +275,142 @@ PYTHONPATH=src $PY scripts/run_trajectory_experiment.py rollout \
   --no-skip-mock --no-skip-bing --no-skip-osm --no-skip-vlm --no-skip-changeos
 ```
 
+## 2026-08-04 v3 运行时修正版
+
+v3 不覆盖 v1/v2，也不要求重新构建 store。它直接复用 `build-v2` 产出的
+`families_v2.jsonl` / `experience_evo_v2.sqlite`，但修正 eval-time 检索和注入：
+
+- `experience_evo_v2`：按 query lexical overlap 取 family，容易在任务开局塞入后置产物转移，
+  例如 `gpkg + vector_layer -> display_on_map`；当 test task 没有 `task_type` 时，还会被
+  `type30/type31/gis_type*` 这类训练集 task type token 干扰。
+- `experience_evo_v3`：先从当前任务输入推断初始产物状态（`task_request`、`input:image`、
+  `input:raster`、`input:gpkg` 等），只检索 preconditions 已满足的第一步产物转移；
+  再用 query intent、输入形态和可见工具全集过滤明显错配的 family。
+- v3 注入更短，默认 top-k 为 3；统一 rollout 会把 `images`、`data_files` 和
+  `available_tools` 传给 augmenter，但不会传当前 eval 的 `expected_tools`、gold answer
+  或 task id。
+- v3 现在是“初始静态检索 + 工具返回后的动态 step hint”：任务开始前只注入当前输入
+  满足的第一步经验；standard eval 的 sequential tool loop 每次工具 observation 返回后，
+  用 `agent.artifacts` 更新当前产物状态，再调用 `step_hint()` 检索下一步 family。
+  结果文件会写入 `evolution_trace`，用于检查每步命中了哪些经验、推荐了哪些工具、
+  agent 实际选择了什么工具，以及选择是否落在经验推荐中。
+- v3 动态阶段会降低已经完成 target 的 family 和泛化 `task_request` 起步 family 权重；
+  对“已有感知产物 + 明确计算需求”的场景，会优先把经验推进到 `compute.*`，避免只重复
+  调用其它感知工具。
+- v3 动态阶段补了极窄的 runtime fallback：当离线 store 缺少某个显然必要的下游 family，
+  但当前产物状态和工具契约已经唯一指向下一步时，临时生成一条可审计的产物转移提示。
+  当前只覆盖已实测缺口：index change 在已有 1 个 `add_index_layer` 产物时继续推荐
+  第二个 `add_index_layer`，已有 2 个 index layer 后才推荐
+  `raster_layer:from:osm_gis.compute_index_change`；multi-target 的图像测量任务在已有 1 个
+  `geo_perception.instructsam` 结果时继续推荐第二个不同目标的 InstructSAM，在已有一个
+  `compute.calculator` 结果但仍缺目标计算时继续推荐 calculator；以及任务要求属性/健康/
+  状态判断但属性描述次数不足时，继续推荐
+  `geo_perception.region_attribute_description`。fallback 不读取 gold / expected tools /
+  answer / task id，也不写回经验库；它只用于避免 store 覆盖缺口让 step hint 推荐错工具。
+- v3 动态阶段新增 answer-ready 防护：如果当前产物状态已经包含可直接回答的结果
+  （例如 `compute.calculator`、`compute_route_dist`、`compute_index_change`、OCR/属性描述结果等），
+  step hint 会优先要求 final answer；如果模型仍继续发起工具调用，sequential loop 会拦截
+  该额外工具并要求直接输出最终答案。对 GSD/像素面积/距离测量任务，`vlm_analyze` 的描述文本
+  不视为可回答结果，必须等到可计算的像素/掩码证据和 calculator 等结果。对 `both/two/each`
+  等 multi-target 任务，answer-ready 会保留重复产物计数；只完成一个对象的属性描述或一次计算，
+  不会被当成整题已完成。
+- v3 还新增了窄口径执行 guard：对 GSD/像素距离/面积这类精确测量任务，如果模型首步想调用
+  `vlm_analyze` 或 `strip_rcnn_detect`，sequential loop 会在真实执行前拦截；单目标/局部对象
+  测量要求先用 `geo_perception.instructsam` 取得可测量像素/掩码证据。显式 `segment all` /
+  `sum pixel areas` / `combined ground area` 这类 bulk all-object segmentation 任务例外，会允许
+  并优先提示 `geo_perception.sam2_segment`。该 guard 会写入 `evolution_trace.guard_preview` /
+  `blocked_tool_calls`，便于后续审计经验是否真的约束了工具选择。
+- v3 guard 还会检查两类常见可观测工具误用：第一，图片参数必须来自当前 task image 或当前运行
+  产物，发现不存在/非当前任务的历史路径会在执行前拦截；第二，重复 evidence 工具时不再按
+  set token 粗暴拦截，而是记录 `successful_call_records` 中的工具参数，只拦截“同工具+同语义
+  target”的重复调用。multi-target 任务如果换了不同 `text`/target（例如先 `garbage pile`，
+  再 `big pond`），会允许继续调用同一 evidence 工具。对 damage/symmetry/health 这类已完成
+  定位、下一步应做属性描述的任务，若模型继续重复 `geo_perception.instructsam`，guard 会明确
+  要求改用 `geo_perception.region_attribute_description`，避免只“拦截重复”但模型不知道下一步。
+  非 visual 请求还会过滤 `geo_perception.add_text` 这类标注产物，避免把可视化动作混进计算/属性链路。
+- 工具状态更新现在不会把明确失败观察（例如 `Error in calculator:`）记录为成功产物状态；
+  失败调用只进入 `failed_calls`，避免 answer-ready 或下一步检索被错误结果污染。
+- OSM POI 参数归一也做了一个小修复：`marketplace(s)` 以及 `{"shop": "marketplace"}` 会归一为
+  `{"amenity": "marketplace"}`，避免 LongCat 把 marketplace 误当 shop tag 导致 no matching
+  features 后再重试。
+
+v3 额外过滤的典型错配：
+
+```text
+image-only detection task     -> 不推荐 OSM/display_on_map 后置经验
+no raster input task          -> 不推荐 get_bbox_from_raster
+single image non-change task  -> 不推荐 change_os_detect
+non-search geospatial task    -> 不推荐 bing_search.search
+OSM/感知任务开局             -> 不推荐 compute.* 直接计算，除非已有工具证据
+已有 target product          -> 不重复推荐同一产物转移
+已有感知结果且问题要求计算    -> 优先推荐 compute.* 下游计算
+已有 1 个 index layer 且问题要求变化 -> store 缺口时 runtime fallback 继续推荐 add_index_layer
+已有 2 个 index layer 且问题要求变化 -> store 缺口时 runtime fallback 推荐 compute_index_change
+已有感知+计算且还需属性判断    -> store 缺口时 runtime fallback 推荐 region_attribute_description
+multi-target 已有 1 个定位结果    -> store 缺口时 runtime fallback 推荐第二个不同目标的 InstructSAM
+multi-target 已有 1 个计算/属性结果 -> 未达到所需次数前不触发 answer-ready，继续推荐下游工具
+非 visual 请求                -> 不推荐 draw/display/plot 等可视化产物转移
+GSD/像素精确测量首步          -> 执行前拦截 VLM/SAM2/Strip-RCNN，改用 InstructSAM
+非当前任务图片路径             -> 执行前拦截，要求使用当前 task image / 当前运行产物
+已有可回答结果               -> 优先 final answer，不继续扩展工具链
+失败工具 observation          -> 不进入成功 product state
+```
+
+预览 v3 注入：
+
+```bash
+PY=/home/yuhongjie/miniconda3/envs/unsloth/bin/python
+PYTHONPATH=src $PY -m terrabox.evolution.experience_evo.runner preview-v3 \
+  --store-dir evolution_store/experience_evo/oea_train2000_v2_longcat_20260731 \
+  --query "Which fire station and police station are closest in Banff National Park?"
+
+PYTHONPATH=src $PY -m terrabox.evolution.experience_evo.runner preview-v3 \
+  --store-dir evolution_store/experience_evo/oea_train2000_v2_longcat_20260731 \
+  --query "Detect all domestic garbage regions and calculate their combined area." \
+  --images /data1/yuhongjie2/OpenEarthAgent/data/test/TG_70028.jpg
+
+# 模拟工具返回后的动态下一步检索
+PYTHONPATH=src $PY -m terrabox.evolution.experience_evo.runner preview-v3 \
+  --store-dir evolution_store/experience_evo/oea_train2000_v2_longcat_20260731 \
+  --query "Detect all domestic garbage regions and calculate their combined area." \
+  --images /data1/yuhongjie2/OpenEarthAgent/data/test/TG_70028.jpg \
+  --current-state "task_request,input:image,result:from:geo_perception.instructsam"
+
+# 模拟已有计算结果后的停止提示
+PYTHONPATH=src $PY -m terrabox.evolution.experience_evo.runner preview-v3 \
+  --store-dir evolution_store/experience_evo/oea_train2000_v2_longcat_20260731 \
+  --query "Detect all domestic garbage regions and calculate their combined area." \
+  --images /data1/yuhongjie2/OpenEarthAgent/data/test/TG_70028.jpg \
+  --current-state "task_request,input:image,result:from:geo_perception.instructsam,result:from:compute.calculator"
+```
+
+使用 v3 跑 eval：
+
+```bash
+PY=/home/yuhongjie/miniconda3/envs/unsloth/bin/python
+PYTHONPATH=src $PY scripts/run_trajectory_experiment.py rollout \
+  --task-file data/oea_full_sft/openearth_test_tasks.json \
+  --experiment experience_evo_v3_oea_train2000_longcat_eval_20260804 \
+  --mode standard \
+  --output-dir tmp/trajectories/experience_evo_v3_oea_train2000_longcat_eval_20260804/standard \
+  --llm-provider longcat \
+  --evolution-method experience_evo_v3 \
+  --evolution-store evolution_store/experience_evo/oea_train2000_v2_longcat_20260731 \
+  --use-docker \
+  --no-skip-mock --no-skip-bing --no-skip-osm --no-skip-vlm --no-skip-changeos \
+  --resume
+```
+
+当前 v3 版本不需要额外模型；它先修正“经验是否被正确检索和注入”。如果这一步仍然提升不够，
+下一阶段再考虑两个模型增强：一是用 LongCat 对候选 family 做 query relevance rerank，
+二是加本地 embedding/reranker（例如 BGE/e5 系列）替代纯 lexical 检索。
+
 切换新旧模式只需要换 method 名称和 store：
 
 ```text
-Old: --evolution-method experience_evo    --evolution-store <v1 store>
-New: --evolution-method experience_evo_v2 --evolution-store <v2 store>
+v1: --evolution-method experience_evo    --evolution-store <v1 store>
+v2: --evolution-method experience_evo_v2 --evolution-store <v2 store>
+v3: --evolution-method experience_evo_v3 --evolution-store <v2 store>
 ```
 
 ## 2026-07-31 v2 nightly 初步结果
@@ -297,28 +428,30 @@ eval:  tmp/trajectories/experience_evo_v2_oea_train2000_longcat_eval_20260731/st
 - 来源：`longcat_oea_train2000_seed42_base_nightly_20260724` 的 train2000 LongCat base rollout。
 - 抽取：`13243` 条 `events_v2`。
 - 蒸馏：LongCat 生成 `500` 个 product-transition family。
-- eval：OEA test `1162` 条；截至 2026-07-31 14:30 CST，目录停在 `1011/1162`
-  （`completed=933`、`failed=78`），当前无活跃 LongCat rollout/GPU/container 进程。
-  后续先确认 gold replay 口径，再决定是否补完剩余样本。
+- eval：OEA test `1162` 条，已跑完；实际结果为 `completed=1070`、`failed=90`、
+  `empty_final=2`。`rollout_report status` 旧展示只统计 completed+failed，所以曾显示
+  `1160/1162`，手工按 results 文件确认共有 1162 条。
 
-与 LongCat base test rollout 配对对比（当前已完成的共同 `999` 条）：
+与 LongCat base test rollout 配对对比（全量 1162 条）：
 
 | 指标 | LongCat base | ExperienceEvo v2 | Delta |
 |---|---:|---:|---:|
-| success_rate | 86.29% | 87.19% | +0.90 pp |
-| set-F1 | 0.676 | 0.688 | +0.012 |
-| multiset-F1 | 0.608 | 0.623 | +0.015 |
-| exact_match | 15.22% | 17.22% | +2.00 pp |
-| ordered_exact | 11.51% | 12.71% | +1.20 pp |
-| AnyOrder / SameOrder / Unique | 55.76 / 54.65 / 60.06 | 56.06 / 54.45 / 62.86 | +0.30 / -0.20 / +2.80 pp |
-| perception F1 | 34.07 | 33.99 | -0.08 |
-| operation F1 | 35.67 | 41.07 | +5.40 |
-| logic F1 | 30.76 | 38.68 | +7.92 |
-| gis F1 | 83.12 | 83.75 | +0.62 |
-| same-tool>=4 tasks | 161 | 141 | -20 |
-| errors/task | 0.40 | 0.47 | +0.07 |
-| tokens/task | 54,807 | 68,233 | +13,426 |
-| time/task | 62.1s | 74.4s | +12.3s |
+| success_rate | 87.26% | 87.78% | +0.52 pp |
+| set-F1 | 0.696 | 0.707 | +0.011 |
+| multiset-F1 | 0.634 | 0.643 | +0.009 |
+| exact | 15.49% | 17.13% | +1.64 pp |
+| ordered exact | 11.96% | 12.48% | +0.52 pp |
+| AnyOrder | 59.72% | 59.90% | +0.17 pp |
+| SameOrder | 58.69% | 58.43% | -0.26 pp |
+| Unique | 63.51% | 65.83% | +2.32 pp |
+| perception F1 | 33.75 | 33.79 | +0.04 |
+| operation F1 | 33.53 | 39.62 | +6.09 |
+| logic F1 | 29.12 | 36.50 | +7.38 |
+| gis F1 | 83.09 | 82.03 | -1.06 |
+| same-tool>=4 tasks | 179 | 155 | -24 |
+| errors/task | 0.43 | 0.57 | +0.14 |
+| tokens/task | 54,145 | 68,948 | +14,804 |
+| time/task | 67.5s | 95.2s | +27.7s |
 
 阶段性判断：v2 比 v1 train-store eval 更健康，也相对 LongCat base 有正向信号，
 尤其 logic/operation 工具类别和重复调用下降；但整体提升还不是“好看”的大幅提升。

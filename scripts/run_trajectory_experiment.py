@@ -36,6 +36,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import logging
 import os
@@ -731,6 +732,7 @@ def run_single_task(
     tracer,
     allowed_slugs: list[str] | None = None,
     evolution_prompt: str = "",
+    evolution_augmenter=None,
 ) -> dict:
     """Run a single task through the agent, return result dict with complete conversation history."""
     from terrabox.agent.eval_modes import EvalModeContext, get_eval_mode_runner
@@ -764,6 +766,14 @@ def run_single_task(
                 allowed_slugs=allowed_slugs,
                 image_paths=images,
                 sequential_tool_turns=True,
+                evolution_augmenter=evolution_augmenter,
+                task_metadata={
+                    "question": task["question"],
+                    "task_type": task.get("type") or task.get("task_type") or "unknown",
+                    "images": images,
+                    "data_files": data_files,
+                    "available_tools": allowed_slugs,
+                },
                 user=None,
                 verbose=False,
             )
@@ -803,17 +813,37 @@ def run_single_task(
         "final_answer_full": final_clean,
         "has_tool_error": has_error,
         "has_tool_oom": has_tool_oom,
+        "evolution_trace": result.extra.get("evolution_trace", []),
         # Complete conversation history with parameters
         "conversation_history": conversation_history,
     }
 
 
-def _get_evolution_prompt(task: dict, augmenter) -> str:
+def _get_evolution_prompt(task: dict, augmenter, *, allowed_slugs: list[str] | None = None) -> str:
     """Retrieve the method-specific prompt block for one task."""
     if augmenter is None:
         return ""
     try:
-        return augmenter.augment(task.get("question", ""))
+        question = task.get("question", "")
+        kwargs = {
+            "task_type": task.get("type") or task.get("task_type") or "unknown",
+            "images": task.get("images") or [],
+            "data_files": task.get("data_files") or [],
+            "available_tools": allowed_slugs,
+        }
+        signature = inspect.signature(augmenter.augment)
+        params = signature.parameters
+        accepts_kwargs = any(
+            param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()
+        )
+        if accepts_kwargs:
+            return augmenter.augment(question, **kwargs)
+        accepted = {
+            key: value
+            for key, value in kwargs.items()
+            if key in params and value is not None
+        }
+        return augmenter.augment(question, **accepted)
     except Exception as e:
         log.warning("Evolution augment failed for %s: %s", task.get("task_id") or task.get("id"), e)
         return ""
@@ -833,7 +863,7 @@ def _run_task_with_retries(
 ) -> dict:
     """Run one rollout task with whole-episode transient retry."""
     task_id = task.get("task_id") or task.get("id")
-    evo_prompt = _get_evolution_prompt(task, augmenter)
+    evo_prompt = _get_evolution_prompt(task, augmenter, allowed_slugs=allowed_slugs)
 
     retry_started_at = time.monotonic()
     transient_retry_time_exhausted = False
@@ -851,6 +881,7 @@ def _run_task_with_retries(
                 tracer=tracer,
                 allowed_slugs=allowed_slugs,
                 evolution_prompt=evo_prompt,
+                evolution_augmenter=augmenter,
             )
             cleanup_gpu_memory()
         except Exception as e:

@@ -26,8 +26,11 @@ def safe_json_loads(text: str) -> dict[str, Any]:
 
 def parse_tool_observation(text: str) -> tuple[dict[str, Any], bool]:
     parsed = safe_json_loads(text)
+    stripped = (text or "").lstrip()
     is_error = (
-        text.startswith("Tool execution error:")
+        stripped.startswith("Tool execution error:")
+        or stripped.startswith("Error in ")
+        or stripped.startswith("ERROR:")
         or parsed.get("status") == "error"
         or "not a valid tool" in text
     )
@@ -100,6 +103,9 @@ def update_artifact_state(
     else:
         state["last_error"] = None
         state.setdefault("successful_calls", []).append(slug)
+        state.setdefault("successful_call_records", []).append(
+            {"tool": slug, "args": args}
+        )
 
     if not is_error:
         _record_contract_outputs(state, slug, args, parsed)

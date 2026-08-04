@@ -165,6 +165,18 @@ def get_prompt_augmenter(
             q_use_smoothing_k=float(kwargs.get("q_use_smoothing_k", 5.0)),
         )
 
+    elif method in {"experience_evo_v3", "experienceevo_v3", "product_transition_evo_v3"}:
+        from .experience_evo.v3 import ExperienceEvoV3Runtime
+
+        v3_top_k = int(kwargs.get("v3_top_k", 3 if top_k == 5 else top_k))
+        return ExperienceEvoV3Runtime(
+            store_dir or "evolution_store/experience_evo/oea_train2000_v2",
+            top_k=v3_top_k,
+            min_q=float(kwargs.get("min_q", 0.0)),
+            max_risk=float(kwargs.get("max_risk", 0.75)),
+            q_use_smoothing_k=float(kwargs.get("q_use_smoothing_k", 5.0)),
+        )
+
     elif method == "causalevo":
         if store_dir is None:
             store_dir = kwargs.get("store_dir", "evolution_store/causalevo")
