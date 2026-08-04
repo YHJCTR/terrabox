@@ -70,14 +70,27 @@ _PERCEPTION_TERMS = {
     "airplane",
     "bbox",
     "building",
+    "cardinal",
+    "corner",
     "count",
     "detect",
+    "direction",
+    "directional",
+    "entrance",
+    "flooded",
     "garbage",
     "gsd",
     "helicopter",
+    "house",
+    "houses",
     "image",
+    "intercardinal",
+    "largest",
     "mask",
+    "non-flooded",
     "object",
+    "orientation",
+    "parking",
     "pixel",
     "pixels",
     "pool",
@@ -345,6 +358,41 @@ class ExperienceEvoV3Runtime(PromptAugmenter):
                 "write the final answer if the requested evidence is already present."
             )
 
+        if (
+            profile["count_distribution"]
+            and counts["result:from:geo_perception.count_given_object"] < required_count
+            and tool
+            in {
+                "geo_perception.vlm_analyze",
+                "geo_perception.instructsam",
+                "geo_perception.sam2_segment",
+                "geo_perception.strip_rcnn_detect",
+                "geo_perception.draw_bboxes",
+            }
+        ):
+            remaining = required_count - counts["result:from:geo_perception.count_given_object"]
+            return (
+                "ExperienceEvo v3 count/plot guard: this task asks for a distribution "
+                "or count over object classes. Do not use a scene description, mask, "
+                f"or annotation tool `{tool}` as a substitute for object counts. Call "
+                f"`geo_perception.count_given_object` for {remaining} remaining "
+                "current-task class(es), then use `compute.plot` if the user requested "
+                "a plotted distribution."
+            )
+
+        if (
+            profile["plot_distribution"]
+            and counts["result:from:geo_perception.count_given_object"] >= required_count
+            and "image:from:compute.plot" not in state
+            and tool != "compute.plot"
+        ):
+            return (
+                "ExperienceEvo v3 count/plot guard: the required object count result(s) "
+                "already exist and the user requested a plot. Call `compute.plot` now "
+                "using the current-run count values; do not switch to another perception "
+                "or annotation tool."
+            )
+
         if profile["index"]:
             index_layer_count = counts["raster_layer:from:osm_gis.add_index_layer"]
             if (
@@ -433,6 +481,7 @@ class ExperienceEvoV3Runtime(PromptAugmenter):
             profile["localized_attribute"]
             and has_instructsam
             and attribute_count < required_count
+            and not (profile["precise_measurement"] and not has_compute_result)
             and tool
             in {
                 "geo_perception.vlm_analyze",
@@ -877,6 +926,80 @@ def _fallback_families(
         )
 
     if (
+        profile["localized_attribute"]
+        and _tool_available("geo_perception.instructsam", available_tools)
+        and counts["result:from:geo_perception.instructsam"] == 0
+    ):
+        source = ["input:image"] if "input:image" in state else ["task_request"]
+        families.append(
+            _runtime_family(
+                family_id="v3_fallback_localized_attribute_localize",
+                intent="runtime:localized-attribute+localize",
+                source=source,
+                target=["result:from:geo_perception.instructsam"],
+                tool="geo_perception.instructsam",
+                goal="Localize the object or region before answering a localized attribute, direction, or comparison question.",
+                binding_rules=[
+                    "Use the concrete target object/region from the current task text.",
+                    "Do not use a global VLM scene description as a substitute for localized evidence.",
+                ],
+                output_checks=[
+                    "Observation should include a localized region, mask, bbox, or object result for the current task target."
+                ],
+            )
+        )
+
+    if (
+        profile["count_distribution"]
+        and _tool_available("geo_perception.count_given_object", available_tools)
+        and counts["result:from:geo_perception.count_given_object"] < required_count
+    ):
+        source = ["task_request"]
+        if counts["result:from:geo_perception.count_given_object"] > 0:
+            source = ["result:from:geo_perception.count_given_object"]
+        families.append(
+            _runtime_family(
+                family_id="v3_fallback_count_distribution",
+                intent="runtime:count+distribution",
+                source=source,
+                target=["result:from:geo_perception.count_given_object"] * required_count,
+                tool="geo_perception.count_given_object",
+                goal="Count every requested object class before plotting or answering a distribution question.",
+                binding_rules=[
+                    "Use the current task's class labels, e.g. flooded house and non-flooded house, not a generic scene prompt.",
+                    "Call once per requested class/category and preserve each returned count separately.",
+                ],
+                output_checks=[
+                    "Current product state should contain count_given_object result(s) for the requested class distribution."
+                ],
+            )
+        )
+
+    if (
+        profile["plot_distribution"]
+        and _tool_available("compute.plot", available_tools)
+        and counts["result:from:geo_perception.count_given_object"] >= required_count
+        and "image:from:compute.plot" not in state
+    ):
+        families.append(
+            _runtime_family(
+                family_id="v3_fallback_plot_distribution",
+                intent="runtime:plot+distribution",
+                source=["result:from:geo_perception.count_given_object"],
+                target=["image:from:compute.plot"],
+                tool="compute.plot",
+                goal="Plot the distribution from current-run object count results.",
+                binding_rules=[
+                    "Use the count values returned in this run as the plotted data.",
+                    "Use class/category labels from the current task; do not invent values.",
+                ],
+                output_checks=[
+                    "Observation should include an output image path from compute.plot."
+                ],
+            )
+        )
+
+    if (
         profile["index"]
         and _tool_available("osm_gis.add_index_layer", available_tools)
         and counts["raster_layer:from:osm_gis.add_index_layer"] == 1
@@ -1307,6 +1430,53 @@ def _query_profile(
     )
     attribute_terms = {"attribute", "condition", "health", "classify", "classification"}
     attribute_intent = bool(attribute_terms & q_tokens)
+    count_distribution = bool(
+        has_image
+        and (
+            "distribution" in query_lower
+            or "how many" in query_lower
+            or "number of" in query_lower
+            or re.search(r"\bcount(?:s|ed|ing)?\b", query_lower)
+        )
+        and bool(
+            {
+                "building",
+                "buildings",
+                "flooded",
+                "garbage",
+                "house",
+                "houses",
+                "object",
+                "objects",
+                "vehicle",
+                "vehicles",
+            }
+            & q_tokens
+        )
+    )
+    plot_distribution = bool(count_distribution and ("plot" in q_tokens or "distribution" in q_tokens))
+    spatial_attribute_terms = {
+        "cardinal",
+        "corner",
+        "direction",
+        "directional",
+        "entrance",
+        "intercardinal",
+        "largest",
+        "north",
+        "northeast",
+        "northwest",
+        "orientation",
+        "oriented",
+        "parking",
+        "south",
+        "southeast",
+        "southwest",
+        "west",
+    }
+    spatial_attribute_intent = bool(has_image and (q_tokens & spatial_attribute_terms))
+    if spatial_attribute_intent:
+        attribute_intent = True
     # "Assess" is common in GIS/index-change questions ("assess urban growth")
     # and should not force a geo_perception.region_attribute_description step.
     if "assess" in q_tokens and has_image and not index_intent:
@@ -1324,8 +1494,17 @@ def _query_profile(
                     "both",
                     "building",
                     "buildings",
+                    "corner",
                     "damage",
                     "damaged",
+                    "entrance",
+                    "flooded",
+                    "house",
+                    "houses",
+                    "largest",
+                    "non-flooded",
+                    "orientation",
+                    "parking",
                     "roof",
                     "similarly",
                     "symmetry",
@@ -1376,6 +1555,8 @@ def _query_profile(
         "region_mask": region_mask_intent,
         "precise_measurement": precise_measurement,
         "bulk_segmentation": bulk_segmentation,
+        "count_distribution": count_distribution,
+        "plot_distribution": plot_distribution,
         "attribute": attribute_intent,
         "localized_attribute": localized_attribute,
         "multi_target": multi_target,
@@ -1425,6 +1606,14 @@ def _hard_mismatch(
         return True
     if profile["precise_measurement"] and only_vlm:
         return True
+    if profile["localized_attribute"] and only_vlm:
+        return True
+    if profile["count_distribution"]:
+        count_ready = current_state.count("result:from:geo_perception.count_given_object") >= _required_result_count(profile)
+        if not count_ready and not any(tool == "geo_perception.count_given_object" for tool in tools):
+            return True
+        if count_ready and profile["plot_distribution"] and not any(tool == "compute.plot" for tool in tools):
+            return True
     if any_search and not profile["search"]:
         return True
     return False
@@ -1460,6 +1649,14 @@ def _intent_score(
 
     if "geo_perception.instructsam" in tool_text and profile["region_mask"]:
         score += 3.0
+    if "geo_perception.instructsam" in tool_text and profile["localized_attribute"]:
+        score += 8.0
+    if "geo_perception.region_attribute_description" in tool_text and profile["localized_attribute"]:
+        score += 5.0
+    if "geo_perception.count_given_object" in tool_text and profile["count_distribution"]:
+        score += 9.0
+    if "compute.plot" in tool_text and profile["plot_distribution"]:
+        score += 7.0
     if "geo_perception.instructsam" in tool_text and profile["precise_measurement"]:
         score += 2.0 if profile["bulk_segmentation"] else 8.0
     if "geo_perception.sam2_segment" in tool_text and profile["region_mask"]:
@@ -1472,6 +1669,10 @@ def _intent_score(
         score -= 5.0
     if "geo_perception.vlm_analyze" in tool_text and profile["precise_measurement"]:
         score -= 7.0
+    if "geo_perception.vlm_analyze" in tool_text and profile["localized_attribute"]:
+        score -= 8.0
+    if "geo_perception.vlm_analyze" in tool_text and profile["count_distribution"]:
+        score -= 8.0
     if "geo_perception.change_os_detect" in tool_text and profile["change"]:
         score += 3.0
 
@@ -1486,6 +1687,27 @@ def _intent_score(
 
 def _task_shape_guidance(profile: dict[str, object]) -> list[str]:
     lines: list[str] = []
+    if profile["has_image"] and profile["count_distribution"]:
+        lines.append(
+            "Task-shape rule: this image task asks for object counts or a distribution. "
+            "Use geo_perception.count_given_object once per requested class/category, "
+            "then use compute.plot when a plot is requested."
+        )
+        lines.append(
+            "Do not use geo_perception.vlm_analyze, draw_bboxes, or generic segmentation "
+            "as a substitute for returned count values."
+        )
+    if profile["has_image"] and profile["localized_attribute"]:
+        lines.append(
+            "Task-shape rule: this image task asks about a localized object attribute, "
+            "spatial relation, direction, or comparison. Use geo_perception.instructsam "
+            "to localize the relevant object/region, then use "
+            "geo_perception.region_attribute_description for the localized evidence."
+        )
+        lines.append(
+            "Do not treat a global geo_perception.vlm_analyze scene description as "
+            "sufficient evidence for localized attribute or direction questions."
+        )
     if profile["has_image"] and profile["precise_measurement"]:
         preferred_tool = (
             "geo_perception.sam2_segment for bulk all-object segmentation"
@@ -1534,7 +1756,16 @@ def _answer_ready_reason(profile: dict[str, object], current_state: list[str]) -
     has_attribute_result = "result:from:geo_perception.region_attribute_description" in state
     needs_numeric_result = bool(profile["precise_measurement"] or profile["calc"])
     needs_attribute_result = bool(profile["attribute"])
+    needs_count_result = bool(profile["count_distribution"])
 
+    if needs_count_result and counts["result:from:geo_perception.count_given_object"] < required_count:
+        return ""
+    if (
+        needs_count_result
+        and profile["plot_distribution"]
+        and "image:from:compute.plot" not in state
+    ):
+        return ""
     if needs_numeric_result and not (has_compute_result or has_route_distance or has_index_change):
         return ""
     if (
@@ -1562,6 +1793,13 @@ def _answer_ready_reason(profile: dict[str, object], current_state: list[str]) -
         return "route/distance result is available"
     if has_index_change:
         return "index-change result is available"
+    if wants_visual and any(
+        token.startswith("image:from:")
+        or token.startswith("map:from:")
+        or token.startswith("figure:from:")
+        for token in state
+    ):
+        return "requested visual artifact is available"
 
     answer_tools = {
         "geo_perception.count_given_object": "object count is available",
@@ -1576,17 +1814,12 @@ def _answer_ready_reason(profile: dict[str, object], current_state: list[str]) -
         if tool in answer_tools:
             return answer_tools[tool]
 
-    if wants_visual and any(
-        token.startswith("image:from:")
-        or token.startswith("map:from:")
-        or token.startswith("figure:from:")
-        for token in state
-    ):
-        return "requested visual artifact is available"
     return ""
 
 
 def _required_result_count(profile: dict[str, object]) -> int:
+    if profile.get("count_distribution"):
+        return 2 if profile.get("multi_target") or profile.get("plot_distribution") else 1
     return 2 if profile.get("multi_target") else 1
 
 

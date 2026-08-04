@@ -444,6 +444,56 @@ def test_v3_guard_blocks_vlm_for_localized_damage_attribute_comparison(tmp_path:
     assert "geo_perception.instructsam" in blocked
 
 
+def test_v3_guard_blocks_vlm_for_spatial_attribute_questions(tmp_path: Path):
+    store_dir = _write_store(tmp_path)
+    runtime = ExperienceEvoV3Runtime(store_dir, top_k=3)
+
+    blocked_largest = runtime.guard_tool_call(
+        "The largest non-flooded house is in the northwest corner of the image?",
+        selected_tool="geo_perception.vlm_analyze",
+        current_product_state=["task_request", "input:image"],
+        images=["/tmp/flood.jpg"],
+    )
+
+    assert "localized attribute/comparison" in blocked_largest
+    assert "geo_perception.instructsam" in blocked_largest
+
+    blocked_parking = runtime.guard_tool_call(
+        "Could you identify the parking lot located south of the tennis courts and specify "
+        "the directional orientation of its entrance using cardinal or intercardinal points?",
+        selected_tool="geo_perception.vlm_analyze",
+        current_product_state=["task_request", "input:image"],
+        images=["/tmp/parking.jpg"],
+    )
+
+    assert "localized attribute/comparison" in blocked_parking
+    assert "geo_perception.instructsam" in blocked_parking
+
+
+def test_v3_spatial_attribute_not_answer_ready_after_vlm_only(tmp_path: Path):
+    store_dir = _write_empty_store(tmp_path)
+    runtime = ExperienceEvoV3Runtime(store_dir, top_k=2)
+
+    prompt = runtime.step_hint(
+        "Could you identify the parking lot located south of the tennis courts and specify "
+        "the directional orientation of its entrance using cardinal or intercardinal points?",
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.vlm_analyze",
+        ],
+        images=["/tmp/parking.jpg"],
+        available_tools=[
+            "geo_perception.instructsam",
+            "geo_perception.region_attribute_description",
+            "geo_perception.vlm_analyze",
+        ],
+    )
+
+    assert "Answer-ready signal" not in prompt
+    assert "geo_perception.instructsam" in prompt
+
+
 def test_v3_guard_blocks_vlm_after_localization_for_attribute_comparison(tmp_path: Path):
     store_dir = _write_store(tmp_path)
     runtime = ExperienceEvoV3Runtime(store_dir, top_k=3)
@@ -463,6 +513,83 @@ def test_v3_guard_blocks_vlm_after_localization_for_attribute_comparison(tmp_pat
     assert "localized evidence already exists" in blocked
     assert "geo_perception.region_attribute_description" in blocked
     assert "do not use VLM scene descriptions" in blocked
+
+
+def test_v3_count_distribution_uses_count_then_plot(tmp_path: Path):
+    store_dir = _write_empty_store(tmp_path)
+    runtime = ExperienceEvoV3Runtime(store_dir, top_k=3)
+    query = "Plot the distribution of flooded and non flooded house."
+
+    prompt = runtime.augment(
+        query,
+        images=["/tmp/flood.jpg"],
+        available_tools=[
+            "geo_perception.count_given_object",
+            "geo_perception.vlm_analyze",
+            "geo_perception.draw_bboxes",
+            "compute.plot",
+        ],
+    )
+
+    assert "geo_perception.count_given_object" in prompt
+    assert "Tool ranking: geo_perception.vlm_analyze" not in prompt
+    assert "Tool ranking: geo_perception.draw_bboxes" not in prompt
+
+    blocked_vlm = runtime.guard_tool_call(
+        query,
+        selected_tool="geo_perception.vlm_analyze",
+        current_product_state=["task_request", "input:image"],
+        images=["/tmp/flood.jpg"],
+    )
+
+    assert "count/plot guard" in blocked_vlm
+    assert "geo_perception.count_given_object" in blocked_vlm
+
+    after_one_count = runtime.step_hint(
+        query,
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.count_given_object",
+        ],
+        images=["/tmp/flood.jpg"],
+        available_tools=["geo_perception.count_given_object", "compute.plot"],
+    )
+
+    assert "Answer-ready signal" not in after_one_count
+    assert "Tool ranking: geo_perception.count_given_object" in after_one_count
+    assert "Tool ranking: compute.plot" not in after_one_count
+
+    after_two_counts = runtime.step_hint(
+        query,
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.count_given_object",
+            "result:from:geo_perception.count_given_object",
+        ],
+        images=["/tmp/flood.jpg"],
+        available_tools=["geo_perception.count_given_object", "compute.plot"],
+    )
+
+    assert "Answer-ready signal" not in after_two_counts
+    assert "Tool ranking: compute.plot" in after_two_counts
+    assert "Tool ranking: geo_perception.count_given_object" not in after_two_counts
+
+    ready = runtime.step_hint(
+        query,
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.count_given_object",
+            "result:from:geo_perception.count_given_object",
+            "image:from:compute.plot",
+        ],
+        images=["/tmp/flood.jpg"],
+        available_tools=["geo_perception.count_given_object", "compute.plot"],
+    )
+
+    assert "Answer-ready signal: requested visual artifact is available" in ready
 
 
 def test_v3_guard_redirects_repeated_localized_instructsam_to_attribute_description(tmp_path: Path):
