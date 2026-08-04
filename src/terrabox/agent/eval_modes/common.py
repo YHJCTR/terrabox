@@ -125,6 +125,14 @@ def _extract_guard_allowed_tools(text: str) -> list[str]:
     return tools
 
 
+def _max_repeated_block_count(trace: dict[str, Any]) -> int:
+    counts: dict[str, int] = {}
+    for tool in trace.get("blocked_tool_calls") or []:
+        tool_name = str(tool)
+        counts[tool_name] = counts.get(tool_name, 0) + 1
+    return max(counts.values(), default=0)
+
+
 def run_sequential_react_loop(
     *,
     llm,
@@ -198,8 +206,10 @@ def run_sequential_react_loop(
             evolution_trace.append({"step": step, "error": f"{type(exc).__name__}: {exc}"})
             return
         hint = str(hint or "").strip()
-        if not hint or hint == last_step_hint:
+        if not hint:
             last_hint_trace_index = None
+            return
+        if hint == last_step_hint:
             return
         last_step_hint = hint
         messages.append(HumanMessage(content=hint))
@@ -290,7 +300,10 @@ def run_sequential_react_loop(
             guard_to_user += (
                 "\n\nExperienceEvo repeated-block guard: this same blocked tool has "
                 "already been requested more than once in the current product state. "
-                "Stop retrying it and advance to the allowed downstream tool."
+                "Stop retrying it and advance to the allowed downstream tool. If the "
+                "remaining evidence cannot be produced from the current observations, "
+                "write the final answer with that limitation instead of repeating the "
+                "blocked tool."
             )
         evolution_trace[trace_index].update(
             {
@@ -340,6 +353,17 @@ def run_sequential_react_loop(
                 trace = evolution_trace[trace_index]
                 recommended_tools = trace.get("recommended_tools") or []
                 if recommended_tools and not trace.get("answer_ready"):
+                    if _max_repeated_block_count(trace) >= 2:
+                        trace.update(
+                            {
+                                "model_decision": "final_after_repeated_guard",
+                                "selected_tool": None,
+                                "selected_in_recommendations": None,
+                                "resolved_with_final_answer": True,
+                            }
+                        )
+                        messages.append(ai_msg)
+                        return messages, ai_msg.content or ""
                     blocked = list(trace.get("blocked_final_answers") or [])
                     blocked.append(strip_think(ai_msg.content or "")[:500])
                     trace.update(

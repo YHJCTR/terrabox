@@ -48,8 +48,11 @@ _OSM_TERMS = {
     "within",
 }
 _INDEX_TERMS = {
+    "burn",
+    "burned",
     "change",
     "decrease",
+    "enhanced",
     "growth",
     "index",
     "layer",
@@ -57,6 +60,9 @@ _INDEX_TERMS = {
     "ndbi",
     "ndvi",
     "raster",
+    "regrowth",
+    "severity",
+    "unburned",
     "urban",
 }
 _PERCEPTION_TERMS = {
@@ -322,6 +328,67 @@ class ExperienceEvoV3Runtime(PromptAugmenter):
         has_compute_result = calculator_count > 0
         has_tool_product = any(":from:" in token for token in current_state)
 
+        if tool == "bing_search.search" and not profile["search"]:
+            return (
+                "ExperienceEvo v3 tool guard: this task does not ask for web/current "
+                "information, so `bing_search.search` is an unrelated detour. Continue "
+                "with the product-state transition recommended for the current evidence; "
+                "for image measurement/classification tasks this usually means "
+                "`compute.calculator` and/or `geo_perception.region_attribute_description`."
+            )
+
+        if tool in _VISUAL_OUTPUT_TOOLS and not profile["visual"]:
+            return (
+                "ExperienceEvo v3 tool guard: the user did not request a plot, map, "
+                f"annotation, or visualization, so `{tool}` is an unnecessary output "
+                "tool for this task. Continue with the next analytic transition or "
+                "write the final answer if the requested evidence is already present."
+            )
+
+        if profile["index"]:
+            index_layer_count = counts["raster_layer:from:osm_gis.add_index_layer"]
+            if (
+                tool == "osm_gis.get_area_boundary"
+                and (
+                    "gpkg:from:osm_gis.get_area_boundary" in state
+                    or "table:from:osm_gis.get_area_boundary" in state
+                )
+            ):
+                next_tool = (
+                    "`osm_gis.compute_index_change`"
+                    if index_layer_count >= 2
+                    else "`osm_gis.add_index_layer` for the missing temporal/input raster"
+                )
+                return (
+                    "ExperienceEvo v3 index guard: a current-run AOI/boundary product "
+                    "already exists. Do not call `osm_gis.get_area_boundary` again. "
+                    f"Continue with {next_tool}, using current-run artifacts only."
+                )
+            if tool == "osm_gis.add_index_layer" and index_layer_count >= 2:
+                return (
+                    "ExperienceEvo v3 index guard: two current-run index layers already "
+                    "exist. Do not add another index layer; call "
+                    "`osm_gis.compute_index_change` next using those current-run layers."
+                )
+            if tool == "osm_gis.add_index_layer" and index_layer_count >= 1:
+                layer_name = _selected_arg_value(
+                    selected_args,
+                    ("layer_name", "output_layer", "target_layer", "name"),
+                )
+                previous_layers = _previous_arg_values(
+                    kwargs.get("artifact_state"),
+                    tool,
+                    ("layer_name", "output_layer", "target_layer", "name"),
+                )
+                if layer_name and any(_same_semantic_target(layer_name, prev) for prev in previous_layers):
+                    return (
+                        "ExperienceEvo v3 index guard: this `osm_gis.add_index_layer` "
+                        f"call appears to reuse the existing layer name/target `{layer_name}`. "
+                        "Create only the missing comparison layer with a distinct current-run "
+                        "layer name, then call `osm_gis.compute_index_change`. Do not retry "
+                        "the same layer name after a table-exists/tool error."
+                    )
+
         wrong_first_measurement_tools = {
             "geo_perception.vlm_analyze",
             "geo_perception.strip_rcnn_detect",
@@ -452,13 +519,15 @@ class ExperienceEvoV3Runtime(PromptAugmenter):
                 tool,
             )
             previous_text = ", ".join(previous_targets) if previous_targets else "current localized region(s)"
+            remaining = max(required_count - attribute_count, 1)
             return (
                 "ExperienceEvo v3 tool guard: localization evidence already exists "
                 f"from `geo_perception.instructsam` for {previous_text}. Do not call "
                 "InstructSAM again for this localized attribute/comparison step. Call "
                 "`geo_perception.region_attribute_description` on the current-run "
-                "localized region(s) now; for two-object comparisons, call "
-                "`geo_perception.region_attribute_description` once per relevant "
+                f"localized region(s) now. The current state still needs {remaining} "
+                "region-level attribute description call(s); for two-object comparisons, "
+                "call `geo_perception.region_attribute_description` once per remaining "
                 "region/object."
             )
 
@@ -1104,6 +1173,36 @@ def _previous_semantic_targets(artifact_state: object, tool: str) -> list[str]:
         if target and target not in targets:
             targets.append(target)
     return targets
+
+
+def _selected_arg_value(args: dict[str, object], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return _normalize_semantic_target(value)
+    return ""
+
+
+def _previous_arg_values(
+    artifact_state: object,
+    tool: str,
+    keys: tuple[str, ...],
+) -> list[str]:
+    if not isinstance(artifact_state, dict):
+        return []
+    values: list[str] = []
+    for record in artifact_state.get("successful_call_records", []):
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("tool") or "").replace("__", ".") != tool:
+            continue
+        args = record.get("args")
+        if not isinstance(args, dict):
+            continue
+        value = _selected_arg_value(args, keys)
+        if value and value not in values:
+            values.append(value)
+    return values
 
 
 def _normalize_semantic_target(text: str) -> str:

@@ -1,5 +1,9 @@
 from pathlib import Path
 
+from langchain_core.messages import AIMessage, HumanMessage
+
+from terrabox.agent.eval_modes.common import run_sequential_react_loop
+from terrabox.agent.tool_executor import AgentToolExecutor
 from terrabox.evolution.experience_evo.v2.models import (
     ProductExperience,
     ToolPolicy,
@@ -880,3 +884,238 @@ def test_v3_runtime_fallback_recommends_attribute_after_measurement_when_store_l
     assert "Tool ranking: geo_perception.region_attribute_description" in prompt
     assert "geo_perception.add_text" not in prompt
     assert "geo_perception.draw_bboxes" not in prompt
+
+
+def test_v3_guard_blocks_bing_for_non_search_image_task(tmp_path: Path):
+    store_dir = _write_empty_store(tmp_path)
+    runtime = ExperienceEvoV3Runtime(store_dir, top_k=2)
+
+    blocked = runtime.guard_tool_call(
+        "Evaluate the distance of both garbage types to the big pond, classify them "
+        "and assess which one is close to surface water. Assume GSD is 0.5 meters per pixel.",
+        selected_tool="bing_search.search",
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.instructsam",
+            "result:from:geo_perception.instructsam",
+        ],
+        images=["/tmp/scene.jpg"],
+    )
+
+    assert "does not ask for web/current information" in blocked
+    assert "bing_search.search" in blocked
+
+
+def test_v3_guard_blocks_non_visual_output_tool(tmp_path: Path):
+    store_dir = _write_empty_store(tmp_path)
+    runtime = ExperienceEvoV3Runtime(store_dir, top_k=2)
+
+    blocked = runtime.guard_tool_call(
+        "Assess moderate and strong urban growth or decrease using the NDBI change layer.",
+        selected_tool="osm_gis.show_index_layer",
+        current_product_state=[
+            "task_request",
+            "gpkg:from:osm_gis.get_area_boundary",
+            "raster_layer:from:osm_gis.add_index_layer",
+            "raster_layer:from:osm_gis.add_index_layer",
+        ],
+    )
+
+    assert "did not request a plot, map, annotation, or visualization" in blocked
+    assert "osm_gis.show_index_layer" in blocked
+
+
+def test_v3_guard_blocks_repeated_index_setup_steps(tmp_path: Path):
+    store_dir = _write_empty_store(tmp_path)
+    runtime = ExperienceEvoV3Runtime(store_dir, top_k=2)
+
+    repeated_boundary = runtime.guard_tool_call(
+        "Assess burn severity, unburned areas, and enhanced regrowth in Kelowna between June 2023 and October 2023.",
+        selected_tool="osm_gis.get_area_boundary",
+        current_product_state=[
+            "task_request",
+            "gpkg:from:osm_gis.get_area_boundary",
+            "raster_layer:from:osm_gis.add_index_layer",
+        ],
+    )
+
+    assert "AOI/boundary product already exists" in repeated_boundary
+    assert "osm_gis.add_index_layer" in repeated_boundary
+
+    duplicate_layer = runtime.guard_tool_call(
+        "Assess burn severity, unburned areas, and enhanced regrowth in Kelowna between June 2023 and October 2023.",
+        selected_tool="osm_gis.add_index_layer",
+        current_product_state=[
+            "task_request",
+            "gpkg:from:osm_gis.get_area_boundary",
+            "raster_layer:from:osm_gis.add_index_layer",
+        ],
+        artifact_state={
+            "successful_call_records": [
+                {
+                    "tool": "osm_gis.add_index_layer",
+                    "args": {"layer_name": "nbr_june_2023"},
+                }
+            ]
+        },
+        selected_args={"layer_name": "nbr_june_2023"},
+    )
+
+    assert "reuse the existing layer name" in duplicate_layer
+    assert "Do not retry the same layer name" in duplicate_layer
+
+    too_many_layers = runtime.guard_tool_call(
+        "Assess burn severity, unburned areas, and enhanced regrowth in Kelowna between June 2023 and October 2023.",
+        selected_tool="osm_gis.add_index_layer",
+        current_product_state=[
+            "task_request",
+            "gpkg:from:osm_gis.get_area_boundary",
+            "raster_layer:from:osm_gis.add_index_layer",
+            "raster_layer:from:osm_gis.add_index_layer",
+        ],
+    )
+
+    assert "two current-run index layers already exist" in too_many_layers
+    assert "osm_gis.compute_index_change" in too_many_layers
+
+
+class _LoopTool:
+    name = "geo_perception__instructsam"
+
+
+class _RepeatingBlockedLLM:
+    def __init__(self):
+        self.calls = 0
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def invoke(self, messages):
+        self.calls += 1
+        return AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "geo_perception__instructsam",
+                    "args": {"image": "/tmp/buildings.jpg", "text": "building"},
+                    "id": f"call_{self.calls}",
+                    "type": "tool_call",
+                }
+            ],
+        )
+
+
+class _BlockedThenFinalLLM:
+    def __init__(self):
+        self.calls = 0
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def invoke(self, messages):
+        self.calls += 1
+        if self.calls >= 4:
+            return AIMessage(
+                content=(
+                    "Only one building region was localized and described, so the "
+                    "two-building symmetry comparison is inconclusive."
+                )
+            )
+        return AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "geo_perception__instructsam",
+                    "args": {"image": "/tmp/buildings.jpg", "text": "building"},
+                    "id": f"call_{self.calls}",
+                    "type": "tool_call",
+                }
+            ],
+        )
+
+
+class _RepeatHintAugmenter:
+    def step_hint(self, user_query, **kwargs):
+        return (
+            "## ExperienceEvo v3 Step Guidance\n"
+            "Current product state: input:image, result:from:geo_perception.instructsam\n"
+            "1. Next transition: result:from:geo_perception.instructsam -> "
+            "result:from:geo_perception.region_attribute_description\n"
+            "   Tool ranking: geo_perception.region_attribute_description Quse=0.88"
+        )
+
+    def guard_tool_call(self, user_query, selected_tool, **kwargs):
+        state = kwargs.get("current_product_state") or []
+        if "result:from:geo_perception.instructsam" not in state:
+            return ""
+        return (
+            "Call `geo_perception.region_attribute_description` for the remaining "
+            "current-run region/object."
+        )
+
+
+def test_repeated_identical_step_hint_preserves_block_counter(monkeypatch):
+    monkeypatch.setattr(
+        AgentToolExecutor,
+        "execute",
+        staticmethod(lambda slug, args, user: '{"status":"success","result":"ok"}'),
+    )
+    trace: list[dict] = []
+
+    run_sequential_react_loop(
+        llm=_RepeatingBlockedLLM(),
+        tools=[_LoopTool()],
+        messages=[HumanMessage(content="Assess damage symmetry between two buildings.")],
+        max_steps=4,
+        user="test",
+        verbose=False,
+        evolution_augmenter=_RepeatHintAugmenter(),
+        task_metadata={
+            "question": "Assess damage symmetry between two buildings.",
+            "images": ["/tmp/buildings.jpg"],
+            "available_tools": [
+                "geo_perception.instructsam",
+                "geo_perception.region_attribute_description",
+            ],
+        },
+        evolution_trace=trace,
+    )
+
+    hint_traces = [item for item in trace if item.get("hint_preview")]
+    assert len(hint_traces) == 1
+    assert hint_traces[0]["blocked_tool_calls"].count("geo_perception.instructsam") >= 2
+    assert "repeated-block guard" in hint_traces[0]["guard_preview"]
+
+
+def test_repeated_guard_allows_limited_final_answer(monkeypatch):
+    monkeypatch.setattr(
+        AgentToolExecutor,
+        "execute",
+        staticmethod(lambda slug, args, user: '{"status":"success","result":"ok"}'),
+    )
+    trace: list[dict] = []
+
+    _, final = run_sequential_react_loop(
+        llm=_BlockedThenFinalLLM(),
+        tools=[_LoopTool()],
+        messages=[HumanMessage(content="Assess damage symmetry between two buildings.")],
+        max_steps=6,
+        user="test",
+        verbose=False,
+        evolution_augmenter=_RepeatHintAugmenter(),
+        task_metadata={
+            "question": "Assess damage symmetry between two buildings.",
+            "images": ["/tmp/buildings.jpg"],
+            "available_tools": [
+                "geo_perception.instructsam",
+                "geo_perception.region_attribute_description",
+            ],
+        },
+        evolution_trace=trace,
+    )
+
+    assert "inconclusive" in final
+    hint_traces = [item for item in trace if item.get("hint_preview")]
+    assert hint_traces[-1]["model_decision"] == "final_after_repeated_guard"
+    assert hint_traces[-1]["resolved_with_final_answer"] is True
