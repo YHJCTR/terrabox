@@ -9,9 +9,50 @@ import httpx
 from langchain_openai import ChatOpenAI
 
 from .config import AgentConfig
-from .llm_provider import longcat_thinking_enabled, remote_llm_max_retries, remote_llm_timeout_seconds
+from .llm_provider import (
+    _pace_remote_llm_request,
+    longcat_thinking_enabled,
+    remote_llm_max_retries,
+    remote_llm_min_interval_seconds,
+    remote_llm_timeout_seconds,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _remote_provider_name(config: AgentConfig) -> str:
+    model_lower = (config.remote_llm_model or "").lower()
+    base_lower = (config.remote_llm_api_base or "").lower()
+    if "longcat" in model_lower or "longcat" in base_lower:
+        return "longcat"
+    if "deepseek" in model_lower or "deepseek" in base_lower:
+        return "deepseek"
+    return "remote"
+
+
+def _remote_rate_limited_clients(provider: str) -> dict[str, Any]:
+    """Apply the same cross-process provider pacing to LangChain rollouts.
+
+    `RemoteChatClient` already uses this lock, but agent rollouts go through
+    LangChain's ChatOpenAI. Without the hook, multi-worker rollouts can burst
+    faster than the provider-specific pacing configured for other code paths.
+    """
+
+    interval = remote_llm_min_interval_seconds(provider)
+    if interval <= 0:
+        return {}
+
+    def pace_request(_request: httpx.Request) -> None:
+        _pace_remote_llm_request(provider)
+
+    async def async_pace_request(_request: httpx.Request) -> None:
+        _pace_remote_llm_request(provider)
+
+    logger.info("Remote LLM pacing enabled: provider=%s min_interval=%.2fs", provider, interval)
+    return {
+        "http_client": httpx.Client(event_hooks={"request": [pace_request]}),
+        "http_async_client": httpx.AsyncClient(event_hooks={"request": [async_pace_request]}),
+    }
 
 
 def get_llm(config: AgentConfig) -> ChatOpenAI:
@@ -67,6 +108,7 @@ def get_llm(config: AgentConfig) -> ChatOpenAI:
                 }
             else:
                 extra_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        extra_kwargs.update(_remote_rate_limited_clients(_remote_provider_name(config)))
         return ChatOpenAI(
             base_url=config.remote_llm_api_base,
             api_key=config.remote_llm_api_key,
