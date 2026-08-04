@@ -299,6 +299,146 @@ def test_v3_bulk_segmentation_measurement_allows_and_prioritizes_sam2(tmp_path: 
     assert allowed_sam2 == ""
 
 
+def test_v3_pixel_threshold_measurement_uses_segmentation_not_count(tmp_path: Path):
+    store_dir = _write_store(tmp_path)
+    runtime = ExperienceEvoV3Runtime(store_dir, top_k=3)
+    query = (
+        "Given a GSD of 0.12399158194 m/px, segment every vehicle, work out how many "
+        "occupy fewer than 600 pixels, translate that 600-pixel threshold into square "
+        "metres, and determine what percentage of the total vehicles that represents."
+    )
+
+    prompt = runtime.augment(
+        query,
+        images=["/tmp/vehicles.jpg"],
+        available_tools=[
+            "geo_perception.count_given_object",
+            "geo_perception.sam2_segment",
+            "compute.solver",
+            "compute.calculator",
+        ],
+    )
+
+    assert "Prefer geo_perception.sam2_segment" in prompt
+    assert "Tool ranking: geo_perception.sam2_segment" in prompt
+    assert "Tool ranking: geo_perception.count_given_object" not in prompt
+
+    allowed_sam2 = runtime.guard_tool_call(
+        query,
+        selected_tool="geo_perception.sam2_segment",
+        current_product_state=["task_request", "input:image"],
+        images=["/tmp/vehicles.jpg"],
+    )
+    assert allowed_sam2 == ""
+
+    blocked_count = runtime.guard_tool_call(
+        query,
+        selected_tool="geo_perception.count_given_object",
+        current_product_state=["task_request", "input:image"],
+        images=["/tmp/vehicles.jpg"],
+    )
+    assert "per-object segmentation evidence" in blocked_count
+    assert "geo_perception.sam2_segment" in blocked_count
+
+    after_sam2 = runtime.step_hint(
+        query,
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.sam2_segment",
+        ],
+        images=["/tmp/vehicles.jpg"],
+        available_tools=[
+            "geo_perception.count_given_object",
+            "geo_perception.instructsam",
+            "compute.solver",
+            "compute.calculator",
+        ],
+    )
+
+    assert "Tool ranking: compute.solver" in after_sam2
+    assert "Tool ranking: geo_perception.instructsam" not in after_sam2
+    assert "Tool ranking: geo_perception.count_given_object" not in after_sam2
+
+    blocked_after_sam2 = runtime.guard_tool_call(
+        query,
+        selected_tool="geo_perception.instructsam",
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.sam2_segment",
+        ],
+        images=["/tmp/vehicles.jpg"],
+    )
+    assert "segmentation evidence already exists" in blocked_after_sam2
+    assert "compute.solver" in blocked_after_sam2
+
+    after_solver = runtime.step_hint(
+        query,
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.sam2_segment",
+            "result:from:compute.solver",
+        ],
+        images=["/tmp/vehicles.jpg"],
+        available_tools=["compute.solver", "compute.calculator"],
+    )
+
+    assert "Tool ranking: compute.calculator" in after_solver
+    assert "Tool ranking: compute.solver" not in after_solver
+
+    after_solver_calculator = runtime.step_hint(
+        query,
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.sam2_segment",
+            "result:from:compute.solver",
+            "result:from:compute.calculator",
+        ],
+        images=["/tmp/vehicles.jpg"],
+        available_tools=["compute.solver", "compute.calculator"],
+    )
+
+    assert "Tool ranking: compute.solver" in after_solver_calculator
+    assert "Tool ranking: compute.calculator" not in after_solver_calculator
+
+    after_two_solver_one_calculator = runtime.step_hint(
+        query,
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.sam2_segment",
+            "result:from:compute.solver",
+            "result:from:compute.calculator",
+            "result:from:compute.solver",
+        ],
+        images=["/tmp/vehicles.jpg"],
+        available_tools=["compute.solver", "compute.calculator"],
+    )
+
+    assert "Tool ranking: compute.calculator" in after_two_solver_one_calculator
+    assert "Tool ranking: compute.solver" not in after_two_solver_one_calculator
+
+    ready = runtime.step_hint(
+        query,
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.sam2_segment",
+            "result:from:compute.solver",
+            "result:from:compute.calculator",
+            "result:from:compute.solver",
+            "result:from:compute.calculator",
+        ],
+        images=["/tmp/vehicles.jpg"],
+        available_tools=["compute.solver", "compute.calculator"],
+    )
+
+    assert "Answer-ready signal: computed scalar/result is available" in ready
+
+
 def test_v3_domestic_garbage_area_still_blocks_sam2_first_step(tmp_path: Path):
     store_dir = _write_store(tmp_path)
     runtime = ExperienceEvoV3Runtime(store_dir, top_k=3)
@@ -592,6 +732,214 @@ def test_v3_count_distribution_uses_count_then_plot(tmp_path: Path):
     assert "Answer-ready signal: requested visual artifact is available" in ready
 
 
+def test_v3_localized_attribute_count_waits_for_region_attribute_before_count(tmp_path: Path):
+    store_dir = _write_empty_store(tmp_path)
+    runtime = ExperienceEvoV3Runtime(store_dir, top_k=3)
+    query = (
+        "Is the parking area south of tennis courts fully visible or partially occluded "
+        "in the given imagery, and can you provide a count of the parked vehicles present "
+        "within the visible area?"
+    )
+
+    prompt = runtime.augment(
+        query,
+        images=["/tmp/parking.jpg"],
+        available_tools=[
+            "geo_perception.instructsam",
+            "geo_perception.region_attribute_description",
+            "geo_perception.count_given_object",
+        ],
+    )
+
+    assert "Tool ranking: geo_perception.instructsam" in prompt
+    assert "Tool ranking: geo_perception.count_given_object" not in prompt
+
+    blocked_count_first = runtime.guard_tool_call(
+        query,
+        selected_tool="geo_perception.count_given_object",
+        current_product_state=["task_request", "input:image"],
+        images=["/tmp/parking.jpg"],
+    )
+    assert "localized attribute/comparison" in blocked_count_first
+    assert "geo_perception.instructsam" in blocked_count_first
+
+    after_localization = runtime.step_hint(
+        query,
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.instructsam",
+        ],
+        images=["/tmp/parking.jpg"],
+        available_tools=[
+            "geo_perception.region_attribute_description",
+            "geo_perception.count_given_object",
+        ],
+    )
+
+    assert "Tool ranking: geo_perception.region_attribute_description" in after_localization
+    assert "Tool ranking: geo_perception.count_given_object" not in after_localization
+
+    after_attribute = runtime.step_hint(
+        query,
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.instructsam",
+            "result:from:geo_perception.region_attribute_description",
+        ],
+        images=["/tmp/parking.jpg"],
+        available_tools=[
+            "geo_perception.region_attribute_description",
+            "geo_perception.count_given_object",
+        ],
+    )
+
+    assert "Answer-ready signal" not in after_attribute
+    assert "Tool ranking: geo_perception.count_given_object" in after_attribute
+
+
+def test_v3_per_object_count_localizes_parent_before_child_counts(tmp_path: Path):
+    store_dir = _write_empty_store(tmp_path)
+    runtime = ExperienceEvoV3Runtime(store_dir, top_k=3)
+    query = "Detect the non flooded buildings and how many cars each of the house parked outside."
+
+    prompt = runtime.augment(
+        query,
+        images=["/tmp/houses.jpg"],
+        available_tools=[
+            "geo_perception.instructsam",
+            "geo_perception.count_given_object",
+            "compute.calculator",
+        ],
+    )
+
+    assert "per localized parent object" in prompt or "per localized parent" in prompt
+    assert "Tool ranking: geo_perception.instructsam" in prompt
+    assert "Tool ranking: geo_perception.count_given_object" not in prompt
+
+    blocked_global_count = runtime.guard_tool_call(
+        query,
+        selected_tool="geo_perception.count_given_object",
+        current_product_state=["task_request", "input:image"],
+        images=["/tmp/houses.jpg"],
+    )
+    assert "per-object count guard" in blocked_global_count
+    assert "geo_perception.instructsam" in blocked_global_count
+
+    after_parent_localization = runtime.step_hint(
+        query,
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.instructsam",
+        ],
+        images=["/tmp/houses.jpg"],
+        available_tools=[
+            "geo_perception.count_given_object",
+            "compute.calculator",
+        ],
+    )
+
+    assert "Answer-ready signal" not in after_parent_localization
+    assert "Tool ranking: geo_perception.count_given_object" in after_parent_localization
+    assert "Tool ranking: compute.calculator" not in after_parent_localization
+
+    after_one_child_count = runtime.step_hint(
+        query,
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.instructsam",
+            "result:from:geo_perception.count_given_object",
+        ],
+        images=["/tmp/houses.jpg"],
+        available_tools=[
+            "geo_perception.count_given_object",
+            "compute.calculator",
+        ],
+    )
+
+    assert "Answer-ready signal" not in after_one_child_count
+    assert "Tool ranking: geo_perception.count_given_object" in after_one_child_count
+
+
+def test_v3_size_selection_draw_requires_localize_calculate_then_draw(tmp_path: Path):
+    store_dir = _write_store(tmp_path)
+    runtime = ExperienceEvoV3Runtime(store_dir, top_k=3)
+    query = "Detect the smallest plane on the runway and draw a box on it."
+
+    prompt = runtime.augment(
+        query,
+        images=["/tmp/runway.jpg"],
+        available_tools=[
+            "geo_perception.instructsam",
+            "geo_perception.strip_rcnn_detect",
+            "geo_perception.draw_bboxes",
+            "compute.calculator",
+        ],
+    )
+
+    assert "size-based selection" in prompt
+    assert "Tool ranking: geo_perception.instructsam" in prompt
+    assert "Tool ranking: geo_perception.strip_rcnn_detect" not in prompt
+    assert "Tool ranking: geo_perception.draw_bboxes" not in prompt
+
+    blocked_strip = runtime.guard_tool_call(
+        query,
+        selected_tool="geo_perception.strip_rcnn_detect",
+        current_product_state=["task_request", "input:image"],
+        images=["/tmp/runway.jpg"],
+    )
+    assert "size-selection guard" in blocked_strip
+    assert "geo_perception.instructsam" in blocked_strip
+
+    blocked_draw_before_compute = runtime.guard_tool_call(
+        query,
+        selected_tool="geo_perception.draw_bboxes",
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.instructsam",
+        ],
+        images=["/tmp/runway.jpg"],
+    )
+    assert "Do not draw a bbox before the selection calculation" in blocked_draw_before_compute
+
+    after_selection_compute = runtime.step_hint(
+        query,
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.instructsam",
+            "result:from:compute.calculator",
+        ],
+        images=["/tmp/runway.jpg"],
+        available_tools=[
+            "geo_perception.draw_bboxes",
+            "geo_perception.strip_rcnn_detect",
+        ],
+    )
+
+    assert "Tool ranking: geo_perception.draw_bboxes" in after_selection_compute
+    assert "Tool ranking: geo_perception.strip_rcnn_detect" not in after_selection_compute
+
+    ready = runtime.step_hint(
+        query,
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.instructsam",
+            "result:from:compute.calculator",
+            "image:from:geo_perception.draw_bboxes",
+        ],
+        images=["/tmp/runway.jpg"],
+        available_tools=["geo_perception.draw_bboxes"],
+    )
+
+    assert "Answer-ready signal" in ready
+
+
 def test_v3_guard_redirects_repeated_localized_instructsam_to_attribute_description(tmp_path: Path):
     store_dir = _write_store(tmp_path)
     runtime = ExperienceEvoV3Runtime(store_dir, top_k=3)
@@ -625,6 +973,68 @@ def test_v3_guard_redirects_repeated_localized_instructsam_to_attribute_descript
     assert "localization evidence already exists" in blocked
     assert "geo_perception.region_attribute_description" in blocked
     assert "Do not call InstructSAM again" in blocked
+
+
+def test_v3_guard_allows_new_target_after_empty_localized_instructsam_result(tmp_path: Path):
+    store_dir = _write_store(tmp_path)
+    runtime = ExperienceEvoV3Runtime(store_dir, top_k=3)
+    image = tmp_path / "parking.jpg"
+    image.write_bytes(b"image")
+    artifact_state = {
+        "artifacts": [{"kind": "image", "path": str(image), "source": "task_image"}],
+        "successful_calls": ["geo_perception.instructsam"],
+        "successful_call_records": [
+            {
+                "tool": "geo_perception.instructsam",
+                "args": {"image": str(image), "text": "tennis courts"},
+            }
+        ],
+        "results": [
+            {
+                "tool": "geo_perception.instructsam",
+                "summary": (
+                    '{"status": "success", "count": 0, "objects": [], '
+                    '"output": "InstructSAM found **0** object(s) matching '
+                    "'tennis courts'." + '"}'
+                ),
+            }
+        ],
+    }
+    query = (
+        "Could you identify the parking lot located south of the tennis courts and specify "
+        "the directional orientation of its entrance using cardinal or intercardinal points?"
+    )
+
+    allowed_new_target = runtime.guard_tool_call(
+        query,
+        selected_tool="geo_perception.instructsam",
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.instructsam",
+        ],
+        artifact_state=artifact_state,
+        images=[str(image)],
+        selected_args={"image": str(image), "text": "parking lot"},
+    )
+
+    assert allowed_new_target == ""
+
+    blocked_same_target = runtime.guard_tool_call(
+        query,
+        selected_tool="geo_perception.instructsam",
+        current_product_state=[
+            "task_request",
+            "input:image",
+            "result:from:geo_perception.instructsam",
+        ],
+        artifact_state=artifact_state,
+        images=[str(image)],
+        selected_args={"image": str(image), "text": "tennis courts"},
+    )
+
+    assert "localization evidence already exists" in blocked_same_target
+    assert "geo_perception.region_attribute_description" in blocked_same_target
 
 
 def test_v3_guard_allows_second_instructsam_for_different_multitarget_text(tmp_path: Path):
@@ -1182,6 +1592,16 @@ class _RepeatHintAugmenter:
         )
 
 
+class _AnswerReadyHintAugmenter:
+    def step_hint(self, user_query, **kwargs):
+        return (
+            "## ExperienceEvo v3 Step Guidance\n"
+            "Current product state: input:image, result:from:geo_perception.instructsam, "
+            "result:from:geo_perception.region_attribute_description\n"
+            "Answer-ready signal: region attribute description is available"
+        )
+
+
 def test_repeated_identical_step_hint_preserves_block_counter(monkeypatch):
     monkeypatch.setattr(
         AgentToolExecutor,
@@ -1246,3 +1666,37 @@ def test_repeated_guard_allows_limited_final_answer(monkeypatch):
     hint_traces = [item for item in trace if item.get("hint_preview")]
     assert hint_traces[-1]["model_decision"] == "final_after_repeated_guard"
     assert hint_traces[-1]["resolved_with_final_answer"] is True
+
+
+def test_answer_ready_guard_converges_after_repeated_extra_tool_call(monkeypatch):
+    monkeypatch.setattr(
+        AgentToolExecutor,
+        "execute",
+        staticmethod(lambda slug, args, user: '{"status":"success","summary":"localized evidence"}'),
+    )
+    trace: list[dict] = []
+
+    _, final = run_sequential_react_loop(
+        llm=_RepeatingBlockedLLM(),
+        tools=[_LoopTool()],
+        messages=[HumanMessage(content="The largest non-flooded house is in the northwest corner?")],
+        max_steps=4,
+        user="test",
+        verbose=False,
+        evolution_augmenter=_AnswerReadyHintAugmenter(),
+        task_metadata={
+            "question": "The largest non-flooded house is in the northwest corner?",
+            "images": ["/tmp/flood.jpg"],
+            "available_tools": [
+                "geo_perception.instructsam",
+                "geo_perception.region_attribute_description",
+            ],
+        },
+        evolution_trace=trace,
+    )
+
+    assert "requested answer is ready" in final
+    hint_traces = [item for item in trace if item.get("hint_preview")]
+    assert hint_traces[-1]["model_decision"] == "final_after_answer_ready_repeated_tool"
+    assert hint_traces[-1]["resolved_with_final_answer"] is True
+    assert hint_traces[-1]["blocked_tool_calls"].count("geo_perception.instructsam") >= 2

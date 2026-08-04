@@ -108,6 +108,20 @@ class ArtifactProgressiveTests(unittest.TestCase):
             ],
         )
 
+    def test_truncated_success_json_still_creates_success_product_state(self):
+        state = initial_artifact_state("task")
+
+        update_artifact_state(
+            state,
+            "geo_perception.instructsam",
+            {"image": "/tmp/a.jpg", "text": "non-flooded house"},
+            '{"status": "success", "count": 15, "objects": [' + ("x" * 2500),
+        )
+
+        self.assertEqual(state["failed_calls"], [])
+        self.assertEqual(state["successful_calls"], ["geo_perception.instructsam"])
+        self.assertIn("result:from:geo_perception.instructsam", product_state_tokens(state))
+
 
 if __name__ == "__main__":
     unittest.main()

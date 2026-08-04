@@ -70,6 +70,8 @@ _PERCEPTION_TERMS = {
     "airplane",
     "bbox",
     "building",
+    "car",
+    "cars",
     "cardinal",
     "corner",
     "count",
@@ -91,6 +93,8 @@ _PERCEPTION_TERMS = {
     "object",
     "orientation",
     "parking",
+    "plane",
+    "planes",
     "pixel",
     "pixels",
     "pool",
@@ -98,6 +102,7 @@ _PERCEPTION_TERMS = {
     "regions",
     "segment",
     "ship",
+    "smallest",
     "storage",
     "tank",
     "tennis",
@@ -340,6 +345,7 @@ class ExperienceEvoV3Runtime(PromptAugmenter):
         has_instructsam = "result:from:geo_perception.instructsam" in state
         has_compute_result = calculator_count > 0
         has_tool_product = any(":from:" in token for token in current_state)
+        has_sam2_result = "result:from:geo_perception.sam2_segment" in state
 
         if tool == "bing_search.search" and not profile["search"]:
             return (
@@ -360,6 +366,8 @@ class ExperienceEvoV3Runtime(PromptAugmenter):
 
         if (
             profile["count_distribution"]
+            and not profile["per_object_count"]
+            and not profile["localized_attribute"]
             and counts["result:from:geo_perception.count_given_object"] < required_count
             and tool
             in {
@@ -368,6 +376,8 @@ class ExperienceEvoV3Runtime(PromptAugmenter):
                 "geo_perception.sam2_segment",
                 "geo_perception.strip_rcnn_detect",
                 "geo_perception.draw_bboxes",
+                "compute.calculator",
+                "compute.solver",
             }
         ):
             remaining = required_count - counts["result:from:geo_perception.count_given_object"]
@@ -378,6 +388,151 @@ class ExperienceEvoV3Runtime(PromptAugmenter):
                 f"`geo_perception.count_given_object` for {remaining} remaining "
                 "current-task class(es), then use `compute.plot` if the user requested "
                 "a plotted distribution."
+            )
+
+        if (
+            profile["per_object_count"]
+            and not has_instructsam
+            and tool
+            in {
+                "geo_perception.count_given_object",
+                "geo_perception.vlm_analyze",
+                "geo_perception.sam2_segment",
+                "geo_perception.strip_rcnn_detect",
+                "geo_perception.draw_bboxes",
+                "compute.calculator",
+                "compute.solver",
+            }
+        ):
+            return (
+                "ExperienceEvo v3 per-object count guard: this task asks to count "
+                "items for each localized object/region. Localize the parent object "
+                "or region set with `geo_perception.instructsam` first, then call "
+                "`geo_perception.count_given_object` for each current-run target. "
+                "Do not answer from one global object count."
+            )
+
+        if (
+            profile["per_object_count"]
+            and has_instructsam
+            and counts["result:from:geo_perception.count_given_object"] < required_count
+            and tool != "geo_perception.count_given_object"
+        ):
+            remaining = required_count - counts["result:from:geo_perception.count_given_object"]
+            return (
+                "ExperienceEvo v3 per-object count guard: parent object/region "
+                "localization already exists. Call `geo_perception.count_given_object` "
+                f"for {remaining} remaining child-object count(s) tied to current-run "
+                "localized targets before computing, drawing, or answering."
+            )
+
+        if profile["pixel_threshold_measurement"]:
+            solver_result_count = counts["result:from:compute.solver"]
+            calculator_result_count = counts["result:from:compute.calculator"]
+            broad_pixel_tools = {
+                "geo_perception.instructsam",
+                "geo_perception.count_given_object",
+                "geo_perception.vlm_analyze",
+                "geo_perception.strip_rcnn_detect",
+                "geo_perception.sam2_segment",
+            }
+            if not has_sam2_result and tool != "geo_perception.sam2_segment":
+                return (
+                    "ExperienceEvo v3 pixel-threshold guard: this task needs "
+                    "per-object segmentation evidence before threshold filtering. "
+                    "Call `geo_perception.sam2_segment` first, then use "
+                    "`compute.solver`/`compute.calculator` for the threshold count, "
+                    "area conversion, and percentage."
+                )
+            if has_sam2_result and tool in broad_pixel_tools:
+                return (
+                    "ExperienceEvo v3 pixel-threshold guard: segmentation evidence "
+                    "already exists. Do not switch back to broad perception/counting "
+                    f"with `{tool}`. Continue the numeric chain with "
+                    "`compute.solver` and `compute.calculator` using only current-run "
+                    "pixel-count evidence."
+                )
+            if (
+                has_sam2_result
+                and solver_result_count < 2
+                and solver_result_count <= calculator_result_count
+                and tool != "compute.solver"
+            ):
+                return (
+                    "ExperienceEvo v3 pixel-threshold guard: after segmentation, derive "
+                    "the threshold-filtered count/ratio component with `compute.solver` "
+                    "before the next calculator step."
+                )
+            if (
+                has_sam2_result
+                and (
+                    solver_result_count >= 2
+                    or solver_result_count > calculator_result_count
+                )
+                and calculator_result_count < 2
+                and tool != "compute.calculator"
+            ):
+                return (
+                    "ExperienceEvo v3 pixel-threshold guard: threshold solver results "
+                    "exist. Use `compute.calculator` for the square-metre conversion "
+                    "and final percentage before answering."
+                )
+
+        if (
+            profile["size_selection_visual"]
+            and not has_instructsam
+            and tool
+            in {
+                "geo_perception.vlm_analyze",
+                "geo_perception.strip_rcnn_detect",
+                "geo_perception.draw_bboxes",
+                "geo_perception.region_attribute_description",
+                "geo_perception.sam2_segment",
+                "geo_perception.count_given_object",
+                "compute.calculator",
+                "compute.solver",
+            }
+        ):
+            return (
+                "ExperienceEvo v3 size-selection guard: this visual task asks for "
+                "the smallest/largest object to be identified before drawing. Use "
+                "`geo_perception.instructsam` first to localize candidate objects, "
+                "then use `compute.calculator` to compare sizes and "
+                "`geo_perception.draw_bboxes` only after the selected bbox is known."
+            )
+
+        if (
+            profile["size_selection_visual"]
+            and has_instructsam
+            and not has_compute_result
+            and tool
+            in {
+                "geo_perception.draw_bboxes",
+                "geo_perception.vlm_analyze",
+                "geo_perception.strip_rcnn_detect",
+                "geo_perception.sam2_segment",
+                "geo_perception.region_attribute_description",
+                "geo_perception.count_given_object",
+            }
+        ):
+            return (
+                "ExperienceEvo v3 size-selection guard: candidate object localization "
+                "already exists. Before drawing, call `compute.calculator` with a "
+                "current-run bbox/area expression to select the smallest/largest "
+                "object. Do not draw a bbox before the selection calculation."
+            )
+
+        if (
+            profile["size_selection_visual"]
+            and has_instructsam
+            and has_compute_result
+            and "image:from:geo_perception.draw_bboxes" not in state
+            and tool != "geo_perception.draw_bboxes"
+        ):
+            return (
+                "ExperienceEvo v3 size-selection guard: localization and selection "
+                "calculation already exist, and the user requested a drawn box. Call "
+                "`geo_perception.draw_bboxes` now using the selected current-run bbox."
             )
 
         if (
@@ -445,6 +600,26 @@ class ExperienceEvoV3Runtime(PromptAugmenter):
             wrong_first_measurement_tools.add("geo_perception.sam2_segment")
         if (
             profile["precise_measurement"]
+            and not profile["pixel_threshold_measurement"]
+            and not profile["count_distribution"]
+            and not has_tool_product
+            and tool == "geo_perception.count_given_object"
+        ):
+            preferred = (
+                "`geo_perception.sam2_segment` for bulk/all-object pixel-threshold segmentation"
+                if profile["bulk_segmentation"]
+                else "`geo_perception.instructsam` for measurable region evidence"
+            )
+            return (
+                "ExperienceEvo v3 tool guard: this is a GSD/pixel measurement task, "
+                "not a plain object-count task. Do not start with "
+                "`geo_perception.count_given_object`; use "
+                f"{preferred}, then compute the requested numeric conversion with "
+                "`compute.calculator` or `compute.solver`."
+            )
+        if (
+            profile["precise_measurement"]
+            and not profile["pixel_threshold_measurement"]
             and not has_instructsam
             and tool in wrong_first_measurement_tools
         ):
@@ -466,6 +641,7 @@ class ExperienceEvoV3Runtime(PromptAugmenter):
                 "geo_perception.region_attribute_description",
                 "geo_perception.sam2_segment",
                 "geo_perception.strip_rcnn_detect",
+                "geo_perception.count_given_object",
             }
         ):
             return (
@@ -563,10 +739,17 @@ class ExperienceEvoV3Runtime(PromptAugmenter):
             and has_instructsam
             and tool == "geo_perception.instructsam"
         ):
+            selected_target = _semantic_target_from_args(selected_args)
             previous_targets = _previous_semantic_targets(
                 kwargs.get("artifact_state"),
                 tool,
             )
+            if (
+                _last_tool_result_indicates_empty(kwargs.get("artifact_state"), tool)
+                and selected_target
+                and not any(_same_semantic_target(selected_target, previous) for previous in previous_targets)
+            ):
+                return ""
             previous_text = ", ".join(previous_targets) if previous_targets else "current localized region(s)"
             remaining = max(required_count - attribute_count, 1)
             return (
@@ -901,6 +1084,81 @@ def _fallback_families(
     required_count = _required_result_count(profile)
 
     if (
+        profile["pixel_threshold_measurement"]
+        and profile["has_image"]
+        and _tool_available("geo_perception.sam2_segment", available_tools)
+        and counts["result:from:geo_perception.sam2_segment"] == 0
+    ):
+        source = ["input:image"] if "input:image" in state else ["task_request"]
+        families.append(
+            _runtime_family(
+                family_id="v3_fallback_pixel_threshold_segment",
+                intent="runtime:pixel-threshold+segment",
+                source=source,
+                target=["result:from:geo_perception.sam2_segment"],
+                tool="geo_perception.sam2_segment",
+                goal="Segment every requested object before filtering by pixel-count threshold.",
+                binding_rules=[
+                    "Use the object class from the current task, e.g. vehicle, car, or building.",
+                    "Return per-object mask/pixel evidence before any threshold or percentage calculation.",
+                ],
+                output_checks=[
+                    "Observation should include per-object segmentation evidence and pixel counts for the current image."
+                ],
+            )
+        )
+
+    if (
+        profile["pixel_threshold_measurement"]
+        and counts["result:from:geo_perception.sam2_segment"] > 0
+    ):
+        solver_count = counts["result:from:compute.solver"]
+        calculator_count = counts["result:from:compute.calculator"]
+        if (
+            solver_count < 2
+            and solver_count <= calculator_count
+            and _tool_available("compute.solver", available_tools)
+        ):
+            families.append(
+                _runtime_family(
+                    family_id="v3_fallback_pixel_threshold_solver",
+                    intent="runtime:pixel-threshold+filter",
+                    source=["result:from:geo_perception.sam2_segment"],
+                    target=["result:from:compute.solver"],
+                    tool="compute.solver",
+                    goal="Derive threshold-filtered object counts or percentage inputs from current-run segmentation evidence.",
+                    binding_rules=[
+                        "Use only current-run object pixel counts and the task threshold.",
+                        "Compute the count/ratio input needed before the final numeric conversion.",
+                    ],
+                    output_checks=[
+                        "Observation should include a current-run threshold count, total count, or ratio component."
+                    ],
+                )
+            )
+        elif (
+            calculator_count < 2
+            and _tool_available("compute.calculator", available_tools)
+        ):
+            families.append(
+                _runtime_family(
+                    family_id="v3_fallback_pixel_threshold_calculator",
+                    intent="runtime:pixel-threshold+calculate",
+                    source=["result:from:geo_perception.sam2_segment", "result:from:compute.solver"],
+                    target=["result:from:compute.calculator"],
+                    tool="compute.calculator",
+                    goal="Convert the pixel threshold to area and compute the requested percentage from current-run values.",
+                    binding_rules=[
+                        "Use one safe arithmetic expression from current-run GSD, threshold, count, and total values.",
+                        "Do not invent object counts; use the previous segmentation/solver observations.",
+                    ],
+                    output_checks=[
+                        "Observation should include the square-metre threshold or final percentage requested by the task."
+                    ],
+                )
+            )
+
+    if (
         profile["multi_target"]
         and profile["has_image"]
         and profile["precise_measurement"]
@@ -921,6 +1179,80 @@ def _fallback_families(
                 ],
                 output_checks=[
                     "Current product state should contain separate InstructSAM results for the required task targets."
+                ],
+            )
+        )
+
+    if (
+        profile["size_selection_visual"]
+        and profile["has_image"]
+        and _tool_available("geo_perception.instructsam", available_tools)
+        and counts["result:from:geo_perception.instructsam"] == 0
+    ):
+        source = ["input:image"] if "input:image" in state else ["task_request"]
+        families.append(
+            _runtime_family(
+                family_id="v3_fallback_size_selection_localize",
+                intent="runtime:size-selection+localize",
+                source=source,
+                target=["result:from:geo_perception.instructsam"],
+                tool="geo_perception.instructsam",
+                goal="Localize candidate objects before selecting the smallest/largest object for annotation.",
+                binding_rules=[
+                    "Use the current task object label, e.g. plane, vehicle, house, or tree.",
+                    "Return candidate boxes/regions before any drawing step.",
+                ],
+                output_checks=[
+                    "Observation should include candidate object regions or bboxes for the current image."
+                ],
+            )
+        )
+
+    if (
+        profile["size_selection_visual"]
+        and _tool_available("compute.calculator", available_tools)
+        and counts["result:from:geo_perception.instructsam"] > 0
+        and counts["result:from:compute.calculator"] == 0
+    ):
+        families.append(
+            _runtime_family(
+                family_id="v3_fallback_size_selection_calculate",
+                intent="runtime:size-selection+calculate",
+                source=["result:from:geo_perception.instructsam"],
+                target=["result:from:compute.calculator"],
+                tool="compute.calculator",
+                goal="Compute candidate object sizes from current-run bboxes/areas before drawing the selected object.",
+                binding_rules=[
+                    "Use one safe arithmetic expression over current-run bbox dimensions or returned areas.",
+                    "Select the requested smallest/largest object from current-run candidates.",
+                ],
+                output_checks=[
+                    "Observation should identify the selected current-run bbox or size comparison result."
+                ],
+            )
+        )
+
+    if (
+        profile["size_selection_visual"]
+        and _tool_available("geo_perception.draw_bboxes", available_tools)
+        and counts["result:from:geo_perception.instructsam"] > 0
+        and counts["result:from:compute.calculator"] > 0
+        and "image:from:geo_perception.draw_bboxes" not in state
+    ):
+        families.append(
+            _runtime_family(
+                family_id="v3_fallback_size_selection_draw",
+                intent="runtime:size-selection+draw",
+                source=["result:from:geo_perception.instructsam", "result:from:compute.calculator"],
+                target=["image:from:geo_perception.draw_bboxes"],
+                tool="geo_perception.draw_bboxes",
+                goal="Draw the selected smallest/largest current-run object after localization and size comparison.",
+                binding_rules=[
+                    "Bind bbox to the selected current-run object only.",
+                    "Use the annotation requested by the current task, not a historical label.",
+                ],
+                output_checks=[
+                    "Observation should include an annotated output image path from draw_bboxes."
                 ],
             )
         )
@@ -951,6 +1283,11 @@ def _fallback_families(
 
     if (
         profile["count_distribution"]
+        and not profile["per_object_count"]
+        and not (
+            profile["localized_attribute"]
+            and counts["result:from:geo_perception.region_attribute_description"] < required_count
+        )
         and _tool_available("geo_perception.count_given_object", available_tools)
         and counts["result:from:geo_perception.count_given_object"] < required_count
     ):
@@ -971,6 +1308,54 @@ def _fallback_families(
                 ],
                 output_checks=[
                     "Current product state should contain count_given_object result(s) for the requested class distribution."
+                ],
+            )
+        )
+
+    if (
+        profile["per_object_count"]
+        and _tool_available("geo_perception.instructsam", available_tools)
+        and counts["result:from:geo_perception.instructsam"] == 0
+    ):
+        source = ["input:image"] if "input:image" in state else ["task_request"]
+        families.append(
+            _runtime_family(
+                family_id="v3_fallback_per_object_count_localize",
+                intent="runtime:per-object-count+localize",
+                source=source,
+                target=["result:from:geo_perception.instructsam"],
+                tool="geo_perception.instructsam",
+                goal="Localize the parent objects or regions before counting child objects for each one.",
+                binding_rules=[
+                    "Use the parent object/region phrase from the task, e.g. non-flooded buildings or houses.",
+                    "Do not replace parent localization with one global child-object count.",
+                ],
+                output_checks=[
+                    "Observation should include localized parent objects/regions for per-object counting."
+                ],
+            )
+        )
+
+    if (
+        profile["per_object_count"]
+        and _tool_available("geo_perception.count_given_object", available_tools)
+        and counts["result:from:geo_perception.instructsam"] > 0
+        and counts["result:from:geo_perception.count_given_object"] < required_count
+    ):
+        families.append(
+            _runtime_family(
+                family_id="v3_fallback_per_object_count_child",
+                intent="runtime:per-object-count+count",
+                source=["result:from:geo_perception.instructsam"],
+                target=["result:from:geo_perception.count_given_object"] * required_count,
+                tool="geo_perception.count_given_object",
+                goal="Count requested child objects for each localized current-run parent region.",
+                binding_rules=[
+                    "Use the child object label from the task, e.g. cars parked outside each house.",
+                    "Bind each count to a current-run localized parent region when the tool accepts a region or bbox.",
+                ],
+                output_checks=[
+                    "Current product state should contain child-object count results after parent localization."
                 ],
             )
         )
@@ -1298,6 +1683,40 @@ def _previous_semantic_targets(artifact_state: object, tool: str) -> list[str]:
     return targets
 
 
+def _last_tool_result_indicates_empty(artifact_state: object, tool: str) -> bool:
+    if not isinstance(artifact_state, dict):
+        return False
+    normalized_tool = str(tool or "").replace("__", ".")
+    for result in reversed(artifact_state.get("results", [])):
+        if not isinstance(result, dict):
+            continue
+        if str(result.get("tool") or "").replace("__", ".") != normalized_tool:
+            continue
+        text = " ".join(
+            str(result.get(key) or "")
+            for key in ("summary", "text", "message", "output", "observation")
+        ).lower()
+        return any(
+            marker in text
+            for marker in (
+                "found **0**",
+                "found 0",
+                '"count": 0',
+                "'count': 0",
+                "count: 0",
+                "no object",
+                "no objects",
+                "no detection",
+                "no detections",
+                '"objects": []',
+                "'objects': []",
+                '"detections": []',
+                "'detections': []",
+            )
+        )
+    return False
+
+
 def _selected_arg_value(args: dict[str, object], keys: tuple[str, ...]) -> str:
     for key in keys:
         value = args.get(key)
@@ -1407,6 +1826,31 @@ def _query_profile(
     search_intent = bool(q_tokens & _SEARCH_TERMS)
     change_intent = bool({"change", "changed", "growth", "decrease", "between"} & q_tokens)
     region_mask_intent = bool({"area", "gsd", "mask", "pixel", "pixels", "region", "regions", "segment"} & q_tokens)
+    pixel_threshold_measurement = bool(
+        has_image
+        and (
+            "fewer than" in query_lower
+            or "less than" in query_lower
+            or "threshold" in q_tokens
+            or "occupy" in q_tokens
+        )
+        and bool({"pixel", "pixels"} & q_tokens)
+    )
+    area_measurement_intent = bool(
+        "area" in q_tokens
+        and (
+            "ground area" in query_lower
+            or "combined area" in query_lower
+            or "total area" in query_lower
+            or "area in" in query_lower
+            or "square" in q_tokens
+            or "meters" in q_tokens
+            or "metres" in q_tokens
+            or "m-sq" in query_lower
+            or "m/px" in query_lower
+            or "gsd" in q_tokens
+        )
+    )
     precise_measurement = bool(
         has_image
         and (
@@ -1414,7 +1858,8 @@ def _query_profile(
             or "gsd" in q_tokens
             or "pixel distance" in query_lower
             or "square meters" in query_lower
-            or bool({"pixel", "pixels", "area", "distance", "diameter"} & q_tokens)
+            or bool({"pixel", "pixels", "distance", "diameter"} & q_tokens)
+            or area_measurement_intent
         )
     )
     bulk_segmentation = bool(
@@ -1422,16 +1867,25 @@ def _query_profile(
         and region_mask_intent
         and (
             "segment all" in query_lower
+            or "segment every" in query_lower
             or "sum their pixel" in query_lower
             or "sum the pixel" in query_lower
             or "total pixel" in query_lower
             or "pixel areas" in query_lower
+            or pixel_threshold_measurement
         )
+    )
+    size_selection_visual = bool(
+        has_image
+        and vis_intent
+        and bool({"largest", "smallest", "biggest"} & q_tokens)
+        and bool({"bbox", "box", "draw", "annotate"} & q_tokens)
     )
     attribute_terms = {"attribute", "condition", "health", "classify", "classification"}
     attribute_intent = bool(attribute_terms & q_tokens)
     count_distribution = bool(
         has_image
+        and not pixel_threshold_measurement
         and (
             "distribution" in query_lower
             or "how many" in query_lower
@@ -1442,6 +1896,8 @@ def _query_profile(
             {
                 "building",
                 "buildings",
+                "car",
+                "cars",
                 "flooded",
                 "garbage",
                 "house",
@@ -1455,6 +1911,17 @@ def _query_profile(
         )
     )
     plot_distribution = bool(count_distribution and ("plot" in q_tokens or "distribution" in q_tokens))
+    per_object_count = bool(
+        count_distribution
+        and (
+            " each " in f" {query_lower} "
+            or " per " in f" {query_lower} "
+            or "for every" in query_lower
+            or "for each" in query_lower
+        )
+        and bool({"car", "cars", "vehicle", "vehicles"} & q_tokens)
+        and bool({"building", "buildings", "house", "houses", "parking"} & q_tokens)
+    )
     spatial_attribute_terms = {
         "cardinal",
         "corner",
@@ -1520,6 +1987,8 @@ def _query_profile(
             "both" in q_tokens
             or "two" in q_tokens
             or "each" in q_tokens
+            or " each " in f" {query_lower} "
+            or "for each" in query_lower
             or "types" in q_tokens
             or "between the two" in query_lower
             or "both garbage types" in query_lower
@@ -1537,6 +2006,8 @@ def _query_profile(
         calc_intent = True
         if has_image:
             osm_intent = False
+    if size_selection_visual:
+        calc_intent = True
     if index_intent:
         osm_intent = True
 
@@ -1553,10 +2024,13 @@ def _query_profile(
         "search": search_intent,
         "change": change_intent,
         "region_mask": region_mask_intent,
+        "pixel_threshold_measurement": pixel_threshold_measurement,
         "precise_measurement": precise_measurement,
         "bulk_segmentation": bulk_segmentation,
         "count_distribution": count_distribution,
         "plot_distribution": plot_distribution,
+        "per_object_count": per_object_count,
+        "size_selection_visual": size_selection_visual,
         "attribute": attribute_intent,
         "localized_attribute": localized_attribute,
         "multi_target": multi_target,
@@ -1583,6 +2057,7 @@ def _hard_mismatch(
         token.startswith("input:raster") or token.startswith("raster:from:")
         for token in current_state
     )
+    counts = Counter(current_state)
     if profile["has_image"] and all_osm and not profile["osm"] and not profile["index"]:
         return True
     if not profile["has_image"] and all_geo and not profile["perception"]:
@@ -1604,11 +2079,64 @@ def _hard_mismatch(
         return True
     if all_compute and (profile["osm"] or profile["perception"] or profile["index"]) and not has_tool_product:
         return True
+    if profile["pixel_threshold_measurement"]:
+        has_sam2 = counts["result:from:geo_perception.sam2_segment"] > 0
+        solver_count = counts["result:from:compute.solver"]
+        calculator_count = counts["result:from:compute.calculator"]
+        broad_pixel_tools = {
+            "geo_perception.instructsam",
+            "geo_perception.count_given_object",
+            "geo_perception.vlm_analyze",
+            "geo_perception.strip_rcnn_detect",
+            "geo_perception.sam2_segment",
+        }
+        if not has_sam2 and not any(tool == "geo_perception.sam2_segment" for tool in tools):
+            return True
+        if has_sam2 and any(tool in broad_pixel_tools for tool in tools):
+            return True
+        if solver_count < 2 and solver_count <= calculator_count:
+            return not any(tool == "compute.solver" for tool in tools)
+        if calculator_count < 2:
+            return not any(tool == "compute.calculator" for tool in tools)
+    if (
+        profile["precise_measurement"]
+        and not profile["pixel_threshold_measurement"]
+        and not profile["count_distribution"]
+        and not has_tool_product
+        and any(tool == "geo_perception.count_given_object" for tool in tools)
+    ):
+        return True
     if profile["precise_measurement"] and only_vlm:
         return True
     if profile["localized_attribute"] and only_vlm:
         return True
-    if profile["count_distribution"]:
+    if profile["size_selection_visual"]:
+        has_instructsam = "result:from:geo_perception.instructsam" in current_state
+        has_compute = (
+            "result:from:compute.calculator" in current_state
+            or "result:from:compute.solver" in current_state
+        )
+        has_drawn = "image:from:geo_perception.draw_bboxes" in current_state
+        if not has_instructsam and not any(tool == "geo_perception.instructsam" for tool in tools):
+            return True
+        if has_instructsam and not has_compute and not any(tool.startswith("compute.") for tool in tools):
+            return True
+        if has_instructsam and has_compute and not has_drawn and not any(
+            tool == "geo_perception.draw_bboxes" for tool in tools
+        ):
+            return True
+    if profile["per_object_count"]:
+        has_instructsam = "result:from:geo_perception.instructsam" in current_state
+        count_ready = current_state.count("result:from:geo_perception.count_given_object") >= _required_result_count(profile)
+        if not has_instructsam and not any(tool == "geo_perception.instructsam" for tool in tools):
+            return True
+        if has_instructsam and not count_ready and not any(tool == "geo_perception.count_given_object" for tool in tools):
+            return True
+    if (
+        profile["count_distribution"]
+        and not profile["per_object_count"]
+        and not profile["localized_attribute"]
+    ):
         count_ready = current_state.count("result:from:geo_perception.count_given_object") >= _required_result_count(profile)
         if not count_ready and not any(tool == "geo_perception.count_given_object" for tool in tools):
             return True
@@ -1653,8 +2181,22 @@ def _intent_score(
         score += 8.0
     if "geo_perception.region_attribute_description" in tool_text and profile["localized_attribute"]:
         score += 5.0
-    if "geo_perception.count_given_object" in tool_text and profile["count_distribution"]:
+    if (
+        "geo_perception.count_given_object" in tool_text
+        and profile["count_distribution"]
+        and not profile["localized_attribute"]
+    ):
         score += 9.0
+    if "geo_perception.instructsam" in tool_text and profile["per_object_count"]:
+        score += 8.0
+    if "geo_perception.count_given_object" in tool_text and profile["per_object_count"]:
+        score += 4.0
+    if "geo_perception.instructsam" in tool_text and profile["size_selection_visual"]:
+        score += 9.0
+    if "compute.calculator" in tool_text and profile["size_selection_visual"]:
+        score += 8.0
+    if "geo_perception.draw_bboxes" in tool_text and profile["size_selection_visual"]:
+        score += 7.0
     if "compute.plot" in tool_text and profile["plot_distribution"]:
         score += 7.0
     if "geo_perception.instructsam" in tool_text and profile["precise_measurement"]:
@@ -1667,6 +2209,10 @@ def _intent_score(
         score -= 1.5
     if "geo_perception.strip_rcnn_detect" in tool_text and profile["precise_measurement"]:
         score -= 5.0
+    if "geo_perception.strip_rcnn_detect" in tool_text and profile["size_selection_visual"]:
+        score -= 7.0
+    if "geo_perception.count_given_object" in tool_text and profile["precise_measurement"] and not profile["count_distribution"]:
+        score -= 8.0
     if "geo_perception.vlm_analyze" in tool_text and profile["precise_measurement"]:
         score -= 7.0
     if "geo_perception.vlm_analyze" in tool_text and profile["localized_attribute"]:
@@ -1687,7 +2233,33 @@ def _intent_score(
 
 def _task_shape_guidance(profile: dict[str, object]) -> list[str]:
     lines: list[str] = []
-    if profile["has_image"] and profile["count_distribution"]:
+    if profile["has_image"] and profile["size_selection_visual"]:
+        lines.append(
+            "Task-shape rule: this image task asks to identify the smallest/largest "
+            "object and draw a box. Localize candidates with geo_perception.instructsam, "
+            "use compute.calculator to compare current-run bbox/area sizes, then call "
+            "geo_perception.draw_bboxes for the selected object."
+        )
+        lines.append(
+            "Do not use geo_perception.strip_rcnn_detect or draw_bboxes as the first "
+            "step when a size-based selection has not been computed."
+        )
+    if profile["has_image"] and profile["per_object_count"]:
+        lines.append(
+            "Task-shape rule: this image task asks for child-object counts per localized "
+            "parent object/region. Use geo_perception.instructsam to localize parent "
+            "objects first, then call geo_perception.count_given_object for the child "
+            "object count(s) tied to current-run regions."
+        )
+        lines.append(
+            "Do not answer from one global count when the query says each/per parent object."
+        )
+    if (
+        profile["has_image"]
+        and profile["count_distribution"]
+        and not profile["per_object_count"]
+        and not profile["localized_attribute"]
+    ):
         lines.append(
             "Task-shape rule: this image task asks for object counts or a distribution. "
             "Use geo_perception.count_given_object once per requested class/category, "
@@ -1710,9 +2282,13 @@ def _task_shape_guidance(profile: dict[str, object]) -> list[str]:
         )
     if profile["has_image"] and profile["precise_measurement"]:
         preferred_tool = (
-            "geo_perception.sam2_segment for bulk all-object segmentation"
-            if profile["bulk_segmentation"]
-            else "geo_perception.instructsam as the first evidence-producing tool"
+            "geo_perception.sam2_segment for per-object pixel-threshold segmentation"
+            if profile["pixel_threshold_measurement"]
+            else (
+                "geo_perception.sam2_segment for bulk all-object segmentation"
+                if profile["bulk_segmentation"]
+                else "geo_perception.instructsam as the first evidence-producing tool"
+            )
         )
         lines.append(
             "Task-shape rule: this image task needs measurable pixel/mask evidence "
@@ -1754,10 +2330,24 @@ def _answer_ready_reason(profile: dict[str, object], current_state: list[str]) -
     )
     has_route_distance = "result:from:osm_gis.compute_route_dist" in state
     has_attribute_result = "result:from:geo_perception.region_attribute_description" in state
-    needs_numeric_result = bool(profile["precise_measurement"] or profile["calc"])
+    has_localization_result = "result:from:geo_perception.instructsam" in state
+    has_drawn_bbox = "image:from:geo_perception.draw_bboxes" in state
+    needs_numeric_result = bool(profile["precise_measurement"] or profile["calc"] or profile["size_selection_visual"])
     needs_attribute_result = bool(profile["attribute"])
     needs_count_result = bool(profile["count_distribution"])
 
+    if profile["size_selection_visual"]:
+        if not (has_localization_result and has_compute_result and has_drawn_bbox):
+            return ""
+    if profile["per_object_count"] and not has_localization_result:
+        return ""
+    if profile["pixel_threshold_measurement"]:
+        if counts["result:from:geo_perception.sam2_segment"] < 1:
+            return ""
+        if counts["result:from:compute.solver"] < 2:
+            return ""
+        if counts["result:from:compute.calculator"] < 2:
+            return ""
     if needs_count_result and counts["result:from:geo_perception.count_given_object"] < required_count:
         return ""
     if (
@@ -1818,6 +2408,8 @@ def _answer_ready_reason(profile: dict[str, object], current_state: list[str]) -
 
 
 def _required_result_count(profile: dict[str, object]) -> int:
+    if profile.get("per_object_count"):
+        return 2
     if profile.get("count_distribution"):
         return 2 if profile.get("multi_target") or profile.get("plot_distribution") else 1
     return 2 if profile.get("multi_target") else 1

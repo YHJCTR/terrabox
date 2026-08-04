@@ -27,6 +27,17 @@ def safe_json_loads(text: str) -> dict[str, Any]:
 def parse_tool_observation(text: str) -> tuple[dict[str, Any], bool]:
     parsed = safe_json_loads(text)
     stripped = (text or "").lstrip()
+    lowered_prefix = stripped[:300].lower()
+    truncated_success = (
+        parsed.get("status") == "error"
+        and (
+            '"status": "success"' in lowered_prefix
+            or "'status': 'success'" in lowered_prefix
+            or lowered_prefix.startswith('{"status":"success"')
+        )
+    )
+    if truncated_success:
+        return {"status": "success", "message": text[:1000], "truncated": True}, False
     is_error = (
         stripped.startswith("Tool execution error:")
         or stripped.startswith("Error in ")

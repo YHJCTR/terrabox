@@ -423,9 +423,11 @@ def run_sequential_react_loop(
             trace_index = last_hint_trace_index
             if trace_index is None:
                 trace_index = answer_ready_trace_index
+            blocked_count = 1
             if trace_index is not None and 0 <= trace_index < len(evolution_trace):
                 blocked = list(evolution_trace[trace_index].get("blocked_tool_calls") or [])
                 blocked.append(selected_slug)
+                blocked_count = blocked.count(selected_slug)
                 evolution_trace[trace_index].update(
                     {
                         "model_decision": "blocked_extra_tool",
@@ -433,6 +435,26 @@ def run_sequential_react_loop(
                         "selected_tool": selected_slug,
                     }
                 )
+                if blocked_count >= 2:
+                    evidence = "; ".join(
+                        str(item.get("summary") or "")[:700]
+                        for item in artifact_state.get("results", [])[-2:]
+                        if isinstance(item, dict) and item.get("summary")
+                    )
+                    final = (
+                        "Based on the current successful tool observations, the requested "
+                        "answer is ready. "
+                    )
+                    final += evidence if evidence else "No additional tool call is needed."
+                    evolution_trace[trace_index].update(
+                        {
+                            "model_decision": "final_after_answer_ready_repeated_tool",
+                            "selected_in_recommendations": None,
+                            "resolved_with_final_answer": True,
+                        }
+                    )
+                    messages.append(AIMessage(content=final))
+                    return messages, final
             messages.append(
                 HumanMessage(
                     content=(
