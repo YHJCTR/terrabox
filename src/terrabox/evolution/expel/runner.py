@@ -163,6 +163,10 @@ def cmd_build_live(args):
     bank = PrincipleBank(args.store_dir)
     manifest = bank.data.get("manifest") or {}
     if manifest.get("build_status") == "complete":
+        if args.embedding_backend == "qwen" and not (Path(args.store_dir) / QwenEmbeddingIndex.FILE_NAME).exists():
+            bank.data["manifest"]["embedding"] = QwenEmbeddingIndex.build(args.store_dir, bank.data)
+            bank.save()
+            logger.info("Completed missing Qwen embedding index for existing ExpeL store")
         logger.info("ExpeL store is complete; reusing %s", bank.path)
         print(json.dumps({"store": args.store_dir, "reused": True, **manifest}, ensure_ascii=False, indent=2))
         return
@@ -211,6 +215,11 @@ def cmd_build_live(args):
                 if isinstance(value, dict) and isinstance(value.get("text"), str) and value["text"].strip():
                     bank.add_task_specific(str(value.get("task_type") or "unknown"), value["text"], source_task="batch")
                     created["task"] += 1
+                elif isinstance(value, str) and value.strip():
+                    batch_types = {str(item.get("task_type") or "unknown") for item in batch}
+                    task_type = next(iter(batch_types)) if len(batch_types) == 1 else "unknown"
+                    bank.add_task_specific(task_type, value, source_task="batch")
+                    created["task"] += 1
         for row in batch:
             bank.add_successful_episode(_compact_rollout(row))
             created["episodes"] += 1
@@ -250,7 +259,12 @@ Return JSON only: {\"mistake_principles\": [\"...\"]}; each sentence must state 
         "selection": "F1>=0.8 balanced by task_type/tool_sequence; infra failures excluded from mistakes",
         "build_status": "complete",
         "completed_at": datetime.now().isoformat(timespec="seconds"),
-        **created,
+        "general": len(bank.data.get("general", [])),
+        "task": sum(len(items) for items in bank.data.get("task_specific", {}).values()),
+        "mistakes": len(bank.data.get("mistakes", [])),
+        "episodes": len(bank.data.get("successful_episodes", [])),
+        "success_sources": len(successes),
+        "failure_sources": len(failures),
     })
     if args.embedding_backend == "qwen":
         bank.data["manifest"]["embedding"] = QwenEmbeddingIndex.build(args.store_dir, bank.data)
