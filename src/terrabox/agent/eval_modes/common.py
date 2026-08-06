@@ -173,6 +173,10 @@ def run_sequential_react_loop(
     last_hint_trace_index: int | None = None
     answer_ready_guard_active = False
     answer_ready_trace_index: int | None = None
+    answer_ready_guard_enabled = bool(getattr(evolution_augmenter, "answer_ready_guard_enabled", True))
+    premature_final_guard_enabled = bool(getattr(evolution_augmenter, "premature_final_guard_enabled", True))
+    hard_guard_enabled = bool(getattr(evolution_augmenter, "hard_guard_enabled", True))
+    allow_synthetic_final_answer = bool(getattr(evolution_augmenter, "allow_synthetic_final_answer", True))
 
     def maybe_append_evolution_hint(step: int) -> None:
         nonlocal last_step_hint, last_hint_trace_index, answer_ready_guard_active, answer_ready_trace_index
@@ -214,7 +218,7 @@ def run_sequential_react_loop(
         last_step_hint = hint
         messages.append(HumanMessage(content=hint))
         recommended_tools = _extract_experience_recommended_tools(hint)
-        answer_ready = "Answer-ready signal:" in hint
+        answer_ready = answer_ready_guard_enabled and "Answer-ready signal:" in hint
         evolution_trace.append(
             {
                 "step": step,
@@ -230,6 +234,8 @@ def run_sequential_react_loop(
 
     def maybe_block_evolution_tool(step: int, selected_slug: str, proposed_tools: list[str]) -> bool:
         nonlocal last_hint_trace_index
+        if not hard_guard_enabled:
+            return False
         if evolution_augmenter is None or not hasattr(evolution_augmenter, "guard_tool_call"):
             return False
         try:
@@ -352,7 +358,7 @@ def run_sequential_react_loop(
             if trace_index is not None and 0 <= trace_index < len(evolution_trace):
                 trace = evolution_trace[trace_index]
                 recommended_tools = trace.get("recommended_tools") or []
-                if recommended_tools and not trace.get("answer_ready"):
+                if premature_final_guard_enabled and recommended_tools and not trace.get("answer_ready"):
                     if _max_repeated_block_count(trace) >= 2:
                         trace.update(
                             {
@@ -435,7 +441,7 @@ def run_sequential_react_loop(
                         "selected_tool": selected_slug,
                     }
                 )
-                if blocked_count >= 2:
+                if blocked_count >= 2 and allow_synthetic_final_answer:
                     evidence = "; ".join(
                         str(item.get("summary") or "")[:700]
                         for item in artifact_state.get("results", [])[-2:]

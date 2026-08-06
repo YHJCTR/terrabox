@@ -411,6 +411,59 @@ PYTHONPATH=src $PY scripts/run_trajectory_experiment.py rollout \
 v1: --evolution-method experience_evo    --evolution-store <v1 store>
 v2: --evolution-method experience_evo_v2 --evolution-store <v2 store>
 v3: --evolution-method experience_evo_v3 --evolution-store <v2 store>
+v4: --evolution-method experience_evo_v4 --evolution-store <v2 store>
+
+## 2026-08-07 v4 软约束运行时
+
+v4 是独立于 v3 的新运行模式，复用同一个 rollout-derived v2 store，不覆盖
+`experience_evo`、`experience_evo_v2` 或 `experience_evo_v3`。v4 针对 v3 的主要问题做了
+运行时修正：v3 的 answer-ready 判断过早、hard guard 拦截过多，并在连续拦截后合成答案，
+这些行为会让工具序列更短，却损伤最终答案和生成类任务。
+
+v4 的核心变化：
+
+- 保留产物状态转移检索、`Qsig/Nsig/Rsig`、`Qtool/Ntool/Rtool` 和 `Quse` 排序；不读取
+  当前 eval 的 gold、expected tools、task id 或答案。
+- 默认关闭 v3 的 answer-ready hard guard、premature-final guard 和 synthetic final；模型
+  仍然可以根据当前观测自行决定是否继续调用工具或输出答案。
+- 只保留两类可直接验证的硬约束：图片必须来自当前任务/当前运行产物，
+  `compute.calculator` 必须有合法表达式。产物链推断只作为软提示，不因为启发式判断而阻断
+  分析工具或最终绘图、标注、地图展示工具。
+- 每次提示中增加通用的 verifier checkpoint，根据任务文本和当前产物状态标记缺失的证据槽位，
+  例如 aggregate、visual output、localized attribute、count/plot；这不是针对某个任务写死的
+  gold 规则。
+- 保留多 agent 设计接口：可选用 LongCat 调 checker/verifier，对当前任务、产物状态、最近
+  observation 和候选转移做独立审查。默认关闭，避免正式全量评测把 LongCat 请求量直接翻倍。
+
+可选 LongCat checker：
+
+```bash
+export TERRABOX_EXPEVO_V4_LLM_CHECKER=1
+export TERRABOX_EXPEVO_V4_CHECKER_PROVIDER=longcat
+export TERRABOX_EXPEVO_V4_LLM_CHECKER_MAX_CALLS=1
+```
+
+正式 OEA eval 示例：
+
+```bash
+PY=/home/yuhongjie/miniconda3/envs/unsloth/bin/python
+PYTHONPATH=src $PY scripts/run_trajectory_experiment.py rollout \
+  --task-file data/oea_full_sft/openearth_test_tasks.json \
+  --experiment experience_evo_v4_oea_train2000_longcat_eval \
+  --mode standard \
+  --output-dir tmp/trajectories/experience_evo_v4_oea_train2000_longcat_eval/standard \
+  --llm-provider longcat \
+  --evolution-method experience_evo_v4 \
+  --evolution-store evolution_store/experience_evo/oea_train2000_v2_longcat_20260731 \
+  --use-docker \
+  --no-skip-mock --no-skip-bing --no-skip-osm --no-skip-vlm --no-skip-changeos \
+  --resume
+```
+
+外部 LongCat 全量 watcher 必须使用 `TERRABOX_TOOL_SERVICE_SCOPE=call` 和
+`TERRABOX_KEEP_VLM_WARM=1`，并按 lane 钉定各感知服务 GPU/端口；不要使用
+`TERRABOX_TOOL_SERVICE_SCOPE=session`。v4 的实验结果必须同时报告工具链指标和 LongCat
+`answer_acc`/`answer_acc_w_gen`，不能只看 success rate。
 ```
 
 ## 2026-07-31 v2 nightly 初步结果

@@ -10,10 +10,14 @@ from __future__ import annotations
 from .prompt_injector import ExperienceEvoPromptInjector
 from .store import ExperienceEvoStore
 from .v2 import ExperienceEvoV2Runtime, ExperienceEvoV2Store
+from .v3 import ExperienceEvoV3Runtime
+from .v4 import ExperienceEvoV4Runtime
 
 __all__ = [
     "ExperienceEvoPromptInjector",
     "ExperienceEvoStore",
     "ExperienceEvoV2Runtime",
     "ExperienceEvoV2Store",
+    "ExperienceEvoV3Runtime",
+    "ExperienceEvoV4Runtime",
 ]
