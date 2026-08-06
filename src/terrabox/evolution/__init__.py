@@ -258,14 +258,19 @@ def get_prompt_augmenter(
         state = PolicyState.load(state_path)
         return CausalPolicyEvoPromptInjector(state, top_k=top_k)
 
-    elif method == "expel":
+    elif method in {"expel", "expel_live", "expel_official"}:
         if store_dir is None:
             store_dir = kwargs.get("store_dir", "evolution_store/expel")
         from .expel.principle_bank import PrincipleBank
         from .expel.prompt_injector import ExpeLPromptInjector
 
         bank = PrincipleBank(store_dir)
-        return ExpeLPromptInjector(bank, top_k=top_k)
+        semantic_index = None
+        if os.environ.get("TERRABOX_EXPEL_RETRIEVAL", "lexical").lower() == "qwen":
+            from .expel.semantic_retriever import QwenEmbeddingIndex
+
+            semantic_index = QwenEmbeddingIndex(store_dir, required=True)
+        return ExpeLPromptInjector(bank, top_k=top_k, semantic_index=semantic_index)
 
     elif method == "selfcritic":
         if store_dir is None:

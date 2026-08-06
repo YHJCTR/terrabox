@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 
 
@@ -31,6 +32,8 @@ class PrincipleBank:
             "general": [],
             "task_specific": {},
             "mistakes": [],
+            "successful_episodes": [],
+            "manifest": {},
         }
         self.load()
 
@@ -41,11 +44,17 @@ class PrincipleBank:
             self.data.setdefault("general", [])
             self.data.setdefault("task_specific", {})
             self.data.setdefault("mistakes", [])
+            self.data.setdefault("successful_episodes", [])
+            self.data.setdefault("manifest", {})
 
     def save(self) -> None:
         os.makedirs(self.store_dir, exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as f:
+        fd, temporary_path = tempfile.mkstemp(prefix=".principles.", suffix=".json", dir=self.store_dir)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(self.data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary_path, self.path)
 
     @staticmethod
     def _entry(text: str, score: float = 1.0, support: int = 1, source_tasks: list[str] | None = None) -> dict:
@@ -72,6 +81,14 @@ class PrincipleBank:
         self.data["mistakes"].append(
             self._entry(text, score=score, support=1, source_tasks=[source_task] if source_task else [])
         )
+
+    def add_successful_episode(self, episode: dict) -> None:
+        """Store a short, anonymized successful episode for ExpeL few-shot retrieval."""
+        episodes = self.data.setdefault("successful_episodes", [])
+        episode_id = str(episode.get("source_id") or "")
+        if episode_id and any(str(item.get("source_id") or "") == episode_id for item in episodes):
+            return
+        episodes.append(episode)
 
     def merge_duplicates(self) -> None:
         """Merge duplicate texts by summing support and score."""
