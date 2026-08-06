@@ -392,7 +392,11 @@ main()
         if agent_api_base is not None:
             full_env.setdefault("TAU2_PROMPTEVO_AGENT_API_BASE", str(agent_api_base))
             full_env.setdefault("TAU2_PROMPTEVO_LOCAL_API_BASE", str(agent_api_base))
-        agent_api_key = run_config.agent_llm_args.get("api_key")
+        agent_api_key = (
+            run_config.agent_llm_args.get("api_key")
+            or full_env.get("TERRABOX_LLM_API_KEY")
+            or full_env.get("OPENAI_API_KEY")
+        )
         if agent_api_key is not None:
             full_env.setdefault("TAU2_PROMPTEVO_LOCAL_API_KEY", str(agent_api_key))
         full_env.setdefault("OPENAI_API_KEY", full_env.get("TAU2_PROMPTEVO_LOCAL_API_KEY", "EMPTY"))
