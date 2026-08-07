@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime
 from collections import defaultdict
 from pathlib import Path
@@ -15,6 +16,21 @@ from .principle_bank import PrincipleBank
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _call_json_resilient(llm, prompt: str, *, system: str, max_tokens: int, retries: int = 2):
+    """Retry malformed structured output without hiding provider/account failures."""
+    for attempt in range(retries + 1):
+        try:
+            data = llm.call_json(prompt, system=system, max_tokens=max_tokens)
+        except json.JSONDecodeError as exc:
+            logger.warning("ExpeL structured output parse failed on attempt %d/%d: %s", attempt + 1, retries + 1, exc)
+            data = None
+        if isinstance(data, dict):
+            return data
+        if attempt < retries:
+            time.sleep(2 ** attempt)
+    return None
 
 
 def _infer_task_type(case: dict) -> str:
@@ -185,6 +201,7 @@ def cmd_build_live(args):
         "processed_failures": sorted(processed_failures),
         "selection": "F1>=0.8 balanced by task_type/tool_sequence; infra failures excluded from mistakes",
         "created_at": manifest.get("created_at") or datetime.now().isoformat(timespec="seconds"),
+        "llm_parse_failed_batches": list(manifest.get("llm_parse_failed_batches", [])),
     }
     bank.save()
     created = {"general": 0, "task": 0, "mistakes": 0, "episodes": 0, "success_sources": len(successes), "failure_sources": len(failures)}
@@ -205,7 +222,17 @@ def cmd_build_live(args):
             "Each item must be one concise actionable sentence.\n\n"
             + "\n\n".join(material)
         )
-        data = llm.call_json(prompt, system="You are an ExpeL experience analyst for a geospatial tool agent.", max_tokens=1200)
+        data = _call_json_resilient(
+            llm,
+            prompt,
+            system="You are an ExpeL experience analyst for a geospatial tool agent.",
+            max_tokens=1200,
+        )
+        if data is None:
+            bank.data["manifest"]["llm_parse_failed_batches"].append(
+                {"kind": "success", "source_ids": [_row_id(row) for row in batch]}
+            )
+            logger.warning("Skipping malformed ExpeL success insight batch after retries: %s", [_row_id(row) for row in batch])
         if isinstance(data, dict):
             for value in data.get("general_principles", []):
                 if isinstance(value, str) and value.strip():
@@ -241,7 +268,17 @@ def cmd_build_live(args):
 Ignore network, timeout, OOM, quota, context, Docker and service failures.
 Return JSON only: {\"mistake_principles\": [\"...\"]}; each sentence must state a safer action.
 """ + "\n\n".join(material)
-        data = llm.call_json(prompt, system="You audit geospatial agent tool-use failures.", max_tokens=800)
+        data = _call_json_resilient(
+            llm,
+            prompt,
+            system="You audit geospatial agent tool-use failures.",
+            max_tokens=800,
+        )
+        if data is None:
+            bank.data["manifest"]["llm_parse_failed_batches"].append(
+                {"kind": "failure", "source_ids": [_row_id(row) for row in batch]}
+            )
+            logger.warning("Skipping malformed ExpeL failure insight batch after retries: %s", [_row_id(row) for row in batch])
         if isinstance(data, dict):
             for value in data.get("mistake_principles", []):
                 if isinstance(value, str) and value.strip():

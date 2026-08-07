@@ -452,8 +452,18 @@ class RemoteChatClient:
 
     def call_json(self, prompt: str, system: Optional[str] = None, max_tokens: int = 1024):
         raw = self.call(prompt, system=system, max_tokens=max_tokens)
-        m = re.search(r"\{.*\}", raw, re.DOTALL)
-        return json.loads(m.group()) if m else None
+        # Model replies may contain prose or more than one brace-delimited span.
+        # A greedy regex joins those spans into invalid JSON; decode the first
+        # complete JSON object instead.
+        decoder = json.JSONDecoder()
+        for match in re.finditer(r"\{", raw):
+            try:
+                value, _ = decoder.raw_decode(raw[match.start():])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return value
+        return None
 
 
 def make_llm_client(provider: Optional[str] = None, *, cost: Optional[CostTracker] = None):

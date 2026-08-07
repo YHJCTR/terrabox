@@ -33,3 +33,5 @@ PYTHONPATH=src python -m terrabox.evolution.expel.runner build-live \
 使用 Qwen3-4B-Embedding 预计算 rule/episode 向量，并在 eval 时只对 query 请求
 embedding。正式 watcher 使用后者，embedding 服务固定在不与主 rollout 共用的 GPU2。
 构建时加 `--embedding-backend qwen`，eval 时设置 `TERRABOX_EXPEL_RETRIEVAL=qwen`。
+
+构建过程会原子保存每个已处理 batch。LongCat 偶发返回不合法 JSON 时，该 batch 会有限重试；仍无法解析时只记录到 manifest 的 `llm_parse_failed_batches` 并继续构建，避免单个格式错误中断整轮真实评测。
