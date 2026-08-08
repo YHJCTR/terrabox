@@ -56,6 +56,14 @@ class ExperienceEvoV4Runtime(ExperienceEvoV3Runtime):
     ``TERRABOX_EXPEVO_V4_LLM_CHECKER=1`` and
     ``TERRABOX_EXPEVO_V4_CHECKER_PROVIDER=longcat``. The default is disabled so
     full OEA rollouts do not double LongCat traffic.
+
+    Ablation-only toggles keep the default v4 behavior unchanged while making
+    each mechanism independently measurable:
+
+    - ``TERRABOX_EXPEVO_V4_DISABLE_STEP_HINT=1`` disables per-step retrieval;
+    - ``TERRABOX_EXPEVO_V4_DISABLE_QUSE=1`` keeps transition/tool text but
+      removes Quse-based tool ranking;
+    - ``TERRABOX_EXPEVO_V4_DISABLE_VERIFIER=1`` disables verifier checkpoints.
     """
 
     answer_ready_guard_enabled = False
@@ -70,6 +78,13 @@ class ExperienceEvoV4Runtime(ExperienceEvoV3Runtime):
         self._llm_checker_max_calls = _env_int("TERRABOX_EXPEVO_V4_LLM_CHECKER_MAX_CALLS", 0)
         self._llm_checker_calls = 0
         self._llm_checker = None
+        self._disable_step_hint = _env_enabled("TERRABOX_EXPEVO_V4_DISABLE_STEP_HINT")
+        self._disable_quse = _env_enabled("TERRABOX_EXPEVO_V4_DISABLE_QUSE") or _env_enabled(
+            "TERRABOX_EXPEVO_V4_DISABLE_TOOL_RANKING"
+        )
+        self._disable_verifier = _env_enabled("TERRABOX_EXPEVO_V4_DISABLE_VERIFIER") or _env_enabled(
+            "TERRABOX_EXPEVO_V4_DISABLE_VERIFICATION"
+        )
 
     def augment(self, user_query: str, task_type: str = "unknown", **kwargs: Any) -> str:
         current_state = kwargs.get("current_product_state")
@@ -138,6 +153,9 @@ class ExperienceEvoV4Runtime(ExperienceEvoV3Runtime):
         return "\n".join(lines).strip()
 
     def step_hint(self, user_query: str, task_type: str = "unknown", **kwargs: Any) -> str:
+        if self._disable_step_hint:
+            return ""
+
         current_state = kwargs.get("current_product_state")
         if not isinstance(current_state, list):
             return ""
@@ -245,11 +263,49 @@ class ExperienceEvoV4Runtime(ExperienceEvoV3Runtime):
         family: TransitionFamily,
         available_tools: set[str] | None,
     ) -> list[str]:
-        rows = super()._format_family(index, family, available_tools)
+        if self._disable_quse:
+            rows = self._format_family_without_quse(index, family, available_tools)
+        else:
+            rows = super()._format_family(index, family, available_tools)
         extra = self._risk_and_fallback_note(family, available_tools)
         if extra:
             rows.append("   Verifier note: " + extra)
         return [row.replace("ExperienceEvo v3", "ExperienceEvo v4") for row in rows]
+
+    def _format_family_without_quse(
+        self,
+        index: int,
+        family: TransitionFamily,
+        available_tools: set[str] | None,
+    ) -> list[str]:
+        exp = family.product_experience
+        target = " + ".join(family.target_product_state)
+        source = " + ".join(family.input_product_state)
+        intent = str(family.intent_signature or "general").replace("_", " ")[:140]
+        rows = [
+            (
+                f"{index}. Transition: {source} -> {target} "
+                f"(intent={intent}; Qsig={exp.q:.2f}; Nsig={exp.n}; Rsig={exp.risk:.2f})"
+            )
+        ]
+        preconditions = exp.preconditions or [
+            "Current state must contain " + ", ".join(family.input_product_state)
+        ]
+        checks = exp.output_checks or ["Tool observation must include " + target]
+        rows.append("   Preconditions: " + "; ".join(preconditions[:2]))
+        rows.append("   Product checks: " + "; ".join(checks[:2]))
+
+        candidates = self._candidate_tool_policies(family, available_tools=available_tools)
+        if candidates:
+            rows.append("   Tool candidates: " + " | ".join(policy.tool for policy in candidates))
+        hints = _policy_hints(candidates)
+        if hints:
+            rows.append("   Binding hints: " + "; ".join(hints[:3]))
+        rows.append(
+            "   Stop rule: once this product directly supports the requested answer, answer; "
+            "otherwise continue only with transitions whose preconditions are now satisfied."
+        )
+        return rows
 
     def _format_step_family(
         self,
@@ -259,13 +315,17 @@ class ExperienceEvoV4Runtime(ExperienceEvoV3Runtime):
     ) -> list[str]:
         exp = family.product_experience
         ranked = self._rank_tool_policies(family, available_tools=available_tools)
+        candidates = self._candidate_tool_policies(family, available_tools=available_tools)
         target = " + ".join(family.target_product_state)
         source = " + ".join(family.input_product_state)
         lines = [
             f"{index}. Next transition: {source} -> {target} "
             f"(Qsig={exp.q:.2f}, Nsig={exp.n}, Rsig={exp.risk:.2f})"
         ]
-        if ranked:
+        if self._disable_quse:
+            if candidates:
+                lines.append("   Tool candidates: " + " | ".join(policy.tool for policy in candidates))
+        elif ranked:
             chunks: list[str] = []
             for item in ranked:
                 policy = item.get("policy")
@@ -277,7 +337,7 @@ class ExperienceEvoV4Runtime(ExperienceEvoV3Runtime):
                 )
             if chunks:
                 lines.append("   Tool ranking: " + " | ".join(chunks))
-        hints = _policy_hints([item["policy"] for item in ranked])
+        hints = _policy_hints(candidates if self._disable_quse else [item["policy"] for item in ranked])
         if hints:
             lines.append("   Binding: " + "; ".join(hints[:2]))
         checks = exp.output_checks or ["observation should include the target product"]
@@ -292,6 +352,17 @@ class ExperienceEvoV4Runtime(ExperienceEvoV3Runtime):
         family: TransitionFamily,
         available_tools: set[str] | None,
     ) -> str:
+        if self._disable_quse:
+            policies = self._candidate_tool_policies(family, available_tools=available_tools)
+            if not policies:
+                return ""
+            risky = family.product_experience.risk >= 0.35 or any(
+                float(getattr(policy, "risk", 0.0)) >= 0.35 for policy in policies
+            )
+            if risky:
+                return "high-R transition/tool; verify argument binding and output artifact before reusing it"
+            return ""
+
         ranked = self._rank_tool_policies(family, available_tools=available_tools)
         if not ranked:
             return ""
@@ -316,6 +387,21 @@ class ExperienceEvoV4Runtime(ExperienceEvoV3Runtime):
             notes.append("low-Quse recommendation; prefer a schema-grounded alternative if available")
         return "; ".join(notes[:2])
 
+    def _candidate_tool_policies(
+        self,
+        family: TransitionFamily,
+        *,
+        available_tools: set[str] | None,
+    ) -> list[ToolPolicy]:
+        policies: list[ToolPolicy] = []
+        for policy in family.tool_policies:
+            if available_tools is not None and policy.tool not in available_tools:
+                continue
+            policies.append(policy)
+            if len(policies) >= max(1, self.tool_recommendations_per_family):
+                break
+        return policies
+
     def _verify_state(
         self,
         *,
@@ -325,6 +411,14 @@ class ExperienceEvoV4Runtime(ExperienceEvoV3Runtime):
         families: list[TransitionFamily],
         artifact_state: object,
     ) -> V4Verification:
+        if self._disable_verifier:
+            return V4Verification(
+                status="disabled",
+                missing_slots=(),
+                risk_notes=(),
+                recommended_focus="use retrieved transitions as soft planning hints",
+            )
+
         verification = _deterministic_verification(user_query, profile, current_state)
         if not self._should_call_llm_checker(profile, verification):
             return verification

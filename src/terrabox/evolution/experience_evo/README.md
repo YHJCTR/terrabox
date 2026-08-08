@@ -412,6 +412,7 @@ v1: --evolution-method experience_evo    --evolution-store <v1 store>
 v2: --evolution-method experience_evo_v2 --evolution-store <v2 store>
 v3: --evolution-method experience_evo_v3 --evolution-store <v2 store>
 v4: --evolution-method experience_evo_v4 --evolution-store <v2 store>
+```
 
 ## 2026-08-07 v4 软约束运行时
 
@@ -443,6 +444,19 @@ export TERRABOX_EXPEVO_V4_CHECKER_PROVIDER=longcat
 export TERRABOX_EXPEVO_V4_LLM_CHECKER_MAX_CALLS=1
 ```
 
+v4 消融开关默认都关闭，只用于固定子集/正式消融，不改变主方法默认行为：
+
+| 开关 | 作用 | 用途 |
+|---|---|---|
+| `TERRABOX_EXPEVO_V4_DISABLE_STEP_HINT=1` | 关闭每次工具 observation 后的 `step_hint()`，只保留任务开始前注入 | 验证逐步产物状态检索是否贡献收益 |
+| `TERRABOX_EXPEVO_V4_DISABLE_QUSE=1` | 保留产物转移和工具候选文本，但不展示 `Quse` 排序 | 验证 `Qsig/Qtool/N/R` 组合排序是否影响工具选择 |
+| `TERRABOX_EXPEVO_V4_DISABLE_TOOL_RANKING=1` | `DISABLE_QUSE` 的别名 | 便于实验脚本语义化命名 |
+| `TERRABOX_EXPEVO_V4_DISABLE_VERIFIER=1` | 关闭 deterministic verifier checkpoint 和可选 LLM checker | 验证 verifier checklist 是否降低过早回答/漏产物 |
+| `TERRABOX_EXPEVO_V4_DISABLE_VERIFICATION=1` | `DISABLE_VERIFIER` 的别名 | 便于实验脚本语义化命名 |
+
+推荐消融顺序：先跑同一固定子集的 v4 default，再跑 `checker_on`、`quse_off`、`step_hint_off`；
+每组都要同时保存 rollout report 和 LongCat answer judge，不能只用 success rate 判断。
+
 正式 OEA eval 示例：
 
 ```bash
@@ -464,7 +478,6 @@ PYTHONPATH=src $PY scripts/run_trajectory_experiment.py rollout \
 `TERRABOX_KEEP_VLM_WARM=1`，并按 lane 钉定各感知服务 GPU/端口；不要使用
 `TERRABOX_TOOL_SERVICE_SCOPE=session`。v4 的实验结果必须同时报告工具链指标和 LongCat
 `answer_acc`/`answer_acc_w_gen`，不能只看 success rate。
-```
 
 ## 2026-07-31 v2 nightly 初步结果
 
