@@ -11,6 +11,7 @@ import argparse
 import json
 import logging
 import re
+import shutil
 import time
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -247,13 +248,56 @@ def _call_json_resilient(llm: Any, prompt: str, *, system: str, max_tokens: int,
     return None
 
 
-def _reflect_batch(llm: Any, episodes: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _candidate_bullet_ids(playbook: ACEPlaybook, episodes: list[dict[str, Any]], *, per_episode: int = 4, limit: int = 24) -> list[str]:
+    """Select playbook bullets that play the role of ACE `bullets_used`.
+
+    In official ACE, the Generator returns bullet IDs it used while answering a
+    sample. OEA train episodes here already exist, so we retrieve the bullets
+    that would have been visible for the same question/task and let Reflector
+    tag those bullets against environment feedback.
+    """
+    selected: list[str] = []
+    seen: set[str] = set()
+    for episode in episodes:
+        matches = playbook.retrieve(
+            str(episode.get("request") or ""),
+            task_type=str(episode.get("task_type") or "unknown"),
+            available_tools=episode.get("actual_tool_flow") or [],
+            top_k=per_episode,
+        )
+        for _, bullet in matches:
+            if bullet.id in seen:
+                continue
+            seen.add(bullet.id)
+            selected.append(bullet.id)
+            if len(selected) >= limit:
+                return selected
+    return selected
+
+
+def _write_batch_trace(output_dir: str | Path, batch_idx: int, payload: dict[str, Any]) -> None:
+    trace_dir = Path(output_dir) / "ace_traces"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    with (trace_dir / "batches.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"batch": batch_idx, **payload}, ensure_ascii=False) + "\n")
+
+
+def _write_intermediate_playbook(playbook: ACEPlaybook, batch_idx: int) -> None:
+    playbook_dir = playbook.store_dir / "intermediate_playbooks"
+    playbook_dir.mkdir(parents=True, exist_ok=True)
+    (playbook_dir / f"batch_{batch_idx:04d}_playbook.txt").write_text(playbook.as_text(), encoding="utf-8")
+
+
+def _reflect_batch(llm: Any, episodes: list[dict[str, Any]], bullets_used: str) -> dict[str, Any] | None:
     prompt = (
         "You are the REFLECTOR in the ACE framework, adapted to a geospatial tool agent.\n"
-        "Analyze historical train rollout episodes and extract transferable insights about tool sequencing, artifact handoff, parameter discipline, and final-answer timing.\n"
+        "Analyze historical train rollout episodes and diagnose reusable tool-use lessons from environment feedback.\n"
+        "Tag the supplied playbook bullets as helpful, harmful, or neutral for these episodes, matching ACE's counter update layer.\n"
         "Do not use or mention gold tool traces, ground-truth answers, task ids, exact paths, or place-specific facts. Treat tool_f1_feedback/status/tool errors only as environment feedback.\n"
-        "Return JSON only with fields: reflection (string), insights (list). Each insight has: section, content, task_types, tools, polarity ('helpful' or 'caution'), evidence_strength (0-1).\n"
+        "Return JSON only with fields: reasoning, error_identification, root_cause_analysis, correct_approach, key_insight, bullet_tags, insights.\n"
+        "Each bullet_tags item has id and tag in ['helpful','harmful','neutral']. Each insights item has: section, content, task_types, tools, polarity ('helpful' or 'caution'), evidence_strength (0-1).\n"
         "Insights must be actionable playbook candidates, not summaries of individual episodes.\n\n"
+        f"Part of Playbook used by the generator:\n{bullets_used}\n\n"
         f"Episodes:\n{json.dumps(episodes, ensure_ascii=False, indent=2)}"
     )
     return _call_json_resilient(
@@ -364,6 +408,13 @@ def build_playbook_ace_official_style(
 
     playbook = ACEPlaybook(output_dir)
     if force:
+        root = Path(output_dir)
+        for stale_file in (root / "playbook.json", root / "playbook.txt"):
+            if stale_file.exists():
+                stale_file.unlink()
+        for stale_dir in (root / "ace_traces", root / "intermediate_playbooks"):
+            if stale_dir.exists():
+                shutil.rmtree(stale_dir)
         playbook.bullets = []
         playbook.manifest = {}
     processed = set(playbook.manifest.get("processed_task_ids") or [])
@@ -392,7 +443,24 @@ def build_playbook_ace_official_style(
         "created_at": playbook.manifest.get("created_at") or datetime.now().isoformat(timespec="seconds"),
         "processed_task_ids": sorted(processed),
         "llm_failures": list(playbook.manifest.get("llm_failures") or []),
-        "notes": "Uses LongCat Reflector then Curator to incrementally ADD playbook bullets from train rollout feedback; no eval gold/answer is used.",
+        "counter_updates": playbook.manifest.get(
+            "counter_updates", {"helpful": 0, "harmful": 0, "neutral": 0, "unknown": 0}
+        ),
+        "ace_mechanisms_reproduced": [
+            "playbook bullets in official '[id] helpful=X harmful=Y :: content' format",
+            "Reflector diagnostics from generator episodes and environment feedback",
+            "Reflector bullet_tags for helpful/harmful/neutral counter updates",
+            "Curator incremental ADD operations rather than full playbook rewriting",
+            "intermediate playbook snapshots and batch trace logging",
+            "offline/eval-only split with no eval gold leakage",
+        ],
+        "oea_adaptations": [
+            "Generator episodes are pre-existing LongCat OEA train rollouts instead of rerunning ACE's native generator class",
+            "bullets_used are approximated by retrieving bullets that would be visible for each historical train episode",
+            "OEA environment feedback is rollout status, tool F1, tool errors, and final-answer excerpt; gold answers are not used",
+            "Terrabox eval injects retrieved playbook bullets into the ReAct system prompt rather than requiring generator JSON with bullet_ids",
+        ],
+        "notes": "Uses LongCat Reflector then Curator with ACE-style bullet tagging/counter updates from train rollout feedback; no eval gold/answer is used.",
     }
     playbook.save()
 
@@ -403,10 +471,18 @@ def build_playbook_ace_official_style(
             continue
         episodes = [_episode_summary(row) for row in batch_rows]
         logger.info("ACE official-style batch %d/%d (%d episodes)", batch_idx + 1, total_batches, len(episodes))
+        batch_number = batch_idx + 1
+        used_ids = _candidate_bullet_ids(playbook, episodes)
+        bullets_used = playbook.format_bullets(used_ids)
         try:
-            reflection = _reflect_batch(llm, episodes)
+            reflection = _reflect_batch(llm, episodes, bullets_used)
             if not reflection:
                 raise RuntimeError("empty reflection JSON")
+            tag_counts = playbook.update_bullet_counts(reflection.get("bullet_tags") or [])
+            total_counter_updates = dict(playbook.manifest.get("counter_updates") or {})
+            for key in ("helpful", "harmful", "neutral", "unknown"):
+                total_counter_updates[key] = int(total_counter_updates.get(key, 0)) + int(tag_counts.get(key, 0))
+            playbook.manifest["counter_updates"] = total_counter_updates
             curated = _curate_batch(llm, playbook, reflection, episodes, token_budget, batch_idx + 1, total_batches)
             operations = (curated or {}).get("operations") or []
             if not operations:
@@ -427,11 +503,41 @@ def build_playbook_ace_official_style(
                 added += 1
                 if len(playbook.bullets) >= max_bullets:
                     break
-            logger.info("ACE official-style batch %d added %d bullets", batch_idx + 1, added)
+            _write_batch_trace(
+                output_dir,
+                batch_number,
+                {
+                    "task_ids": [_row_id(row) for row in batch_rows],
+                    "used_bullet_ids": used_ids,
+                    "tag_counts": tag_counts,
+                    "reflection": reflection,
+                    "curator": curated,
+                    "operations": operations,
+                    "added": added,
+                    "n_bullets_after": len(playbook.bullets),
+                },
+            )
+            _write_intermediate_playbook(playbook, batch_number)
+            logger.info(
+                "ACE official-style batch %d tagged=%s added=%d bullets",
+                batch_idx + 1,
+                tag_counts,
+                added,
+            )
         except Exception as exc:  # keep long builds resumable; do not hide in manifest.
             failure = {"batch": batch_idx + 1, "error": repr(exc), "task_ids": [_row_id(row) for row in batch_rows]}
             logger.warning("ACE official-style batch failed: %s", failure)
             playbook.manifest.setdefault("llm_failures", []).append(failure)
+            _write_batch_trace(
+                output_dir,
+                batch_number,
+                {
+                    "task_ids": [_row_id(row) for row in batch_rows],
+                    "used_bullet_ids": used_ids,
+                    "error": repr(exc),
+                    "n_bullets_after": len(playbook.bullets),
+                },
+            )
         processed.update(_row_id(row) for row in batch_rows)
         playbook.manifest["processed_task_ids"] = sorted(processed)
         playbook.manifest["n_bullets"] = len(playbook.bullets)

@@ -173,6 +173,53 @@ class ACEPlaybook:
             lines.extend(bullet.as_prompt_line() for bullet in bullets)
         (self.store_dir / "playbook.txt").write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
+    def as_text(self, *, max_bullets: int | None = None) -> str:
+        """Return the playbook in ACE's human-readable bullet format."""
+        grouped: dict[str, list[PlaybookBullet]] = {}
+        bullets = self.bullets if max_bullets is None else self.bullets[-max_bullets:]
+        for bullet in bullets:
+            grouped.setdefault(bullet.section or "tool_flow", []).append(bullet)
+        lines: list[str] = ["# ACE-style Terrabox Playbook"]
+        for section, section_bullets in sorted(grouped.items()):
+            lines.append("")
+            lines.append(f"## {section}")
+            lines.extend(bullet.as_prompt_line() for bullet in section_bullets)
+        return "\n".join(lines).strip()
+
+    def format_bullets(self, bullet_ids: list[str] | set[str]) -> str:
+        """Format selected bullets for ACE Reflector tagging."""
+        wanted = {str(bullet_id) for bullet_id in bullet_ids if str(bullet_id).strip()}
+        lines = [bullet.as_prompt_line() for bullet in self.bullets if bullet.id in wanted]
+        return "\n".join(lines) if lines else "(No playbook bullets were used.)"
+
+    def update_bullet_counts(self, bullet_tags: object) -> dict[str, int]:
+        """Apply ACE-style helpful/harmful/neutral tags to bullet counters.
+
+        Official ACE updates playbook counters after the Reflector tags bullets
+        used by the Generator. This store keeps the same counter semantics while
+        allowing the OEA adapter to tag retrieved playbook bullets.
+        """
+        if not isinstance(bullet_tags, list):
+            return {"helpful": 0, "harmful": 0, "neutral": 0, "unknown": 0}
+        by_id = {bullet.id: bullet for bullet in self.bullets}
+        counts = {"helpful": 0, "harmful": 0, "neutral": 0, "unknown": 0}
+        for item in bullet_tags:
+            if not isinstance(item, dict):
+                counts["unknown"] += 1
+                continue
+            bullet_id = str(item.get("id") or item.get("bullet") or item.get("bullet_id") or "").strip()
+            tag = str(item.get("tag") or "neutral").strip().lower()
+            bullet = by_id.get(bullet_id)
+            if bullet is None or tag not in {"helpful", "harmful", "neutral"}:
+                counts["unknown"] += 1
+                continue
+            if tag == "helpful":
+                bullet.helpful += 1
+            elif tag == "harmful":
+                bullet.harmful += 1
+            counts[tag] += 1
+        return counts
+
     def retrieve(
         self,
         query: str,

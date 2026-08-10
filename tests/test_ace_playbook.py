@@ -81,3 +81,97 @@ def test_ace_playbook_registered_as_prompt_augmenter(tmp_path: Path):
     prompt = augmenter.augment("count all tanks", task_type="count")
     assert "ACE-Style Evolved Playbook" in prompt
     assert "sam2_segment" in prompt
+
+
+def test_ace_official_style_builder_tags_existing_bullets(tmp_path: Path, monkeypatch):
+    from terrabox.evolution.ace_playbook.builder import build_playbook_ace_official_style
+
+    results = tmp_path / "results"
+    for idx, task_type in enumerate(["poi_distance", "poi_distance"], 1):
+        _write_result(
+            results / f"task{idx}.json",
+            {
+                "task_id": f"train_{idx}",
+                "question": "Find nearby cafes and render a map for a city landmark.",
+                "task_type": task_type,
+                "status": "completed",
+                "success": True,
+                "real_success": True,
+                "metrics": {"f1": 0.9},
+                "tool_calls_deduped": [
+                    "osm_gis.get_area_boundary",
+                    "osm_gis.add_pois_layer",
+                    "osm_gis.display_on_map",
+                ],
+                "final_answer_full": "Rendered current-run map artifact.",
+            },
+        )
+
+    class FakeLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def call_json(self, prompt: str, *, system: str, max_tokens: int):
+            self.calls += 1
+            if "ACE Reflector" in system:
+                if "str-00001" in prompt:
+                    return {
+                        "reasoning": "Existing bullet matched the successful artifact handoff.",
+                        "error_identification": "none",
+                        "root_cause_analysis": "good handoff",
+                        "correct_approach": "reuse the current gpkg artifact",
+                        "key_insight": "pass current-run artifacts directly",
+                        "bullet_tags": [{"id": "str-00001", "tag": "helpful"}],
+                        "insights": [],
+                    }
+                return {
+                    "reasoning": "Need a playbook entry for map artifact handoff.",
+                    "error_identification": "none",
+                    "root_cause_analysis": "missing playbook",
+                    "correct_approach": "keep gpkg handoff intact",
+                    "key_insight": "carry current artifact paths forward",
+                    "bullet_tags": [],
+                    "insights": [
+                        {
+                            "section": "tool_flow",
+                            "content": "For POI map tasks, keep the current-run GeoPackage from boundary to POI layer to display without inserting unrelated tools.",
+                            "task_types": ["poi_distance"],
+                            "tools": ["osm_gis.get_area_boundary", "osm_gis.add_pois_layer", "osm_gis.display_on_map"],
+                            "polarity": "helpful",
+                            "evidence_strength": 0.9,
+                        }
+                    ],
+                }
+            return {
+                "reasoning": "Add missing transferable handoff advice.",
+                "operations": [
+                    {
+                        "type": "ADD",
+                        "section": "tool_flow",
+                        "content": "For POI map tasks, keep the current-run GeoPackage from boundary to POI layer to display without inserting unrelated tools.",
+                        "task_types": ["poi_distance"],
+                        "tools": ["osm_gis.get_area_boundary", "osm_gis.add_pois_layer", "osm_gis.display_on_map"],
+                        "polarity": "helpful",
+                    }
+                ],
+            }
+
+    fake = FakeLLM()
+    monkeypatch.setattr("terrabox.agent.llm_provider.make_llm_client", lambda provider: fake)
+
+    store = tmp_path / "store"
+    playbook = build_playbook_ace_official_style(
+        results,
+        store,
+        provider="longcat",
+        batch_size=1,
+        max_batches=2,
+        force=True,
+    )
+
+    assert playbook.manifest["build_status"] == "complete"
+    assert playbook.manifest["counter_updates"]["helpful"] == 1
+    assert playbook.manifest["ace_mechanisms_reproduced"]
+    assert (store / "ace_traces" / "batches.jsonl").exists()
+    assert (store / "intermediate_playbooks" / "batch_0002_playbook.txt").exists()
+    assert playbook.bullets[0].helpful >= 2
