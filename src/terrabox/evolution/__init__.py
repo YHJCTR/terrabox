@@ -45,7 +45,7 @@ def get_prompt_augmenter(
     """Return a ready-to-use PromptAugmenter for the specified evolution method.
 
     Args:
-        method: One of "skillrl", "skillrl_full", "evoskill", "agentevolver", "memrl", "memrl_full", "memrl_full_source", "reflection", "experience_evo", "ace_playbook", "memento_casebank", "causalevo", "rewardevo", "graphskillevo", "seqgraphevo", "causaltextevo", "causalpolicyevo", "expel".
+        method: One of "skillrl", "skillrl_rollout", "skillrl_full", "evoskill", "agentevolver", "memrl", "memrl_full", "memrl_full_source", "reflection", "experience_evo", "ace_playbook", "memento_casebank", "causalevo", "rewardevo", "graphskillevo", "seqgraphevo", "causaltextevo", "causalpolicyevo", "expel".
         store_dir: Directory containing evolution store. Defaults to
                    "evolution_store/{method}". For memrl, pass memory_db=...
         top_k: Number of skills/memories to inject per query.
@@ -73,6 +73,14 @@ def get_prompt_augmenter(
         bank = HierarchicalSkillBank(store_dir)
         retriever = SkillRetriever(bank)
         return SkillRLPromptInjector(bank, retriever, top_k=top_k)
+
+    elif method in {"skillrl_rollout", "skillrl_strict", "skillrl_nonrl"}:
+        from .skillrl.rollout_prompt_injector import RolloutSkillRLPromptInjector
+
+        return RolloutSkillRLPromptInjector(
+            store_dir or "evolution_store/skillrl_rollout",
+            top_k=top_k,
+        )
 
     elif method == "skillrl_full":
         skillbank_path = kwargs.get(
@@ -302,7 +310,7 @@ def get_prompt_augmenter(
     else:
         raise ValueError(
             f"Unknown evolution method: {method!r}. "
-            f"Choose from: 'skillrl', 'skillrl_full', 'evoskill', 'agentevolver', 'memrl', 'memrl_full', 'memrl_full_source', 'causalevo', "
+            f"Choose from: 'skillrl', 'skillrl_rollout', 'skillrl_full', 'evoskill', 'agentevolver', 'memrl', 'memrl_full', 'memrl_full_source', 'causalevo', "
             f"'reflection', 'experience_evo', 'rewardevo', 'graphskillevo', 'seqgraphevo', 'causaltextevo', 'causalpolicyevo', "
             f"'ace_playbook', 'memento_casebank', 'expel', 'selfcritic'"
         )
