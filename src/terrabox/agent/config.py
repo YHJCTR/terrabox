@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -228,6 +229,7 @@ def load_config() -> AgentConfig:
 
 
 _yaml_cache: "dict | None" = None
+_yaml_cache_lock = threading.Lock()
 
 
 def load_raw_yaml() -> dict:
@@ -236,11 +238,15 @@ def load_raw_yaml() -> dict:
     global _yaml_cache
     if _yaml_cache is not None:
         return _yaml_cache
-    path = _resolve_config_path()
-    _yaml_cache = {}
-    if os.path.exists(path):
-        try:
-            _yaml_cache = _load_yaml_file(path)
-        except Exception:
-            pass
+    with _yaml_cache_lock:
+        if _yaml_cache is not None:
+            return _yaml_cache
+        path = _resolve_config_path()
+        loaded: dict = {}
+        if os.path.exists(path):
+            try:
+                loaded = _load_yaml_file(path)
+            except Exception:
+                pass
+        _yaml_cache = loaded
     return _yaml_cache

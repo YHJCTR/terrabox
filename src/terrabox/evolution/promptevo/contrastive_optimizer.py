@@ -10,8 +10,9 @@ import re
 from typing import Optional
 
 from .interfaces import LLMClient
-from .schemas import PairedCase, Attribution
+from .schemas import PairedCase, Attribution, PatchProposal
 from .candidate_selection import choose_static_candidate
+from .protocol_patch import build_patch_prompt, parse_patch_proposal, ProtocolPatchError
 
 _SYSTEM = (
     "You improve static prompts for LLM agents. Compare two prompt versions and "
@@ -486,6 +487,39 @@ class ContrastiveOptimizer:
                 cands.append(data)
         grounded = [c for c in cands if self._grounded(c, prompt_b)]
         return grounded if grounded else cands
+
+    def propose_protocol_candidates(
+        self,
+        prompt_b: str,
+        attributions: list[Attribution],
+        n: int = 3,
+        max_tokens: int = 3500,
+        objective: str = _DEFAULT_OBJECTIVE,
+    ) -> list[dict]:
+        """Stage2 的 typed patch 候选入口，默认完整 prompt 候选不受影响。"""
+        evidence = "\n".join(
+            f"- [{a.effect}] {a.edit_ref} (dims={a.dims}; evidence={a.evidence[:240]})"
+            for a in attributions
+        ) or "(no reliable attribution)"
+        out: list[dict] = []
+        for _ in range(max(1, n)):
+            prompt = build_patch_prompt(
+                prompt_b,
+                "Objective: " + objective,
+                comparison="Paired base/stage1 attribution evidence:\n" + evidence,
+            )
+            try:
+                data = self.llm.call_json(prompt, system=_SYSTEM, max_tokens=max_tokens)
+                proposal: PatchProposal = parse_patch_proposal(data, prompt_b)
+            except ProtocolPatchError:
+                continue
+            out.append({
+                "revised_prompt": proposal.compiled_prompt,
+                "protocol_patches": [patch.to_dict() for patch in proposal.patches],
+                "rationale": proposal.rationale,
+                "diagnosis": proposal.diagnosis,
+            })
+        return out
 
     @staticmethod
     def _parse_text_candidate(raw: str) -> Optional[dict]:

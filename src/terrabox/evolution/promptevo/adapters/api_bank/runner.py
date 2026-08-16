@@ -179,11 +179,41 @@ class APIBankRolloutRunner:
         pred_rows = []
         rollout_rows = []
         completed: set[tuple[str, int]] = set()
-        if resume and os.path.exists(prediction_path):
-            pred_rows = list(load_predictions(prediction_path).values())
-            completed = set(load_predictions(prediction_path))
-            if os.path.exists(rollout_path):
-                rollout_rows = list(_read_jsonl(rollout_path))
+        if resume:
+            existing_predictions = load_predictions(prediction_path) if os.path.exists(prediction_path) else {}
+            existing_rollouts = _read_jsonl(rollout_path) if os.path.exists(rollout_path) else []
+            existing_rollouts_by_key = {
+                _prediction_key(str(row["file"]), int(row["id"])): row
+                for row in existing_rollouts
+                if "file" in row and "id" in row
+            }
+            existing_rollout_keys = set(existing_rollouts_by_key)
+            # A prediction without its trace is not a completed task. Keeping
+            # the pair aligned makes a resumed run safe after interruption. A
+            # transient provider failure is deliberately not terminal: retain
+            # its old rows for audit, but let the resumed rollout append a new
+            # attempt for that task.
+            completed = set(existing_predictions) & existing_rollout_keys
+            try:
+                from terrabox.agent.llm_provider import is_retryable_remote_error_text
+                completed = {
+                    key for key in completed
+                    if not is_retryable_remote_error_text(
+                        str(existing_rollouts_by_key.get(key, {}).get("error") or "")
+                    )
+                }
+            except Exception:
+                # Resume must remain usable even when this adapter is imported
+                # outside the full Terrabox package.
+                pass
+            pred_rows = [row for key, row in existing_predictions.items() if key in completed]
+            rollout_rows = [
+                row for row in existing_rollouts
+                if "file" in row and "id" in row
+                and _prediction_key(str(row["file"]), int(row["id"])) in completed
+            ]
+            _write_jsonl(prediction_path, pred_rows)
+            _write_jsonl(rollout_path, rollout_rows)
         llm = None if dry_run else self._get_llm()
         for sample in self.iter_shard_samples(
             shard_index=shard_index,
@@ -227,8 +257,8 @@ class APIBankRolloutRunner:
                     "empty_prediction": not bool(pred_text.strip()),
                     "low_response_rouge": response_score < 0.2,
                 }
-            pred_rows.append({"file": sample["file"], "id": sample["id"], "pred": pred_text})
-            rollout_rows.append({
+            prediction_row = {"file": sample["file"], "id": sample["id"], "pred": pred_text}
+            rollout_row = {
                 "task_id": sample["task_id"],
                 "file": sample["file"],
                 "id": sample["id"],
@@ -248,12 +278,16 @@ class APIBankRolloutRunner:
                 "latency_s": round(time.time() - started, 3),
                 "error": error,
                 "analysis": analysis,
-            })
+            }
+            # Persist one task at a time so --resume never loses a completed
+            # provider call if the parent/watchdog is interrupted.
+            _append_jsonl(prediction_path, prediction_row)
+            _append_jsonl(rollout_path, rollout_row)
+            pred_rows.append(prediction_row)
+            rollout_rows.append(rollout_row)
             if self.sleep_s:
                 time.sleep(self.sleep_s)
 
-        _write_jsonl(prediction_path, pred_rows)
-        _write_jsonl(rollout_path, rollout_rows)
         return experiment
 
     def run(self, prompt: str, task_ids: list[str], experiment: str) -> str:
@@ -274,6 +308,14 @@ def _messages_to_user_prompt(messages: list[dict[str, str]]) -> str:
         else:
             lines.append(str(content))
     return "\n".join(lines)
+
+
+def _append_jsonl(path: str, row: dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def make_api_bank_components(

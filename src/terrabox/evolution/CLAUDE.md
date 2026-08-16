@@ -16,18 +16,27 @@
 - 若 OEA 工具环境、数据接口、成本、运行依赖或官方代码缺失导致无法完整复刻,必须向用户说明并在 store/manifest/实验记录中标注 `official` / `adapted` / `reimplemented` 口径及差异,不得把弱化实现静默当作完整复现。
 - 主表对比尽量使用机制级或源码级复刻;只能低成本近似的版本应命名为 adapted baseline,并把不可复刻部分列为后续补实验项。
 
+## 经验检索与 task_type 口径
+- 自进化方法及第三方经验/记忆 baseline 的 train 建库与 eval runtime **不得**把 benchmark 数据集提供的 `task_type`/`type` 当作经验分桶键、family ID、索引字段、候选过滤条件、排序 bonus、路由键或 prompt 注入条件；同样不得以 task id、`expected_tools`、gold answer 或其他仅数据集标注可见字段替代。
+- 经验检索必须遵循原作者公开论文或官方源码的检索方式。若原方法没有使用逐样本 `task_type`，适配器不得自行加入该捷径；若因接口限制改成其他检索逻辑，必须在 manifest 和实验记录中标为 `adapted` 或 `reimplemented` 并说明差异。
+- 严格的 rollout-derived self-evolution 中，actor 与经验蒸馏 LLM 只能看到：任务文本、任务提供的图像/数据文件、公开工具说明、自己实际调用的工具、参数、observation、最终自然语言回答和可观测执行错误；不得把 `expected_tools`、`gold_tool_calls`、`ground_truth`、gold 派生 F1/reward 或数据集 `task_type` 送入 LLM prompt、经验文本、经验质量值或检索索引。
+- 可使用任务文本、当前可见 artifact/product state、可用工具、实际 rollout 轨迹，以及原方法规定的可见上下文建立 BM25、embedding、关键词或状态转移索引。模型从这些可见信息自行推断的意图特征可以使用，但必须不读取数据集标签，并在实验记录中说明其来源。
+- `task_type`、`expected_tools`、gold answer 和 gold 指标仅可用于实验结束后的独立评测、报表统计，或显式标为 oracle coverage/teacher upper-bound 的数据诊断；不可混入主 self-evolution store。若用 `expected_tools` 的序列覆盖挑选 train2000，必须单列为 oracle-selected subset，不能声称该筛选本身是无监督自进化。
+- 统一 rollout 即使为兼容接口传入 `task_type`，augmenter 和 builder 必须忽略该数据集标签；新增或修改方法时应以任务可见信息和各原方法规定的检索输入作为唯一依据。
+- Memento/CaseBank 在严格 OEA 对比中应使用 `casebank.builder --ignore-task-type` 重建 store；该模式会把 case 的 `task_type` 置为 `unknown`，并从 state、keywords、Qwen embedding 文档与 runtime 检索中移除数据集标签。历史 `oea_train2000_longcat_semantic_20260810` store 仍可作为旧 adapted 结果诊断，不应和严格无标签主表混用。
+
 ## SkillRL 严格 rollout-only 适配
 - `get_prompt_augmenter("skillrl_rollout")` / `skillrl_strict` / `skillrl_nonrl` 是独立于旧 `skillrl` 的无训练适配模式,不覆盖原实现或历史结果。
-- build 只允许消费 train agent 的实际可见 rollout 字段(任务文本、任务类型、实际工具调用、完成状态、可观测工具错误),不得读取或传递 `expected_tools`、`gold_tool_calls`、`ground_truth`、metrics/F1 或 task ID。
+- build 只允许消费 train agent 的实际可见 rollout 字段(任务文本、实际工具调用、完成状态、可观测工具错误),不得读取或传递数据集 `task_type`、`expected_tools`、`gold_tool_calls`、`ground_truth`、metrics/F1 或 task ID。
 - 使用 Qwen embedding 服务做语义 skill retrieval；embedding 服务不可用时应明确中止,不得静默退化为 lexical retrieval。该模式只复现 SkillRL 的 frozen-policy offline skill-bank arm,不含论文中的 teacher SFT 与 GRPO,结果须标为 `adapted_non_rl`。详细命令见 `skillrl/README.md`。
 
 ## experience_evo 外部经验库
 - 位置:`experience_evo/`,与 `promptevo/` 同级;不要把产物转移经验库混入 PromptEvo 的静态 prompt 优化目录。
 - MVP 是离线经验自进化:历史 rollout `results/` → artifact transition 抽取 → LongCat/DeepSeek/local 蒸馏 → `evolution_store/experience_evo/...` JSONL+SQLite store → `get_prompt_augmenter("experience_evo")` 检索注入。
 - 默认可用已有 LongCat OEA base `tmp/trajectories/promptevo_oea_base_longcat2_20260704_031626_rollout/standard/results` 建库;这适合 transductive smoke/case-library 测试。严格对比应后续用同一 train subset 分别构建 reflection / memrl_full_source / experience_evo，再到 OEA test 评估。
-- 当前 ExperienceEvo 主口径是 rollout-derived offline self-evolution:只从 train/base rollout 的实际 `conversation_history` 工具调用、参数、observation 抽取经验;gold `expected_tools`/`gold_tool_calls` 只用于 train 覆盖选择、指标评分和后续 gold replay audit,不直接进入主 store 蒸馏。若构建 gold replay store,只能作为 teacher upper-bound/diagnostic,不要和主结果混用。
+- 当前 ExperienceEvo 的严格主口径应是 rollout-derived offline self-evolution:只从 train/base rollout 的实际 `conversation_history` 工具调用、参数、observation、自然语言回答与可观测执行反馈抽取经验。历史 v1/v2/v3/v4 store 曾以数据集 `task_type` 分 family，且以 gold F1 生成 reward/Q 值；该 store 与其对应结果属于非严格历史口径，正式主表前必须重建为 task-type-free、gold-free store。gold replay store 只能作为 teacher upper-bound/diagnostic,不要和主结果混用。
 - Gold 验证分两层:`gold-audit` 只做静态 schema 审计,默认读取 live Terrabox registry 以匹配当前真实可执行工具接口,显式传 `--catalog` 才按旧 catalog 快照复现;`gold-replay` 才是真实 teacher-forced 工具执行。`gold-replay` 不调用 LongCat actor,会在执行前把 OEA symbolic artifact alias(`gpkg_N`/`tif_N`/`img_N`,以及少量命名 GeoPackage alias 如 `marienplatz_gpkg_1`/`gpkg_jeronimos_1`)绑定到样本输入或前序工具产物,也会把 OEA 原始 observation 中的固定产物名(`out.tif`/`out.png`/`dummy_generated_image.jpg`)绑定到最近一次真实生成的图像或栅格产物但不改写输出参数本身,每条任务独立 artifact 目录,实际重跑某条任务前会清空该任务自己的 artifact 子目录,输出标准 `results/<task_id>.json`;`final_answer_full` 是 replay observation evidence,需要再跑 `scripts/judge_answers.py` 才能判断是否支持 `ground_truth` 正确结论。`gold-replay --resume` 会跳过干净 completed 和 OOM 终态,但会自动重跑 failed 以及旧版误写成 completed、observation 中仍含工具错误的脏结果;`--max-transient-retries` 默认 5,只重试 infra/provider/timeout 类瞬时 replay 失败;train2000 这类 subset 应用 `--data` 指向完整 train/test JSONL,`--subset-file` 只按 task_id 过滤,不要把不含 `gold_tool_calls` 的 subset 文件直接当 `--data`;精确复测旧失败用可重复的 `--task-id <task_id>`。直接跑 `gold-replay` 时模块会默认设置单卡 VLM(`VLM_TENSOR_PARALLEL_SIZE=1`,`VLM_MAX_MODEL_LEN=8192`,`VLM_MIN_IMAGE_MODEL_LEN=8192`,`VLM_GPU_MEMORY_UTILIZATION=0.95`,`VLM_MAX_NUM_SEQS=1`,`TERRABOX_VLM_ANALYZE_DEFAULT_MAX_TOKENS=4096`),避免 `agent_config.yaml` 中双卡 VLM 配置污染单 lane gold replay；8192 是服务上下文,默认输出预算仍先设为 4096 以减少 context retry；InstructSAM Docker 默认传 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 缓解 24GB 卡上的碎片 OOM,可用 `INSTRUCTSAM_PYTORCH_CUDA_ALLOC_CONF` 覆盖；OEA `CountGivenObject` 的 `bbox`/`region` 兼容当前支持全图宽高互换归一化与轻微越界 clamp,用于避免把历史 gold bbox 约定差异误判为数据错误。
-- 注入内容不得包含当前 eval 的 `expected_tools`、gold answer、task id 或精确历史文件路径;历史 F1/reward 只用于经验筛选和 Q/N/Risk 统计;蒸馏 examples 必须先把历史问题、地点名、文件路径、layer 名和自由文本参数替换为 `<named_area>` / `<artifact_reference>` 等占位符。
+- 注入内容不得包含 `expected_tools`、gold answer、task id、数据集 `task_type` 或精确历史文件路径;gold F1/reward 不得用于经验筛选或 Q/N/Risk 统计，严格主口径只能由实际轨迹的可观测结果与独立 checker 基于该轨迹给出反馈；蒸馏 examples 必须先把历史问题、地点名、文件路径、layer 名和自由文本参数替换为 `<named_area>` / `<artifact_reference>` 等占位符。
 - 当前 ExperienceEvo MVP 检索不是全量塞上下文:先用停用词过滤+OEA domain alias 的 lexical retriever 找签名级产物转移,再在同一 `input_signature -> output_signature` 下找工具级经验并计算 `Quse = lambda*Qtool + (1-lambda)*Qsig`;v1/v2 仍是任务开始前静态 two-stage prompt block。
 - v2/v3 作为并行模式保留,不覆盖旧方案:`get_prompt_augmenter("experience_evo")` 仍读 v1 `experiences.jsonl`;`get_prompt_augmenter("experience_evo_v2")` 读 v2 `events_v2.jsonl`/`families_v2.jsonl`/`experience_evo_v2.sqlite`;`get_prompt_augmenter("experience_evo_v3")` 复用 v2 store。
 - v4 作为独立并行模式保留,不覆盖 v1/v2/v3:`get_prompt_augmenter("experience_evo_v4")` 复用 v2 store,但关闭 v3 的 answer-ready hard guard、premature-final guard 和 synthetic final,只保留当前运行图片路径与 calculator schema 两类硬约束；其余产物状态判断以软提示和 verifier checkpoint 形式提供。可选 `TERRABOX_EXPEVO_V4_LLM_CHECKER=1` 使用 LongCat 做独立 checker,默认关闭以避免全量请求量翻倍。v4 消融只用环境变量切换,默认行为不变:`TERRABOX_EXPEVO_V4_DISABLE_STEP_HINT=1` 关闭逐步检索,`TERRABOX_EXPEVO_V4_DISABLE_QUSE=1`/`TERRABOX_EXPEVO_V4_DISABLE_TOOL_RANKING=1` 关闭 Quse 排序展示,`TERRABOX_EXPEVO_V4_DISABLE_VERIFIER=1`/`TERRABOX_EXPEVO_V4_DISABLE_VERIFICATION=1` 关闭 verifier checkpoint。
@@ -56,7 +65,10 @@
 - `--no-skip-mock/bing/osm/vlm/changeos`:这些 `--skip-*` **默认全 True**;oea_full 含 osm/bing/vlm/changeos,**务必显式带 5 个 `--no-skip-*`**,否则静默丢任务。
 - `--skip-online` / `--only-online`:离线 / 在线分两遍跑(在线需本地转发窗口)。
 - `--gpu-class {any,gpu,nogpu}`:在线再分——`gpu`=gold 含 GPU 感知服务、`nogpu`=gold 不含 GPU 感知服务。只分流任务,不改变可见工具目录。
-- `--workers N`:单个 rollout 进程内任务级**进程**并发,脚本默认 1；但 LongCat/DeepSeek 等外部 API 的 OEA 全量 eval / baseline 复刻 / overnight watcher 默认不要单 worker,必须显式设置多 worker（通常 `--workers 3` 起步，纯 online-nogpu/慢 OSM 补跑可用 2-4）。每个 worker 独立初始化 agent/LLM/经验检索器,避免线程共享 `TERRABOX_TASK_DATA_*`。GPU 感知批次仍以 lane 钉卡 + 服务锁分流为主。带 `--evolution-method` 时,统一 rollout 会把 `question`、`task_type`、`images`、`data_files`、`available_tools` 传给 augmenter,但不传当前 eval 的 `expected_tools`、gold answer 或 task id。新写 watcher 必须显式写 `--workers` 或环境变量（如 `TERRABOX_OEA_REPRO_WORKERS`），不要依赖脚本默认 1。
+- `--workers N`:单个 rollout 进程内任务级**进程**并发,脚本默认 1；但 LongCat/DeepSeek 等外部 API 的 OEA 全量 eval / baseline 复刻 / overnight watcher 默认不要单 worker,必须显式设置多 worker。**默认跑法是 GPU/no-GPU 分 lane**：`--gpu-class gpu --workers 1` 跑含感知工具任务，`--gpu-class nogpu --workers 2-4` 跑 OSM/API/compute 任务；两条 lane 写入同一实验 `results/` 时必须 `--resume` 且结果文件按 task id 独立。每个 worker 独立初始化 agent/LLM/经验检索器,避免线程共享 `TERRABOX_TASK_DATA_*`。带 `--evolution-method` 时,统一 rollout 会把 `question`、`task_type`、`images`、`data_files`、`available_tools` 传给 augmenter,但不传当前 eval 的 `expected_tools`、gold answer 或 task id。新写 watcher 必须显式写 `--workers` 或环境变量（如 `TERRABOX_OEA_REPRO_WORKERS`），不要依赖脚本默认 1。
+- **单感知 lane 限制**：若一个 watcher 只配置一条 VLM/感知服务 lane（例如 `VLM_GPU_DEVICES=0` 且所有重感知服务在同一套 GPU/端口），GPU 感知批必须设 `--workers 1`。不能用多个 worker 让它们排队抢同一把服务锁：通用工具 timeout 从 handler 开始计时，会把锁等待误判成工具失败并污染方法指标。需要加速时，优先按 `--gpu-class gpu` 与 `--gpu-class nogpu` 拆成两条并行 rollout lane；只有多套独立 VLM/感知端口和 GPU 时，才把 GPU 感知 lane 扩成双 lane/三流。纯 online-nogpu 批才可单独提高 worker 数。
+- **VLM / InstructSAM 预热（正式感知 eval 必需）**：外部 API rollout 在首条任务前必须显式调用 Docker `vllm_manager.start_service()` 并等待 `/health` 成功；不能把首次下载/加载多模态模型的数分钟冷启动塞进默认 120 秒工具 timeout。预热进程不能在就绪后立即退出，因为 `BaseServiceManager` 会在 `atexit` 自动释放它启动的容器；watcher 必须保留 service keepalive 到 rollout 结束，再由该进程统一清理。预热失败时 watcher 必须停止，不能带着冷启动超时继续写正式 `results/`。单卡配置建议 `TERRABOX_VLM_STARTUP_TIMEOUT_SECONDS=900`，并给 `geo_perception.vlm_analyze`/`region_attribute_description` 设置至少 360 秒的实际推理 timeout；预热完成后保持 `TERRABOX_KEEP_VLM_WARM=1`。InstructSAM 默认保持 call-scoped；只有在其 Docker create/start 稳定、且被钉到独占 GPU/独立端口时，才允许额外设置 `TERRABOX_KEEP_INSTRUCTSAM_WARM=1` 并在 rollout 前预热 `/health`。若 InstructSAM 预热出现 Docker create/start 卡死或健康检查失败，必须改回 call-scoped 并保持 GPU lane 单 worker，不要让整条 watcher 卡在预热阶段。Docker 管理器以受限时的 `docker create` + `docker start` 启动，`TERRABOX_DOCKER_START_TIMEOUT_SECONDS=90` 同时约束两个阶段；超时后清理同名残留并让 watcher 失败，禁止空转。
+- **Docker 控制面异常处理**：若日志出现 `docker create/start ... timed out`、`context canceled`、`TimeoutExpired`、健康检查长期失败，且 `nvidia-smi` 显示目标 GPU 空闲，不要把它当作模型 OOM 或方法失败继续跑。应先暂停/失败退出当前 watcher，确认 `docker version`、`docker ps`、目标容器 labels/ports、`perception_keepalive.log` 和 `docker logs`；仅清理本实验创建且已确认归属的 `terrabox-*` 残留容器。必要时重启 Docker daemon，但不得擅自重启机器或处理他人容器。正式结果目录必须从干净 `results/` 重新开始或明确隔离旧脏目录。
 - `--max-transient-retries`(默认5)+`--max-transient-retry-seconds`(默认1200):provider/API 连接类抖动导致整条失败→**丢弃该次整条重跑**;预算耗尽后保留当前失败并继续后续任务。确定性错误(上下文超限、选错工具、missing required/invalid argument/不存在文件或图层/API 402、quota/auth/billing 或额度不足错误)不重试;已经进入工具循环后的 `Tool execution timeout`/max-turn 失败按本条轨迹失败处理,避免少数 OSM 大范围/坏参数任务卡住 watcher。配合 `--resume` 时,已有 `results/{task_id}.json` 若是 transient failed 且未耗尽预算,会自动复跑;可用 `--no-retry-existing-transient` 关闭。
 
 ## GPU 钉卡(踩过坑,跑感知任务必看)
@@ -70,10 +82,10 @@
 - 四张 3090 跑 OEA 全量时按 provider 切换:本地 agent LLM 用 ReAct 文档里的
   **双流/3+1**(GPU0/1/2 跑感知流, GPU3 并行跑 `--only-online --gpu-class nogpu`);
   外部 API agent LLM 用 **三流**(GPU0/1 与 GPU2/3 各跑一条感知流, OSM/nogpu 单独跑)。
-  外部 API 三流必须用 `TERRABOX_TOOL_SERVICE_SCOPE=call TERRABOX_KEEP_VLM_WARM=1`,只保留 VLM 常驻,其它感知服务调用后释放,避免同一卡多个重服务常驻导致 CUDA OOM。
+  外部 API 三流必须用 `TERRABOX_TOOL_SERVICE_SCOPE=call TERRABOX_KEEP_VLM_WARM=1`,只保留 VLM 常驻,其它感知服务调用后释放,避免同一卡多个重服务常驻导致 CUDA OOM。仅当 InstructSAM 被明确钉到不与其它重感知服务共享的独占 GPU 时，才允许额外设 `TERRABOX_KEEP_INSTRUCTSAM_WARM=1`；否则必须保持 call-scoped。
   P0/P1 两条感知 lane 除了钉 `*_GPU_DEVICES` 外，也要给非 VLM 服务分配不同端口(如 lane1 用 `SAM2_PORT=9012 REMOTECLIP_PORT=9013 REMOTESAM_PORT=9014 STRIP_RCNN_PORT=9015 INSTRUCTSAM_PORT=9016 CHANGEOS_PORT=9017`)，避免两个进程同时重建同名 `terrabox-*` 容器。
   不要先用 GPU0/1/2 三分片跑完 nogpu 再跑感知批,那会空置 GPU3 并延后慢感知任务。
-- 多 worker 是外部 API 全量实验的默认策略,不是只用于 smoke 后补跑；含 GPU 感知任务通常 `--workers 3` 起步并依赖 per-service 钉卡与服务锁控制显存,纯 online-nogpu/慢 OSM 补跑可用 2-4。单 worker 仅用于 smoke/debug、明确限流或用户指定,不要让 LongCat/DeepSeek 全量 watcher 长时间空转。
+- 多 worker 是外部 API 全量实验的默认策略,不是只用于 smoke 后补跑；但单感知 lane 上不能直接 `--workers 3` 跑全量。OEA 全量默认拆成 `gpu --workers 1` + `nogpu --workers 2-4` 并行跑，既避免 InstructSAM/VLM/SAM2 等服务锁等待污染工具 timeout，又能让 LongCat/DeepSeek 在 OSM/API 慢等待期间保持利用率。单 worker 仅用于 smoke/debug、明确限流或用户指定,不要让 LongCat/DeepSeek 全量 watcher 长时间空转。
 
 ## 工具结果缓存(感知 + 安全 OSM 只读工具,跨实验共享)
 慢且可安全复用的工具(8 个 GPU 感知模型 + 少量安全 OSM 只读工具,当前 `osm_gis.get_bbox_from_raster`)走**内容哈希结果缓存**(`agent/tool_result_cache.py`,挂在 `AgentToolExecutor.execute` 最外层):
@@ -104,6 +116,6 @@
 
 ## ExpeL 真实 OEA 适配
 - `expel` 的旧入口仍是离线工具序列预测；新增 `expel_live`/`expel_official` 是独立模式，不覆盖旧 store 或旧结果。
-- `build-live` 复用已有 train2000 LongCat base rollout 的真实 `conversation_history`，不读取 gold/expected tools 作为蒸馏输入；成功源按 `F1>=0.8`、`task_type + tool_sequence` 覆盖选择，最多 240 条；失败原则仅允许模型可归因工具错误，timeout/OOM/network/quota/context/service 错误过滤掉。
+- `build-live` 复用已有 train2000 LongCat base rollout 的真实 `conversation_history`。严格口径不得读取 gold/expected tools、gold F1 或数据集 `task_type` 作为蒸馏输入、候选分桶或覆盖选择；历史按 `F1>=0.8`、`task_type + tool_sequence` 选择的 store 仅作非严格诊断。失败原则仅允许模型可归因工具错误，timeout/OOM/network/quota/context/service 错误过滤掉。
 - live store 保存 LongCat 批量 principles 和脱敏成功 episode 摘要。评测时通过 `get_prompt_augmenter("expel_live")` 检索原则加最多一条成功 episode，再进入真实 OEA 工具执行和 LongCat answer judge。
 - 当前没有可用的 Qwen embedding HTTP 服务，主实验明确使用可审计 lexical retrieval；Qwen embedding 服务准备好后再单独做检索器消融，不能静默声称已使用 embedding。

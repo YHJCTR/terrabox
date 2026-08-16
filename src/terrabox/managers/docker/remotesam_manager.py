@@ -98,6 +98,31 @@ class RemoteSAMDockerManager(BaseServiceManager):
             cls.DATA_MOUNT_HOST = os.environ["DATA_MOUNT_HOST"]
 
     @classmethod
+    def _docker_timeout_seconds(cls) -> int:
+        try:
+            return max(5, int(os.environ.get("TERRABOX_DOCKER_START_TIMEOUT_SECONDS", "90")))
+        except ValueError:
+            return 90
+
+    @classmethod
+    def _remove_container_bounded(cls, *, reason: str) -> None:
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", cls.CONTAINER_NAME],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("Timed out removing RemoteSAM container %s (%s).", cls.CONTAINER_NAME, reason)
+            record_service_event({
+                "event": "cleanup_timeout",
+                "service": "remotesam",
+                "container": cls.CONTAINER_NAME,
+                "reason": reason,
+            })
+
+    @classmethod
     def _start_docker(cls):
         if cls._container_is_running():
             logger.info(f"Container {cls.CONTAINER_NAME} is running but service is not healthy; rebuilding it.")
@@ -145,9 +170,28 @@ class RemoteSAMDockerManager(BaseServiceManager):
 
         logger.info(f"Starting RemoteSAM container (GPU: {lease.gpu_devices}, port: {lease.port})...")
         record_service_event({"event": "start_requested", "service": "remotesam", "lease": lease.__dict__})
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        timeout_seconds = cls._docker_timeout_seconds()
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            cls._remove_container_bounded(reason="start_timeout")
+            record_service_event({
+                "event": "start_timeout",
+                "service": "remotesam",
+                "container": cls.CONTAINER_NAME,
+                "timeout_seconds": timeout_seconds,
+                "lease": lease.__dict__,
+            })
+            raise TimeoutError(
+                f"docker run for {cls.CONTAINER_NAME} did not return within {timeout_seconds}s"
+            ) from exc
         if result.returncode != 0:
-            subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
+            cls._remove_container_bounded(reason="start_failed")
             record_service_event({"event": "start_failed", "service": "remotesam", "stderr": result.stderr, "lease": lease.__dict__})
             raise RuntimeError(
                 f"Failed to start RemoteSAM container.\nstderr: {result.stderr}"
@@ -191,8 +235,16 @@ class RemoteSAMDockerManager(BaseServiceManager):
     @classmethod
     def stop_service(cls):
         logger.info(f"Stopping container {cls.CONTAINER_NAME}...")
-        subprocess.run(["docker", "stop", cls.CONTAINER_NAME], capture_output=True)
-        subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
+        try:
+            subprocess.run(
+                ["docker", "stop", cls.CONTAINER_NAME],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("Timed out stopping RemoteSAM container %s; forcing removal.", cls.CONTAINER_NAME)
+        cls._remove_container_bounded(reason="stop_service")
         record_service_event({"event": "stopped", "service": "remotesam", "container": cls.CONTAINER_NAME})
 
 

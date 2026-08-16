@@ -82,6 +82,75 @@ def test_memento_registered_as_prompt_augmenter(tmp_path: Path):
     assert "compute_route_dist" in prompt
 
 
+def test_memento_unknown_task_type_does_not_filter_to_unknown_cases(tmp_path: Path):
+    """Eval task labels are absent in OEA and must not restrict retrieval."""
+    from terrabox.evolution.casebank.case_bank import CaseBank, MemoryCase
+
+    bank = CaseBank(tmp_path)
+    bank.cases = [
+        MemoryCase(
+            id="positive-routing",
+            task_id="train_1",
+            task_type="routing",
+            state="request=measure route distance between two stations",
+            action=["osm_gis.compute_route_dist"],
+            reward=0.9,
+            outcome="success",
+            lesson="Use route-distance tools for road-network distance tasks.",
+            keywords=["route", "distance", "stations"],
+            tools=["osm_gis.compute_route_dist"],
+        ),
+        MemoryCase(
+            id="unknown-failure",
+            task_id="train_2",
+            task_type="unknown",
+            state="request=visualize parks and cafes",
+            action=["osm_gis.add_pois_layer"],
+            reward=0.0,
+            outcome="infra-filtered-failure",
+            lesson="Do not copy this failed plan.",
+            keywords=["parks", "cafes"],
+            tools=["osm_gis.add_pois_layer"],
+            tool_error=True,
+        ),
+    ]
+
+    retrieved = bank.retrieve(
+        "What is the route distance between these two stations?",
+        task_type="unknown",
+        top_k=1,
+    )
+
+    assert [case.id for _, case in retrieved] == ["positive-routing"]
+
+
+def test_memento_strict_build_omits_dataset_task_type(tmp_path: Path):
+    from terrabox.evolution.casebank.builder import build_casebank
+
+    results = tmp_path / "results"
+    _write_result(
+        results / "task1.json",
+        {
+            "task_id": "train_1",
+            "question": "Measure route distance between two points.",
+            "task_type": "secret_route_label",
+            "status": "completed",
+            "success": True,
+            "metrics": {"f1": 0.9},
+            "tool_calls_deduped": ["osm_gis.compute_route_dist"],
+        },
+    )
+
+    store = tmp_path / "store"
+    bank = build_casebank(results, store, max_cases=10, ignore_task_type=True)
+
+    assert bank.manifest["ignore_task_type"] is True
+    assert bank.manifest["uses_dataset_task_type"] is False
+    assert bank.cases[0].task_type == "unknown"
+    assert "secret_route_label" not in bank.cases[0].state
+    assert "secret_route_label" not in bank.cases[0].keywords
+
+
 def test_memento_casebank_can_build_qwen_embedding_index(tmp_path: Path, monkeypatch):
     from terrabox.evolution.casebank import semantic_retriever
     from terrabox.evolution.casebank.builder import build_casebank

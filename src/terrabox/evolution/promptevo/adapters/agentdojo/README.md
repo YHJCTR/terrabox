@@ -149,10 +149,9 @@ PYTHONPATH=src /data/yhj/miniconda3/envs/unsloth/bin/python \
   --provider longcat
 ```
 
-For new generic meta-prompt experiments, append `--optimizer-version v2` and
-include `metav2` in the group/version names. The default remains v1 for
-backward compatibility; v2 is additive and does not overwrite historical prompt
-versions or experiment directories.
+New generic chains default to `--optimizer-version v2`; select v1 explicitly
+only to reproduce a historical chain. Use distinct `metav2` group/version names
+so previous experiment directories are never overwritten.
 Stage1 v2 and Stage2 v2 are separate meta prompts: Stage1 v2 diagnoses one
 version's traces and proposes a conservative first edit, while Stage2 v2 uses
 the exact Base-to-Stage1 prompt diff plus paired same-task traces to keep gains
@@ -176,9 +175,10 @@ Rich-wrapped stdout no longer exposes a parseable trace marker and the adapter
 must recover from the newest partial result JSON without utility/security
 labels. `stdout.log` and `stderr.log` are written live,
 timeout/launcher failures write `run_status.json`, and a file lock prevents two
-AgentDojo pipelines from sharing the four lanes. Stage1/Stage2 proposal JSON
-files are resumable checkpoints, so a watchdog restart does not repeat paid
-prompt optimization after a prompt has already been saved.
+AgentDojo pipelines from sharing the four lanes. ProtocolPatch v2 stores its
+fixed real dev slice in `optimization/validation_jobs.json` and its resumable
+paid-API checkpoints in `optimization/stage1_protocol_patch.json` and
+`optimization/stage2_protocol_patch.json`.
 
 ## Experiment layout
 
@@ -200,8 +200,8 @@ experiments/<group>/
   slack_attack_injection_task_0/...
 ```
 
-Stage1 additionally saves `stage1_proposal.json`; Stage2 saves
-`stage2_contrastive.json`. `metricViewer` discovers the top-level group and
+ProtocolPatch v2 Stage1 saves `optimization/stage1_protocol_patch.json`; Stage2
+saves `optimization/stage2_protocol_patch.json`. `metricViewer` discovers the top-level group and
 recursively reads its authoritative AgentDojo JSON traces. Legacy upstream
 `/data1/yuhongjie2/agentdojo/runs/` directories remain visible under the
 `upstream/` prefix when they exist.
@@ -232,8 +232,10 @@ recursively reads its authoritative AgentDojo JSON traces. Legacy upstream
   12) caps this so real benchmark or adapter bugs still surface. Even with one
   API worker, a single AgentDojo sample can issue rapid multi-turn model calls;
   external API calls are therefore paced with a cross-process file lock. Tune
-  `TERRABOX_AGENTDOJO_API_MIN_INTERVAL_SECONDS` (LongCat default 8.0s) and
-  `TERRABOX_AGENTDOJO_API_RATE_LOCK`; the old `TERRABOX_AGENTDOJO_LONGCAT_*`
+  `TERRABOX_AGENTDOJO_API_MIN_INTERVAL_SECONDS` (LongCat default 10.0s) and
+  `TERRABOX_AGENTDOJO_API_RATE_LOCK`. The default lock is shared
+  `tmp/service_locks/remote_llm_longcat.lock`, so concurrent LongCat
+  experiments serialize API requests; the old `TERRABOX_AGENTDOJO_LONGCAT_*`
   names remain aliases. Restart the watcher or rollout parent after changing
   pacing env vars, because running Python parents keep their old environment.
 - Meta-prompt v2 is still domain-neutral: it uses repeated behavior patterns,

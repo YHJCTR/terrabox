@@ -197,6 +197,18 @@ def get_prompt_augmenter(
             q_use_smoothing_k=float(kwargs.get("q_use_smoothing_k", 5.0)),
         )
 
+    elif method in {"experience_evo_v4_clean", "experienceevo_v4_clean", "product_transition_evo_v4_clean"}:
+        from .experience_evo.v4_clean import ExperienceEvoV4CleanRuntime
+
+        v4_top_k = int(kwargs.get("v4_top_k", 3 if top_k == 5 else top_k))
+        return ExperienceEvoV4CleanRuntime(
+            store_dir or "evolution_store/experience_evo/oea_train2000_v4_clean",
+            top_k=v4_top_k,
+            min_q=float(kwargs.get("min_q", 0.0)),
+            max_risk=float(kwargs.get("max_risk", 0.75)),
+            q_use_smoothing_k=float(kwargs.get("q_use_smoothing_k", 5.0)),
+        )
+
     elif method in {"ace", "ace_playbook", "ace_style"}:
         from .ace_playbook.prompt_injector import ACEPlaybookPromptInjector
 

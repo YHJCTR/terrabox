@@ -15,8 +15,9 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-from .schemas import PromptEdit, PromptProposal
+from .schemas import PromptEdit, PromptProposal, PatchProposal
 from .candidate_selection import choose_static_candidate, score_static_candidates
+from .protocol_patch import build_patch_prompt, parse_patch_proposal, ProtocolPatchError
 
 
 _OPTIMIZER_SYSTEM = (
@@ -220,6 +221,31 @@ class PromptOptimizer:
         ok = ratio <= self.max_growth_ratio
         note = f"体量为原文的 {ratio:.2f}x (软上限 {self.max_growth_ratio}x)"
         return ok, note
+
+    def propose_protocol_patches(
+        self,
+        base_prompt: str,
+        trace_text: str,
+        max_tokens: int = 3500,
+        metric_block: str = "",
+        comparison: str = "",
+    ) -> Optional[PatchProposal]:
+        """以显式 patch 模式生成并编译类型化行为协议。
+
+        该入口不改变 propose()/propose_candidates() 的历史完整 prompt 语义。
+        解析或契约检查失败时返回 None，由调用方明确记录失败，不静默退回整段改写。
+        """
+        prompt = build_patch_prompt(
+            base_prompt,
+            trace_text,
+            metric_block=metric_block,
+            comparison=comparison,
+        )
+        data = self.llm.call_json(prompt, system=_OPTIMIZER_SYSTEM, max_tokens=max_tokens)
+        try:
+            return parse_patch_proposal(data, base_prompt)
+        except ProtocolPatchError:
+            return None
 
     def propose(self, base_prompt: str, trace_text: str,
                 max_tokens: int = 3500, metric_block: str = "") -> Optional[PromptProposal]:

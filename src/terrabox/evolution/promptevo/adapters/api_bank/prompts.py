@@ -34,6 +34,9 @@ class APIBankPromptStore:
     def save(self, version: str, prompt: str, meta: dict) -> str:
         os.makedirs(self.versions_dir, exist_ok=True)
         path = self._path(version)
+        path_parent = os.path.dirname(path)
+        if path_parent:
+            os.makedirs(path_parent, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write(prompt.strip() + "\n")
         with open(path.replace(".txt", ".meta.json"), "w", encoding="utf-8") as f:

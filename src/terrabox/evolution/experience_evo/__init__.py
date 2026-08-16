@@ -12,6 +12,7 @@ from .store import ExperienceEvoStore
 from .v2 import ExperienceEvoV2Runtime, ExperienceEvoV2Store
 from .v3 import ExperienceEvoV3Runtime
 from .v4 import ExperienceEvoV4Runtime
+from .v4_clean import ExperienceEvoV4CleanRuntime
 
 __all__ = [
     "ExperienceEvoPromptInjector",
@@ -20,4 +21,5 @@ __all__ = [
     "ExperienceEvoV2Store",
     "ExperienceEvoV3Runtime",
     "ExperienceEvoV4Runtime",
+    "ExperienceEvoV4CleanRuntime",
 ]

@@ -29,6 +29,44 @@ ExperienceEvo 构建外部经验库。当前 MVP 是离线优先：
 字段包含 `q`、`n`、`risk`、`status`、输入约束、输出检查、下游消费规则、
 恢复建议和参数注意事项。
 
+## 2026-08-14 v4-clean 严格口径
+
+历史 v1--v4 store 曾把 OEA 的 `task_type` 写进 family key，因此保留为可复现的
+历史结果，但不再作为严格无标签自进化主表。`experience_evo_v4_clean` 是独立实现，
+不会覆盖旧 v4 的代码、store 或结果：
+
+```text
+train base rollout（仅任务、输入、实际工具调用/参数/observation/可观测错误）
+  -> 去除 task_id/task_type/expected_tools/gold answer/gold calls/F1 等标注
+  -> query-derived intent + input product state + target product state family
+  -> LongCat 蒸馏 product/tool experience 与 Qsig/Qtool/N/R
+  -> JSONL + SQLite strict store
+  -> eval: 前置产物状态硬过滤
+         + lexical BM25 与结构化状态/意图排序的 RRF 融合
+         + Quse/risk 重排
+         + v4 soft verifier 与 step hint
+```
+
+`task_type` 在 runtime 中仅为统一 agent 接口而接收，随后立即丢弃；它不参与建库、
+family id、候选过滤、排序、路由或 prompt。严格 store 的事件字段中会留下固定的
+`"rollout"` / `"general"` 占位值以兼容 JSONL/SQLite schema，但不保留任何样本标签。
+Q 与 risk 只使用当前 rollout 可观测的输入绑定、输出有效、目标产物形成、下游消费、
+终态可用性与可归因参数/产物错误；OOM、网络、timeout、配额、上下文与服务问题只过滤。
+
+正式建库示例：
+
+```bash
+PYTHONPATH=src /home/yuhongjie/miniconda3/envs/unsloth/bin/python \
+  -m terrabox.evolution.experience_evo.runner build-v4-clean \
+  --source tmp/trajectories/longcat_oea_train2000_seed42_base_nightly_20260724/standard/results \
+  --source-name oea_train2000_longcat_rollout \
+  --store-dir evolution_store/experience_evo/oea_train2000_v4_clean \
+  --provider longcat --min-support 2 --progress-every 25
+```
+
+其中 2000 条 train 子集按 oracle `expected_tools` 序列覆盖挑选，因此要在论文中标为
+`oracle-sequence-coverage subset`；这只影响 subset 选择，不会写入 store 或暴露给 agent。
+
 注入 prompt 时不能包含 `expected_tools`、最终答案、精确历史路径或 task id。
 历史 F1/reward 只用于经验排序和标签。发给 LLM 蒸馏前会先脱敏：
 具体任务文本、地点名、文件路径、layer 名和自由文本参数会被替换为

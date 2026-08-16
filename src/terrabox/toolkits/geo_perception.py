@@ -445,14 +445,17 @@ def _stop_tool_service_after_call(manager) -> None:
     scope = os.environ.get("TERRABOX_TOOL_SERVICE_SCOPE", "").strip().lower()
     if scope not in {"call", "per-call", "tool-call"}:
         return
-    # Keep the heavy VLM (Qwen3-VL) container warm when requested: it is slow to
-    # load (~minutes) and reused by many instructsam/vlm_analyze calls. Other,
-    # lighter tools still stop after each call so they don't pile up on the
-    # shared tool GPU. The VLM has its own dedicated GPU(s), so it does not
-    # contend with the cycling perception tools.
+    # Keep services warm only when their caller explicitly reserves a dedicated
+    # GPU lane. The default remains call-scoped so different heavy perception
+    # models cannot accumulate on one shared tool GPU.
     if (
         manager is vllm_manager
         and os.environ.get("TERRABOX_KEEP_VLM_WARM", "").strip().lower() in {"1", "true", "yes", "on"}
+    ):
+        return
+    if (
+        manager is instructsam_manager
+        and os.environ.get("TERRABOX_KEEP_INSTRUCTSAM_WARM", "").strip().lower() in {"1", "true", "yes", "on"}
     ):
         return
     try:

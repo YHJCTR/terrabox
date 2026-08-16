@@ -334,12 +334,15 @@ def _llm_settings(
                     "TERRABOX_TAU2_API_MIN_INTERVAL_SECONDS",
                     os.getenv(
                         f"TERRABOX_{provider.upper()}_MIN_INTERVAL_SECONDS",
-                        os.getenv("TERRABOX_REMOTE_LLM_MIN_INTERVAL_SECONDS", "8.0" if provider == "longcat" else "1.0"),
+                        os.getenv("TERRABOX_REMOTE_LLM_MIN_INTERVAL_SECONDS", "10.0" if provider == "longcat" else "1.0"),
                     ),
                 ),
                 "TERRABOX_TAU2_API_RATE_LOCK": os.getenv(
                     "TERRABOX_TAU2_API_RATE_LOCK",
-                    str(Path("tmp/service_locks") / f"tau2_{provider}_api_rate.lock"),
+                    os.getenv(
+                        "TERRABOX_REMOTE_LLM_RATE_LOCK",
+                        str(TERRABOX_ROOT / "tmp" / "service_locks" / f"remote_llm_{provider}.lock"),
+                    ),
                 ),
                 "AGENT_CONFIG_PATH": str(TERRABOX_AGENT_CONFIG),
             },
@@ -839,22 +842,71 @@ def _sample_stage1_traces(results_dir: str, n_failed: int = 12, n_success: int =
     return "\n\n".join(default_render(trace, 2400) for trace in picked)
 
 
+def _validation_task_ids(results_dir: str, count: int, seed: int = 17) -> list[str]:
+    """Choose a fixed, cross-domain dev slice and keep all trials per task."""
+    per_task = Tau2MetricProvider(results_path_fn=lambda _exp: results_dir).per_task("base")
+    grouped: dict[tuple[str, str], list[tuple[str, Any]]] = defaultdict(list)
+    for canonical_id, metric in per_task.items():
+        domain = str(metric.extra.get("domain") or "")
+        task_id = str(metric.extra.get("task_id") or "")
+        if domain and task_id:
+            grouped[(domain, task_id)].append((canonical_id, metric))
+    failed = [key for key, values in grouped.items() if any(not metric.success for _, metric in values)]
+    successful = [key for key, values in grouped.items() if all(metric.success for _, metric in values)]
+    rng = random.Random(seed)
+    rng.shuffle(failed)
+    rng.shuffle(successful)
+    selected = failed[: max(1, count // 2)] + successful[: max(0, count - max(1, count // 2))]
+    if len(selected) < count:
+        remaining = [key for key in grouped if key not in selected]
+        rng.shuffle(remaining)
+        selected.extend(remaining[: count - len(selected)])
+    return [canonical_id for key in selected[:count] for canonical_id, _ in grouped[key]]
+
+
+class _Tau2ValidationRunner:
+    """Run typed-patch candidates on isolated real tau2 dev rollouts."""
+
+    def __init__(self, group: str, profile: Tau2PipelineProfile):
+        self.group = group
+        self.profile = profile
+
+    def run(self, prompt: str, task_ids: list[str], experiment: str) -> str:
+        root_group = f"{self.group}/validation/{experiment}"
+        by_domain: dict[str, set[str]] = defaultdict(set)
+        for canonical_id in task_ids:
+            parts = canonical_id.split("::", 2)
+            if len(parts) >= 2:
+                by_domain[parts[0]].add(parts[1])
+        if not by_domain:
+            raise RuntimeError("tau2 validation received no canonical task ids")
+        ports = _profile_worker_ports(self.profile)
+        for index, (domain, ids) in enumerate(sorted(by_domain.items())):
+            _run_domain_chunk(root_group, prompt, domain, sorted(ids), index, ports[index % len(ports)], self.profile)
+            _merge_domain_results(root_group, domain, self.profile)
+        return experiment_dir(root_group)
+
+
 def optimize_stage1(
     base_results: str,
     version: str,
     record_dir: str,
     provider: str = "longcat",
-    optimizer_version: str = "v1",
+    optimizer_version: str = "v2",
+    profile: Tau2PipelineProfile = PIPELINE_PROFILES["longcat_agent4"],
+    validation_tasks: int = 12,
+    candidates: int = 3,
+    max_tokens: int = 12000,
 ) -> str:
     record = Path(record_dir)
-    proposal_path = record / "stage1_proposal.json"
+    proposal_path = record / "stage1_protocol_patch.json"
     if proposal_path.exists():
         try:
             saved = json.loads(proposal_path.read_text(encoding="utf-8"))
             prompt_path = Path(str(saved.get("prompt_path") or ""))
             if (
                 saved.get("version") == version
-                and saved.get("optimizer_version", "v1") == optimizer_version
+                and saved.get("optimizer_version") == optimizer_version
                 and prompt_path.is_file()
             ):
                 print(f"[{time.strftime('%F %T')}] reusing Stage1 prompt {prompt_path}", flush=True)
@@ -863,26 +915,45 @@ def optimize_stage1(
             pass
     store = Tau2PromptStore(tau2_root=TAU2_ROOT)
     base_prompt = store.load("base")
+    metric_provider = Tau2MetricProvider(results_path_fn=lambda exp: exp)
+    metrics = metric_provider.aggregate(base_results)
+    dev_ids = _validation_task_ids(base_results, validation_tasks)
+    base_dev = metric_provider.aggregate(base_results, dev_ids)
     trace_text = _sample_stage1_traces(base_results)
-    metrics = Tau2MetricProvider(results_path_fn=lambda _: base_results).aggregate("base")
     optimizer = PromptOptimizer(
         llm_client=make_llm_client(provider),
         max_growth_ratio=1.5,
         meta_prompt_version=optimizer_version,
     )
-    proposal, scores = optimizer.propose_best(
-        base_prompt,
-        trace_text,
-        n=3,
-        max_tokens=8000,
-        metric_block=json.dumps(metrics, ensure_ascii=False, indent=2),
-    )
-    if proposal is None:
-        raise RuntimeError(f"Stage1 optimizer produced no acceptable prompt: {scores}")
+    validation_runner = _Tau2ValidationRunner(record.name, profile)
+    candidates_record: list[dict[str, Any]] = []
+    for index in range(candidates):
+        proposal = optimizer.propose_protocol_patches(
+            base_prompt, trace_text, max_tokens=max_tokens,
+            metric_block=json.dumps(metrics, ensure_ascii=False, indent=2),
+            comparison="Stage1: use only Base rollout observations and aggregate metrics.",
+        )
+        if proposal is None:
+            continue
+        candidate_experiment = f"stage1_candidate_{index}"
+        candidate_path = validation_runner.run(proposal.compiled_prompt, dev_ids, candidate_experiment)
+        candidate_metrics = metric_provider.aggregate(candidate_path, dev_ids)
+        candidates_record.append({
+            "index": index, "experiment": candidate_path,
+            "score": float(candidate_metrics.get("success_rate") or 0) + 0.5 * float(candidate_metrics.get("tool_f1") or 0),
+            "metrics": candidate_metrics, "proposal": proposal.to_dict(),
+        })
+    if not candidates_record:
+        raise RuntimeError("Stage1 未得到可通过 typed protocol-patch 契约的候选，停止而不静默退化。")
+    best = max(candidates_record, key=lambda item: item["score"])
+    base_score = float(base_dev.get("success_rate") or 0) + 0.5 * float(base_dev.get("tool_f1") or 0)
+    accepted = best["score"] >= base_score
+    selected_prompt = str(best["proposal"]["compiled_prompt"]) if accepted else base_prompt
     path = store.save(
         version,
-        proposal.revised_prompt,
-        {"proposal": proposal.to_dict(), "scores": scores, "optimizer_version": optimizer_version},
+        selected_prompt,
+        {"proposal_format": "patch", "accepted": accepted, "selected_candidate": best["index"],
+         "candidate_validation": candidates_record, "optimizer_version": optimizer_version},
     )
     record.mkdir(parents=True, exist_ok=True)
     _write_json(
@@ -890,8 +961,12 @@ def optimize_stage1(
         {
             "version": version,
             "prompt_path": path,
-            "proposal": proposal.to_dict(),
-            "scores": scores,
+            "accepted": accepted,
+            "base_metrics": metrics,
+            "base_dev": base_dev,
+            "validation_task_ids": dev_ids,
+            "selected_candidate": best["index"],
+            "candidates": candidates_record,
             "optimizer_version": optimizer_version,
         },
     )
@@ -905,17 +980,21 @@ def optimize_stage2(
     stage2_version: str,
     record_dir: str,
     provider: str = "longcat",
-    optimizer_version: str = "v1",
+    optimizer_version: str = "v2",
+    profile: Tau2PipelineProfile = PIPELINE_PROFILES["longcat_agent4"],
+    validation_tasks: int = 12,
+    candidates: int = 3,
+    max_tokens: int = 12000,
 ) -> str:
     record = Path(record_dir)
-    contrastive_path = record / "stage2_contrastive.json"
+    contrastive_path = record / "stage2_protocol_patch.json"
     if contrastive_path.exists():
         try:
             saved = json.loads(contrastive_path.read_text(encoding="utf-8"))
             prompt_path = Path(str(saved.get("prompt_path") or ""))
             if (
                 saved.get("version") == stage2_version
-                and saved.get("optimizer_version", "v1") == optimizer_version
+                and saved.get("optimizer_version") == optimizer_version
                 and prompt_path.is_file()
             ):
                 print(f"[{time.strftime('%F %T')}] reusing Stage2 prompt {prompt_path}", flush=True)
@@ -925,11 +1004,13 @@ def optimize_stage2(
     store = Tau2PromptStore(tau2_root=TAU2_ROOT)
     traces = Tau2TrajectorySource(results_path_fn=lambda exp: exp)
     metrics = Tau2MetricProvider(results_path_fn=lambda exp: exp)
+    dev_ids = _validation_task_ids(base_results, validation_tasks)
     updater = ContrastiveUpdater(
         store,
         traces,
         metrics,
         optimizer=ContrastiveOptimizer(llm=make_llm_client(provider), meta_prompt_version=optimizer_version),
+        runner=_Tau2ValidationRunner(record.name, profile),
     )
     objective = (
         "Improve all important tau2 customer-service reward metrics according to their directions. "
@@ -947,16 +1028,18 @@ def optimize_stage2(
         base_results,
         stage1_results,
         stage2_version,
-        n_candidates=3,
-        max_tokens=8000,
-        diagnose_max_tokens=6000,
+        dev_task_ids=dev_ids,
+        n_candidates=candidates,
+        max_tokens=max_tokens,
+        diagnose_max_tokens=max_tokens,
         objective=objective,
+        proposal_format="patch",
     )
     path = store.save(
         stage2_version,
         result.revised_prompt,
         {
-            "result": result.to_dict(),
+            "result": result.to_dict(), "validation_task_ids": dev_ids,
             "base_results": base_results,
             "stage1_results": stage1_results,
             "optimizer_version": optimizer_version,
@@ -1008,27 +1091,30 @@ def chain_after_base(
     stage2_version: str,
     provider: str = "longcat",
     profile: Tau2PipelineProfile = PIPELINE_PROFILES["legacy4"],
-    optimizer_version: str = "v1",
+    optimizer_version: str = "v2",
+    validation_tasks: int = 12,
+    stage1_candidates: int = 3,
+    stage2_candidates: int = 3,
+    optimizer_max_tokens: int = 12000,
 ) -> None:
     if provider == "longcat":
         os.environ["TERRABOX_LONGCAT_THINKING"] = "disabled"
     wait_for_group(base_group, domains=profile.domains)
-    wait_for_base_cleanup()
-    base_rejudged = rejudge_group(base_group, provider)
-    optimize_stage1(base_rejudged, stage1_version, experiment_dir(stage1_group), provider, optimizer_version)
+    base_results = experiment_dir(base_group)
+    optimize_stage1(base_results, stage1_version, experiment_dir(stage1_group), provider, optimizer_version,
+                    profile, validation_tasks, stage1_candidates, optimizer_max_tokens)
     rollout_group(stage1_group, stage1_version, "stage1", profile)
-    stage1_rejudged = rejudge_group(stage1_group, provider)
+    stage1_results = experiment_dir(stage1_group)
     optimize_stage2(
-        base_rejudged,
-        stage1_rejudged,
+        base_results,
+        stage1_results,
         stage1_version,
         stage2_version,
         experiment_dir(stage2_group),
         provider,
-        optimizer_version,
+        optimizer_version, profile, validation_tasks, stage2_candidates, optimizer_max_tokens,
     )
     rollout_group(stage2_group, stage2_version, "stage2", profile)
-    rejudge_group(stage2_group, provider)
     print(f"[{time.strftime('%F %T')}] tau2 Base -> Stage1 -> Stage2 chain complete", flush=True)
 
 
@@ -1044,7 +1130,11 @@ def main() -> None:
         command.add_argument("--stage2-version", required=True)
         command.add_argument("--provider", default="longcat", choices=["longcat", "deepseek"])
         command.add_argument("--profile", default="legacy4", choices=sorted(PIPELINE_PROFILES))
-        command.add_argument("--optimizer-version", default="v1", choices=["v1", "v2"])
+        command.add_argument("--optimizer-version", default="v2", choices=["v1", "v2"])
+        command.add_argument("--validation-tasks", type=int, default=12)
+        command.add_argument("--stage1-candidates", type=int, default=3)
+        command.add_argument("--stage2-candidates", type=int, default=3)
+        command.add_argument("--optimizer-max-tokens", type=int, default=12000)
 
     chain = sub.add_parser("chain-after-base")
     add_chain_args(chain)
@@ -1062,7 +1152,8 @@ def main() -> None:
         args.stage2_version,
         args.provider,
         profile,
-        args.optimizer_version,
+        args.optimizer_version, args.validation_tasks, args.stage1_candidates, args.stage2_candidates,
+        args.optimizer_max_tokens,
     )
 
 

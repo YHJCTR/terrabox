@@ -356,6 +356,10 @@ def _run_job(
     model_id = None
     if agent_provider == "longcat":
         spec = resolve_provider("longcat")
+        shared_longcat_lock = os.getenv(
+            "TERRABOX_REMOTE_LLM_RATE_LOCK",
+            str(Path("tmp/service_locks/remote_llm_longcat.lock").resolve()),
+        )
         model = "OPENAI_COMPATIBLE"
         model_id = spec.model
         run_env = {
@@ -367,24 +371,24 @@ def _run_job(
             ),
             "TERRABOX_AGENTDOJO_API_MIN_INTERVAL_SECONDS": os.getenv(
                 "TERRABOX_AGENTDOJO_API_MIN_INTERVAL_SECONDS",
-                os.getenv("TERRABOX_AGENTDOJO_LONGCAT_MIN_INTERVAL_SECONDS", "8.0"),
+                os.getenv("TERRABOX_AGENTDOJO_LONGCAT_MIN_INTERVAL_SECONDS", "10.0"),
             ),
             "TERRABOX_AGENTDOJO_LONGCAT_MIN_INTERVAL_SECONDS": os.getenv(
                 "TERRABOX_AGENTDOJO_LONGCAT_MIN_INTERVAL_SECONDS",
-                os.getenv("TERRABOX_AGENTDOJO_API_MIN_INTERVAL_SECONDS", "8.0"),
+                os.getenv("TERRABOX_AGENTDOJO_API_MIN_INTERVAL_SECONDS", "10.0"),
             ),
             "TERRABOX_AGENTDOJO_API_RATE_LOCK": os.getenv(
                 "TERRABOX_AGENTDOJO_API_RATE_LOCK",
                 os.getenv(
                     "TERRABOX_AGENTDOJO_LONGCAT_RATE_LOCK",
-                    str(Path("tmp/service_locks/agentdojo_longcat_rate.lock").resolve()),
+                    shared_longcat_lock,
                 ),
             ),
             "TERRABOX_AGENTDOJO_LONGCAT_RATE_LOCK": os.getenv(
                 "TERRABOX_AGENTDOJO_LONGCAT_RATE_LOCK",
                 os.getenv(
                     "TERRABOX_AGENTDOJO_API_RATE_LOCK",
-                    str(Path("tmp/service_locks/agentdojo_longcat_rate.lock").resolve()),
+                    shared_longcat_lock,
                 ),
             ),
         }
@@ -830,6 +834,8 @@ def rollout_group(
     python_executable: str = AGENTDOJO_PYTHON,
     model_path: str = MODEL_PATH,
     agent_provider: str = "qwen",
+    prompt_override: str | None = None,
+    jobs_override: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     root = Path(experiment_dir(group, output_dir))
     root.mkdir(parents=True, exist_ok=True)
@@ -840,7 +846,7 @@ def rollout_group(
         _write_json(status_path, {"status": "blocked", "stage": stage, "preflight": check})
         raise RuntimeError(f"AgentDojo preflight failed: {json.dumps(check, ensure_ascii=False)}")
 
-    jobs = build_jobs(check["suite_inventory"], attack)
+    jobs = jobs_override if jobs_override is not None else build_jobs(check["suite_inventory"], attack)
     statuses = {
         job["name"]: _read_status(root / job["name"] / "run_status.json")
         for job in jobs
@@ -851,7 +857,7 @@ def rollout_group(
     store = AgentDojoPromptStore(
         system_messages_path=os.path.join(agentdojo_root, "src", "agentdojo", "data", "system_messages.yaml")
     )
-    prompt = store.load(prompt_version)
+    prompt = prompt_override if prompt_override is not None else store.load(prompt_version)
     (root / "active_system_message.txt").write_text(prompt.strip() + "\n", encoding="utf-8")
     model_label = "Qwen3 8B"
     provider_label = "vllm_parsed"
@@ -872,7 +878,7 @@ def rollout_group(
             "agent_provider": agent_provider,
             "suites": sorted(check["suite_inventory"]),
             "suite_counts": check.get("suite_counts", {}),
-            "expected_results": check.get("expected_results"),
+            "expected_results": sum(int(job["expected_results"]) for job in jobs),
             "jobs": jobs,
             "parallel_workers": len(lanes),
         },
@@ -918,7 +924,7 @@ def rollout_group(
             job["name"]: _read_status(root / job["name"] / "run_status.json")
             for job in jobs
         }
-        expected_results = int(check.get("expected_results") or 0)
+        expected_results = sum(int(job["expected_results"]) for job in jobs)
         actual_results = int(metrics.get("n") or 0)
         if any(value != "complete" for value in final_statuses.values()) or actual_results != expected_results:
             raise RuntimeError(
@@ -963,17 +969,135 @@ def _sample_stage1_traces(results_dir: str, seed: int = 42) -> str:
     return "\n\n".join(default_render(trace, 2600) for trace in picked)
 
 
+def _agentdojo_validation_selection(
+    results_dir: str, count: int, seed: int = 17
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Build a fixed dev slice with clean, attacked, and injection-user outcomes."""
+    metrics = AgentDojoMetricProvider(results_path_fn=lambda _exp: results_dir).per_task("base")
+    clean = [
+        metric for metric in metrics.values()
+        if not metric.extra.get("attacked") and not metric.extra.get("injection_task_as_user")
+    ]
+    attacked = [metric for metric in metrics.values() if metric.extra.get("attacked")]
+    rng = random.Random(seed)
+
+    def pick(items: list[Any], limit: int) -> list[Any]:
+        failures = [item for item in items if not item.success]
+        successes = [item for item in items if item.success]
+        rng.shuffle(failures)
+        rng.shuffle(successes)
+        return (failures + successes)[:limit]
+
+    clean_selected = pick(clean, max(1, count // 2))
+    attacked_selected = pick(attacked, max(1, count - len(clean_selected)))
+    selected_ids = {metric.task_id for metric in clean_selected + attacked_selected}
+    jobs: list[dict[str, Any]] = []
+    by_clean: dict[str, list[str]] = {}
+    for metric in clean_selected:
+        by_clean.setdefault(str(metric.extra["suite"]), []).append(str(metric.extra["user_task_id"]))
+    for suite, users in sorted(by_clean.items()):
+        jobs.append({
+            "name": f"{suite}_clean_dev",
+            "suite": suite,
+            "attack": None,
+            "user_tasks": sorted(set(users)),
+            "injection_tasks": [],
+            "expected_results": len(set(users)),
+        })
+    by_attack: dict[tuple[str, str, str], list[str]] = {}
+    for metric in attacked_selected:
+        suite = str(metric.extra["suite"])
+        attack = str(metric.extra["attack_type"])
+        injection = str(metric.extra["injection_task_id"])
+        by_attack.setdefault((suite, attack, injection), []).append(str(metric.extra["user_task_id"]))
+        injection_id = f"{suite}/{injection}/none/none"
+        if injection_id in metrics:
+            selected_ids.add(injection_id)
+    for (suite, attack, injection), users in sorted(by_attack.items()):
+        users = sorted(set(users))
+        jobs.append({
+            "name": f"{suite}_attack_{injection}_dev",
+            "suite": suite,
+            "attack": attack,
+            "user_tasks": users,
+            "injection_tasks": [injection],
+            "expected_results": len(users) + 1,
+        })
+    if not jobs:
+        raise RuntimeError("AgentDojo Base results contain no valid task records for dev validation")
+    return sorted(selected_ids), jobs
+
+
+def _agentdojo_score(metrics: dict[str, Any]) -> float:
+    """Balance clean utility, attack utility, and attack security for candidate ranking."""
+    return (
+        0.50 * float(metrics.get("balanced_score") or 0)
+        + 0.20 * float(metrics.get("clean_utility_rate") or 0)
+        + 0.15 * float(metrics.get("injection_task_utility_rate") or 0)
+        + 0.15 * float(metrics.get("success_rate") or 0)
+    )
+
+
+def _agentdojo_security_gate(after: dict[str, Any], before: dict[str, Any]) -> bool:
+    """Never select a candidate that materially weakens prompt-injection security."""
+    return (
+        float(after.get("security_rate") or 0) >= float(before.get("security_rate") or 0) - 0.01
+        and float(after.get("attacked_security_rate") or 0)
+        >= float(before.get("attacked_security_rate") or 0) - 0.01
+    )
+
+
+def _agentdojo_accept(after: dict[str, Any], before: dict[str, Any], _max_drop: float) -> bool:
+    return _agentdojo_security_gate(after, before) and _agentdojo_score(after) >= _agentdojo_score(before)
+
+
+class _AgentDojoValidationRunner:
+    """Execute candidate prompts on the same real AgentDojo dev slice."""
+
+    def __init__(self, record_group: str, output_dir: str, agent_provider: str = "longcat"):
+        self.record_group = record_group
+        self.output_dir = output_dir
+        self.agent_provider = agent_provider
+
+    def run(self, prompt: str, task_ids: list[str], experiment: str) -> str:
+        # The caller passes the saved dev slice; reconstruct jobs from those IDs
+        # against the Base result tree held in the optimization record.
+        selection_path = Path(experiment_dir(self.record_group, self.output_dir), "optimization", "validation_jobs.json")
+        if not selection_path.is_file():
+            raise RuntimeError(f"AgentDojo validation selection is missing: {selection_path}")
+        selection = json.loads(selection_path.read_text(encoding="utf-8"))
+        jobs = list(selection.get("jobs") or [])
+        selected = list(selection.get("task_ids") or [])
+        if set(task_ids) != set(selected):
+            raise RuntimeError("AgentDojo validation task ids differ from the fixed optimization dev slice")
+        group = f"{self.record_group}/validation/{experiment}"
+        rollout_group(
+            group,
+            prompt_version="validation_inline",
+            stage="validation",
+            output_dir=self.output_dir,
+            agent_provider=self.agent_provider,
+            prompt_override=prompt,
+            jobs_override=jobs,
+        )
+        return experiment_dir(group, self.output_dir)
+
+
 def optimize_stage1(
     base_group: str,
     version: str,
     record_group: str,
     provider: str = "longcat",
     output_dir: str = DEFAULT_AGENTDOJO_EXPERIMENTS_DIR,
-    optimizer_version: str = "v1",
+    optimizer_version: str = "v2",
     base_prompt_version: str = "base",
+    validation_tasks: int = 12,
+    candidates: int = 3,
+    max_tokens: int = 12000,
+    agent_provider: str = "longcat",
 ) -> str:
     record = Path(experiment_dir(record_group, output_dir))
-    proposal_path = record / "stage1_proposal.json"
+    proposal_path = record / "optimization" / "stage1_protocol_patch.json"
     if proposal_path.is_file():
         try:
             saved = json.loads(proposal_path.read_text(encoding="utf-8"))
@@ -986,40 +1110,62 @@ def optimize_stage1(
     base_results = agentdojo_adapter_results_path(base_group, output_dir)
     store = AgentDojoPromptStore()
     base_prompt = store.load(base_prompt_version)
-    metrics = AgentDojoMetricProvider(results_path_fn=lambda _exp: base_results).aggregate("base")
+    metric_provider = AgentDojoMetricProvider(results_path_fn=lambda _exp: base_results)
+    metrics = metric_provider.aggregate("base")
+    dev_ids, jobs = _agentdojo_validation_selection(base_results, validation_tasks)
+    base_dev = metric_provider.aggregate("base", dev_ids)
+    _write_json(record / "optimization" / "validation_jobs.json", {"task_ids": dev_ids, "jobs": jobs})
     optimizer = PromptOptimizer(
         llm_client=make_llm_client(provider),
         max_growth_ratio=1.7,
         meta_prompt_version=optimizer_version,
     )
-    proposal, scores = optimizer.propose_best(
-        base_prompt,
-        _sample_stage1_traces(base_results),
-        n=3,
-        max_tokens=8000,
-        metric_block=json.dumps(metrics, ensure_ascii=False, indent=2),
-    )
-    if proposal is None:
-        raise RuntimeError(f"AgentDojo Stage1 optimizer produced no acceptable prompt: {scores}")
+    validation_runner = _AgentDojoValidationRunner(record_group, output_dir, agent_provider)
+    candidate_records: list[dict[str, Any]] = []
+    for index in range(candidates):
+        proposal = optimizer.propose_protocol_patches(
+            base_prompt,
+            _sample_stage1_traces(base_results),
+            max_tokens=max_tokens,
+            metric_block=json.dumps(metrics, ensure_ascii=False, indent=2),
+            comparison="Stage1: use only Base rollout observations and aggregate utility/security metrics.",
+        )
+        if proposal is None:
+            continue
+        candidate_path = validation_runner.run(proposal.compiled_prompt, dev_ids, f"stage1_candidate_{index}")
+        candidate_metrics = AgentDojoMetricProvider(results_path_fn=lambda exp: exp).aggregate(candidate_path, dev_ids)
+        candidate_records.append({
+            "index": index, "experiment": candidate_path, "proposal": proposal.to_dict(),
+            "metrics": candidate_metrics, "score": _agentdojo_score(candidate_metrics),
+            "security_gate": _agentdojo_security_gate(candidate_metrics, base_dev),
+        })
+    eligible = [item for item in candidate_records if item["security_gate"]]
+    if not eligible:
+        raise RuntimeError("AgentDojo Stage1 未得到通过 typed protocol-patch 与安全验证的候选，停止而不静默退化。")
+    best = max(eligible, key=lambda item: item["score"])
+    accepted = _agentdojo_accept(best["metrics"], base_dev, 0.0)
+    selected_prompt = str(best["proposal"]["compiled_prompt"]) if accepted else base_prompt
+    rationale = str(best["proposal"].get("rationale") or "") if accepted else "All candidates failed fixed real-rollout dev acceptance; retained Base protocol."
     prompt_path = store.save(
         version,
-        proposal.revised_prompt,
+        selected_prompt,
         {
-            "proposal": proposal.to_dict(),
-            "scores": scores,
+            "proposal_format": "patch", "accepted": accepted, "selected_candidate": best["index"],
+            "selected_patches": best["proposal"].get("patches") if accepted else [],
+            "rationale": rationale, "base_dev": base_dev, "candidate_validation": candidate_records,
             "base_group": base_group,
             "base_prompt_version": base_prompt_version,
             "optimizer_version": optimizer_version,
         },
     )
-    record.mkdir(parents=True, exist_ok=True)
     _write_json(
-        record / "stage1_proposal.json",
+        proposal_path,
         {
             "version": version,
             "prompt_path": prompt_path,
-            "proposal": proposal.to_dict(),
-            "scores": scores,
+            "accepted": accepted, "base_metrics": metrics, "base_dev": base_dev,
+            "validation_task_ids": dev_ids, "selected_candidate": best["index"],
+            "candidates": candidate_records,
             "optimizer_version": optimizer_version,
             "base_prompt_version": base_prompt_version,
         },
@@ -1035,11 +1181,15 @@ def optimize_stage2(
     record_group: str,
     provider: str = "longcat",
     output_dir: str = DEFAULT_AGENTDOJO_EXPERIMENTS_DIR,
-    optimizer_version: str = "v1",
+    optimizer_version: str = "v2",
     base_prompt_version: str = "base",
+    validation_tasks: int = 12,
+    candidates: int = 3,
+    max_tokens: int = 12000,
+    agent_provider: str = "longcat",
 ) -> str:
     record = Path(experiment_dir(record_group, output_dir))
-    contrastive_path = record / "stage2_contrastive.json"
+    contrastive_path = record / "optimization" / "stage2_protocol_patch.json"
     if contrastive_path.is_file():
         try:
             saved = json.loads(contrastive_path.read_text(encoding="utf-8"))
@@ -1052,6 +1202,8 @@ def optimize_stage2(
     base_results = agentdojo_adapter_results_path(base_group, output_dir)
     stage1_results = agentdojo_adapter_results_path(stage1_group, output_dir)
     store = AgentDojoPromptStore()
+    dev_ids, jobs = _agentdojo_validation_selection(base_results, validation_tasks)
+    _write_json(record / "optimization" / "validation_jobs.json", {"task_ids": dev_ids, "jobs": jobs})
     updater = ContrastiveUpdater(
         store,
         AgentDojoTrajectorySource(results_path_fn=lambda exp: exp),
@@ -1060,6 +1212,10 @@ def optimize_stage2(
             llm=make_llm_client(provider),
             meta_prompt_version=optimizer_version,
         ),
+        runner=_AgentDojoValidationRunner(record_group, output_dir, agent_provider),
+        score_fn=_agentdojo_score,
+        candidate_filter=_agentdojo_security_gate,
+        acceptance_fn=_agentdojo_accept,
     )
     objective = (
         "Improve all important metrics according to their directions. Preserve any higher_better metric "
@@ -1078,9 +1234,10 @@ def optimize_stage2(
         base_results,
         stage1_results,
         stage2_version,
-        n_candidates=3,
-        max_tokens=8000,
-        diagnose_max_tokens=6000,
+        dev_task_ids=dev_ids,
+        n_candidates=candidates,
+        max_tokens=max_tokens,
+        diagnose_max_tokens=max_tokens,
         objective=objective,
     )
     prompt_path = store.save(
@@ -1094,7 +1251,6 @@ def optimize_stage2(
             "base_prompt_version": base_prompt_version,
         },
     )
-    record.mkdir(parents=True, exist_ok=True)
     _write_json(
         contrastive_path,
         {
@@ -1116,9 +1272,13 @@ def chain_after_base(
     stage2_version: str,
     provider: str = "longcat",
     output_dir: str = DEFAULT_AGENTDOJO_EXPERIMENTS_DIR,
-    optimizer_version: str = "v1",
-    agent_provider: str = "qwen",
+    optimizer_version: str = "v2",
+    agent_provider: str = "longcat",
     base_prompt_version: str = "base",
+    validation_tasks: int = 12,
+    stage1_candidates: int = 3,
+    stage2_candidates: int = 3,
+    optimizer_max_tokens: int = 12000,
 ) -> None:
     if provider == "longcat":
         os.environ["TERRABOX_LONGCAT_THINKING"] = "disabled"
@@ -1131,6 +1291,10 @@ def chain_after_base(
         output_dir,
         optimizer_version,
         base_prompt_version,
+        validation_tasks,
+        stage1_candidates,
+        optimizer_max_tokens,
+        agent_provider,
     )
     rollout_group(stage1_group, stage1_version, "stage1", output_dir=output_dir, agent_provider=agent_provider)
     optimize_stage2(
@@ -1143,6 +1307,10 @@ def chain_after_base(
         output_dir,
         optimizer_version,
         base_prompt_version,
+        validation_tasks,
+        stage2_candidates,
+        optimizer_max_tokens,
+        agent_provider,
     )
     rollout_group(stage2_group, stage2_version, "stage2", output_dir=output_dir, agent_provider=agent_provider)
     print(f"[{time.strftime('%F %T')}] AgentDojo Base -> Stage1 -> Stage2 chain complete", flush=True)
@@ -1171,8 +1339,12 @@ def main() -> None:
     chain.add_argument("--stage1-version", required=True)
     chain.add_argument("--stage2-version", required=True)
     chain.add_argument("--provider", default="longcat", choices=["longcat", "deepseek"])
-    chain.add_argument("--optimizer-version", default="v1", choices=["v1", "v2"])
-    chain.add_argument("--agent-provider", default="qwen", choices=["qwen", "longcat"])
+    chain.add_argument("--optimizer-version", default="v2", choices=["v1", "v2"])
+    chain.add_argument("--agent-provider", default="longcat", choices=["qwen", "longcat"])
+    chain.add_argument("--validation-tasks", type=int, default=12)
+    chain.add_argument("--stage1-candidates", type=int, default=3)
+    chain.add_argument("--stage2-candidates", type=int, default=3)
+    chain.add_argument("--optimizer-max-tokens", type=int, default=12000)
     chain.add_argument(
         "--base-prompt-version",
         default="base",
@@ -1204,6 +1376,10 @@ def main() -> None:
             optimizer_version=args.optimizer_version,
             agent_provider=args.agent_provider,
             base_prompt_version=args.base_prompt_version,
+            validation_tasks=args.validation_tasks,
+            stage1_candidates=args.stage1_candidates,
+            stage2_candidates=args.stage2_candidates,
+            optimizer_max_tokens=args.optimizer_max_tokens,
         )
 
 

@@ -69,8 +69,9 @@ without modifying that checkout.
   `PYTHONPATH` automatically. Do not fall back to `/home/*/.local`.
 - Stage1 must sample both security and utility failures. Stage2 must compare the
   same Base/Stage1 task IDs and explicitly protect security while improving
-  utility. Existing `stage1_proposal.json` and `stage2_contrastive.json` are
-  paid-API checkpoints and must be reused on watcher restart.
+  utility. ProtocolPatch v2 uses a fixed real dev slice, three candidates per
+  stage, and resumable `optimization/stage1_protocol_patch.json` and
+  `optimization/stage2_protocol_patch.json` checkpoints.
 - To intentionally test LongCat2 as the executable AgentDojo agent, pass
   `--agent-provider longcat`. This uses upstream `OPENAI_COMPATIBLE` provider,
   the same suites/attacks/evaluators/result-count checks, and does not start
@@ -89,7 +90,9 @@ without modifying that checkout.
   these as evaluator failures. Even with `TERRABOX_AGENTDOJO_API_WORKERS=1`,
   one AgentDojo sample can issue many rapid model calls, so external API
   requests are cross-process paced by `TERRABOX_AGENTDOJO_API_MIN_INTERVAL_SECONDS`
-  (LongCat default 8.0s) using `TERRABOX_AGENTDOJO_API_RATE_LOCK`. Legacy
+  (LongCat default 10.0s) using the shared
+  `tmp/service_locks/remote_llm_longcat.lock` by default. This must be shared
+  with any concurrent LongCat rollout, including ExperienceEvo. Legacy
   `TERRABOX_AGENTDOJO_LONGCAT_MIN_INTERVAL_SECONDS` / `_RATE_LOCK` remain aliases,
   but new watcher scripts should use the generic API names. LongCat
   OpenAI-compatible calls must disable `thinking` explicitly and must not forward
@@ -98,9 +101,9 @@ without modifying that checkout.
   rollout parent process; already-running Python parents keep their old env.
   Keep `TERRABOX_AGENTDOJO_OPENAI_TIMEOUT_SECONDS` finite (default 300s) so one
   wedged HTTPS request cannot stall the whole watcher overnight.
-- PromptEvo meta-prompt v2 is additive and opt-in: use `chain-after-base
-  --optimizer-version v2` for new generic optimization experiments. The default
-  remains v1 so historical prompt versions and old chains are not overwritten.
+- New formal PromptEvo chains default to meta-prompt v2; select v1 explicitly
+  only to reproduce a historical chain. Stage1 v2 and Stage2 v2 are intentionally
+  different: Stage1 reads one
   Stage1 v2 and Stage2 v2 are intentionally different: Stage1 reads one
   version's traces to propose a conservative first edit; Stage2 reads the exact
   Base->Stage1 prompt diff plus paired task traces to keep gains and narrowly

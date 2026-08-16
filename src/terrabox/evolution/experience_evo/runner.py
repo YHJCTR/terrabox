@@ -256,6 +256,86 @@ def cmd_build_v2(args: argparse.Namespace) -> None:
     cmd_distill_v2(distill_args)
 
 
+def cmd_build_v4_clean(args: argparse.Namespace) -> None:
+    """Build the isolated strict rollout-only v4-clean store.
+
+    Unlike ``build-v2``, this command strips task ids/types before persistence
+    and derives both family identity and intent from rollout-visible content.
+    """
+    from .v2.store import ExperienceEvoV2Store
+    from .v4_clean.builder import build_clean_transition_families
+    from .v4_clean.extractor import extract_clean_transition_events
+
+    store = ExperienceEvoV2Store(args.store_dir)
+    existing_families = store.load_families()
+    existing_family_ids = {family.family_id for family in existing_families}
+    events = extract_clean_transition_events(
+        args.source,
+        source_name=args.source_name,
+        completed_only=not args.include_non_completed,
+        max_tasks=args.max_tasks,
+    )
+    store.write_events(events)
+    store.write_manifest(
+        {
+            "method": "experience_evo_v4_clean",
+            "phase": "extract-and-distill",
+            "schema_version": 4,
+            "strict_rollout_only": True,
+            "label_policy": (
+                "No task_id/task_type/expected_tools/gold answers/gold tool calls/"
+                "evaluation metrics are retained in the retrieval index or distillation prompt."
+            ),
+            "retrieval": "state hard filter + BM25/structured reciprocal-rank fusion + Quse/risk rerank",
+            "source": [str(item) for item in args.source],
+            "source_name": args.source_name,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "completed_only": not args.include_non_completed,
+            "num_events": len(events),
+        },
+        replace=not bool(existing_families),
+    )
+    if not events:
+        raise SystemExit("no v4-clean events extracted from source rollout")
+
+    llm = _make_llm(args.provider, args.template_only)
+    new_families: list = []
+
+    def _progress(index: int, total: int, family) -> None:
+        new_families.append(family)
+        if args.progress_every > 0 and (index == total or index % args.progress_every == 0):
+            store.write_families(existing_families + new_families)
+            print(f"[experience_evo_v4_clean] distilled {index}/{total} families", flush=True)
+
+    families = build_clean_transition_families(
+        events,
+        llm=llm,
+        min_support=args.min_support,
+        max_families=args.max_families,
+        max_examples=args.max_examples,
+        allow_template_fallback=args.allow_template_fallback,
+        alpha0=args.alpha0,
+        risk_alpha0=args.risk_alpha0,
+        skip_family_ids=existing_family_ids,
+        progress=_progress,
+    )
+    families = existing_families + families
+    store.write_families(families)
+    store.write_manifest(
+        {
+            "provider": "template" if args.template_only else args.provider,
+            "distilled_at": datetime.now().isoformat(timespec="seconds"),
+            "min_support": args.min_support,
+            "max_families": args.max_families,
+            "num_families": len(families),
+            "resumed_from_families": len(existing_families),
+            "alpha0": args.alpha0,
+            "risk_alpha0": args.risk_alpha0,
+        }
+    )
+    print(json.dumps(store.stats(), ensure_ascii=False, indent=2))
+
+
 def cmd_preview_v2(args: argparse.Namespace) -> None:
     from .v2.runtime import ExperienceEvoV2Runtime
 
@@ -504,6 +584,14 @@ def build_parser() -> argparse.ArgumentParser:
     add_source_flags_v2(p_build_v2)
     add_distill_flags_v2(p_build_v2)
     p_build_v2.set_defaults(func=cmd_build_v2)
+
+    p_build_v4_clean = sub.add_parser(
+        "build-v4-clean",
+        help="Build strict rollout-only v4-clean families without benchmark labels",
+    )
+    add_source_flags_v2(p_build_v4_clean)
+    add_distill_flags_v2(p_build_v4_clean)
+    p_build_v4_clean.set_defaults(func=cmd_build_v4_clean)
 
     p_preview_v2 = sub.add_parser("preview-v2", help="Preview the v2 injected product-transition block")
     p_preview_v2.add_argument("--store-dir", default=DEFAULT_STORE_V2)

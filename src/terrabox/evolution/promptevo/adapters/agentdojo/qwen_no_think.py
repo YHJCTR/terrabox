@@ -37,7 +37,7 @@ def _default_api_min_interval() -> float:
     if REQUEST_PROFILE in {"", "qwen", "local", "vllm", "vllm_parsed"}:
         return 0.0
     if REQUEST_PROFILE == "longcat":
-        return 8.0
+        return 10.0
     return 1.0
 
 
@@ -60,7 +60,16 @@ API_RATE_LOCK = Path(
                 "TERRABOX_AGENTDOJO_LONGCAT_RATE_LOCK",
                 os.getenv(
                     "TERRABOX_REMOTE_LLM_RATE_LOCK",
-                    str(Path.cwd() / "tmp" / "service_locks" / f"agentdojo_{REQUEST_PROFILE}_api_rate.lock"),
+                    str(
+                        Path.cwd()
+                        / "tmp"
+                        / "service_locks"
+                        / (
+                            "remote_llm_longcat.lock"
+                            if REQUEST_PROFILE == "longcat"
+                            else f"agentdojo_{REQUEST_PROFILE}_api_rate.lock"
+                        )
+                    ),
                 ),
             ),
         ),

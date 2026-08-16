@@ -1,6 +1,9 @@
+import json
 import urllib.error
 
 from terrabox.agent.llm_provider import (
+    ProviderSpec,
+    RemoteChatClient,
     is_retryable_remote_error,
     is_retryable_remote_error_text,
 )
@@ -34,3 +37,34 @@ def test_remote_transient_errors_remain_retryable():
         fp=None,
     )
     assert is_retryable_remote_error(exc)
+
+
+def test_longcat_per_request_thinking_override(monkeypatch):
+    """Adapters may select thinking mode without changing process-wide env."""
+    payloads = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"choices": [{"message": {"content": "ok"}}]}'
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        payloads.append(json.loads(request.data.decode("utf-8")))
+        return Response()
+
+    monkeypatch.setattr("terrabox.agent.llm_provider.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("terrabox.agent.llm_provider._pace_remote_llm_request", lambda _provider: None)
+    client = RemoteChatClient(
+        ProviderSpec("longcat", is_local=False, base_url="https://example.test", api_key="test", model="LongCat-2.0")
+    )
+
+    assert client.call("hello", enable_thinking=False) == "ok"
+    assert client.call("hello", enable_thinking=True) == "ok"
+    assert payloads[0]["thinking"] == {"type": "disabled"}
+    assert payloads[1]["thinking"] == {"type": "enabled"}

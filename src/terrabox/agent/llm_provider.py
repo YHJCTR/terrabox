@@ -393,7 +393,19 @@ class RemoteChatClient:
         self.cost = cost if cost is not None else CostTracker(model=spec.model)
         self.temperature = temperature
 
-    def call(self, prompt: str, system: Optional[str] = None, max_tokens: int = 512) -> str:
+    def call(
+        self,
+        prompt: str,
+        system: Optional[str] = None,
+        max_tokens: int = 512,
+        enable_thinking: Optional[bool] = None,
+    ) -> str:
+        """Call the provider with an optional per-request thinking override.
+
+        PromptEvo adapters expose ``enable_thinking`` uniformly for local and
+        remote clients.  Keeping the override here prevents an adapter from
+        depending on a provider-specific client signature.
+        """
         messages = ([{"role": "system", "content": system}] if system else []) + \
                    [{"role": "user", "content": prompt}]
         payload = {
@@ -405,7 +417,8 @@ class RemoteChatClient:
         # default for providers that support the OpenAI-compatible `thinking` knob.
         if self.spec.name == "deepseek" and self.spec.model.startswith("deepseek-v4-"):
             payload["thinking"] = {"type": "disabled"}
-        if self.spec.name == "longcat" and not longcat_thinking_enabled():
+        longcat_thinking = longcat_thinking_enabled() if enable_thinking is None else enable_thinking
+        if self.spec.name == "longcat" and not longcat_thinking:
             payload["thinking"] = {"type": "disabled"}
         elif self.spec.name == "longcat":
             payload["thinking"] = {"type": "enabled"}

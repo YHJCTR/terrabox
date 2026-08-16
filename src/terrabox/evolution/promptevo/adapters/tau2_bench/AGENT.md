@@ -103,8 +103,11 @@ change scheduling pressure only, not the benchmark prompt or task semantics.
 Even with one worker, a single tau2 simulation can issue rapid agent/user/eval
 LLM calls. External-provider runs therefore pace LiteLLM calls in the bootstrap
 with `TERRABOX_TAU2_API_MIN_INTERVAL_SECONDS` and
-`TERRABOX_TAU2_API_RATE_LOCK` (LongCat default 8s). Set the interval to `0` or
-increase workers only for a deliberate high-concurrency rerun, and restart the
+`TERRABOX_TAU2_API_RATE_LOCK` (LongCat default 10s and shared
+`tmp/service_locks/remote_llm_longcat.lock`). This keeps Tau2 serialized with
+other Terrabox LongCat workloads such as OEA/ExperienceEvo even when a watcher
+does not propagate its shell environment. Set the interval to `0` or increase
+workers only for a deliberate high-concurrency rerun, and restart the
 watcher/rollout parent after changing these env vars.
 Keep `TERRABOX_TAU2_OPENAI_TIMEOUT_SECONDS` finite (default 300s) so LiteLLM
 HTTP calls fail and requeue instead of hanging a chunk forever.

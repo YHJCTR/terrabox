@@ -65,6 +65,38 @@ accuracy, argument key precision/recall/F1, argument value accuracy, error
 buckets, history/argument-count bucket accuracy, latency, and runtime-error
 rate.
 
+## 断点续跑
+
+`APIBankRolloutRunner` 每完成一条样本就立即追加写入 `predictions.jsonl` 与
+`rollout.jsonl`。传入 `resume=True` 时，只有两个文件中都存在同一 `(file, id)`
+记录的样本才会被跳过；进程在两次写入之间中断时，该样本会在下次运行时重做。这样不会把
+未完成的 provider 调用误判为已完成。
+
+## 三阶段 ProtocolPatch 实验
+
+正式三阶段入口为 `pipeline.py`。它只优化 API-call 的静态指令，动态 API 描述与对话历史
+不会写入提示词。Stage1 从 Base 的真实轨迹生成 3 个类型化协议补丁候选，Stage2 从 Base/Stage1
+同任务配对轨迹生成候选；两个阶段都使用固定 24 条真实 API-call rollout 验证后才接受候选。若
+所有候选在验证集退步，阶段会明确记录为保留上一版本，而不会静默挑一个静态上看似更好的提示词。
+
+```bash
+PYTHONPATH=src python -m terrabox.evolution.promptevo.adapters.api_bank.pipeline run-three-stage \
+  --group promptevo_apibank_protocol_patch_longcat_20260814 --provider longcat \
+  --stage1-candidates 3 --stage2-candidates 3 --validation-tasks 24 --min-interval 10
+```
+
+查看阶段与全量指标：
+
+```bash
+PYTHONPATH=src python -m terrabox.evolution.promptevo.adapters.api_bank.pipeline status \
+  --group promptevo_apibank_protocol_patch_longcat_20260814
+```
+
+结果保存于 `experiments/<group>/{base,stage1,stage2}/`，其中每阶段都有
+`predictions.jsonl`、`rollout.jsonl`、`metrics.json`；优化提案、固定验证集和接受决策保存于
+`experiments/<group>/optimization/`。外部 API 的可重试网络/限流错误在 `resume=True` 时会重新排队，
+确定性格式或参数错误仍保留为真实结果。
+
 Official-style execution diagnostics:
 
 ```bash

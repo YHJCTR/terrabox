@@ -174,6 +174,36 @@ class VLLMDockerManager(BaseServiceManager):
         )
         if result.returncode != 0:
             return None
+
+    @classmethod
+    def _recover_created_container(cls, *, timeout_seconds: int) -> bool:
+        """Start a container that Docker created after its client timed out."""
+        try:
+            inspected = subprocess.run(
+                ["docker", "inspect", cls.CONTAINER_NAME],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if inspected.returncode != 0:
+                return False
+            started = subprocess.run(
+                ["docker", "start", cls.CONTAINER_NAME],
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+            if started.returncode != 0:
+                return False
+        except subprocess.TimeoutExpired:
+            return False
+        record_service_event({
+            "event": "start_recovered_after_client_timeout",
+            "service": "vlm",
+            "container": cls.CONTAINER_NAME,
+        })
+        logger.warning("Recovered VLM container %s after Docker client timeout.", cls.CONTAINER_NAME)
+        return True
         try:
             import json
             cmd = json.loads(result.stdout)
@@ -238,7 +268,54 @@ class VLLMDockerManager(BaseServiceManager):
 
         logger.info(f"Starting vLLM container (GPU: {lease.gpu_devices}, port: {lease.port}, model: {cls.MODEL_PATH})...")
         record_service_event({"event": "start_requested", "service": "vlm", "lease": lease.__dict__})
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            docker_start_timeout_seconds = max(
+                5, int(os.environ.get("TERRABOX_DOCKER_START_TIMEOUT_SECONDS", "90"))
+            )
+        except ValueError:
+            docker_start_timeout_seconds = 90
+        # `docker run -d` has intermittently created the VLM container but
+        # never returned its client process on this host. `create` + `start`
+        # is the same Docker lifecycle with separately bounded operations.
+        create_cmd = ["docker", "create", *cmd[3:]]
+        stage = "create"
+        try:
+            result = subprocess.run(
+                create_cmd,
+                capture_output=True,
+                text=True,
+                timeout=docker_start_timeout_seconds,
+            )
+            if result.returncode == 0:
+                stage = "start"
+                result = subprocess.run(
+                    ["docker", "start", cls.CONTAINER_NAME],
+                    capture_output=True,
+                    text=True,
+                    timeout=docker_start_timeout_seconds,
+                )
+        except subprocess.TimeoutExpired as exc:
+            # Model loading happens after Docker starts the container. Do not
+            # let a wedged Docker client hold an experiment forever.
+            if cls._recover_created_container(timeout_seconds=docker_start_timeout_seconds):
+                return
+            subprocess.run(
+                ["docker", "rm", "-f", cls.CONTAINER_NAME],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            record_service_event({
+                "event": "start_timeout",
+                "service": "vlm",
+                "stage": stage,
+                "timeout_seconds": docker_start_timeout_seconds,
+                "lease": lease.__dict__,
+            })
+            raise TimeoutError(
+                f"docker {stage} for {cls.CONTAINER_NAME} did not return within "
+                f"{docker_start_timeout_seconds}s"
+            ) from exc
         if result.returncode != 0:
             subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
             record_service_event({"event": "start_failed", "service": "vlm", "stderr": result.stderr, "lease": lease.__dict__})
@@ -253,6 +330,28 @@ class VLLMDockerManager(BaseServiceManager):
             capture_output=True, text=True
         )
         return (result.stdout + result.stderr).strip()
+
+    @classmethod
+    def _stop_container_bounded(cls) -> None:
+        """Best-effort cleanup that cannot leave an eval blocked on Docker."""
+        for command in (
+            ["docker", "stop", cls.CONTAINER_NAME],
+            ["docker", "rm", "-f", cls.CONTAINER_NAME],
+        ):
+            try:
+                subprocess.run(command, capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "Timed out running %s for VLM container %s.",
+                    " ".join(command[1:]),
+                    cls.CONTAINER_NAME,
+                )
+                record_service_event({
+                    "event": "cleanup_timeout",
+                    "service": "vlm",
+                    "container": cls.CONTAINER_NAME,
+                    "command": command[1:],
+                })
 
     @classmethod
     def start_service(cls):
@@ -308,8 +407,17 @@ class VLLMDockerManager(BaseServiceManager):
 
         cls._start_docker()
 
-        logger.info("Waiting for vLLM to load model (this may take 5-10 minutes)...")
-        max_retries = 120   # poll every 5s, up to 600s
+        logger.info("Waiting for vLLM to load model (this may take several minutes)...")
+        # Cold-loading a multimodal checkpoint is infrastructure setup, not an
+        # inference request.  Callers that prewarm the service can raise this
+        # budget without changing normal per-tool request timeouts.
+        try:
+            startup_timeout_seconds = max(
+                5, int(os.environ.get("TERRABOX_VLM_STARTUP_TIMEOUT_SECONDS", "900"))
+            )
+        except ValueError:
+            startup_timeout_seconds = 900
+        max_retries = max(1, (startup_timeout_seconds + 4) // 5)
         for i in range(max_retries):
             if cls.is_running():
                 logger.info("vLLM service is READY!")
@@ -336,8 +444,7 @@ class VLLMDockerManager(BaseServiceManager):
     @classmethod
     def stop_service(cls):
         logger.info(f"Stopping container {cls.CONTAINER_NAME}...")
-        subprocess.run(["docker", "stop", cls.CONTAINER_NAME], capture_output=True)
-        subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
+        cls._stop_container_bounded()
         record_service_event({"event": "stopped", "service": "vlm", "container": cls.CONTAINER_NAME})
 
 

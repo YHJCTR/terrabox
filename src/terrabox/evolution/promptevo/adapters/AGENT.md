@@ -29,6 +29,18 @@ complete static fragment that can be safely replaced. If the project cannot
 replace that fragment directly, document the boundaries and implement an
 experiment-local injection in the runner.
 
+## 类型化协议补丁（可选）
+
+- adapter 不得向 PromptEvo core 注入项目专属的 patch 类型、工具名、任务 ID、实体、路径或
+  固定 workflow。元提示词禁止这些内容，编译器会确定性拒绝任务 ID、路径和已知 benchmark
+  标识。可用类型仅为 `tool_selection`、`argument_validation`、`error_recovery`、
+  `termination_and_repetition`，其语义必须跨该 adapter 的未见任务通用。
+- patch 模式仍只改静态 prompt slot；不得把动态 schema、对话历史、工具 observation、gold
+  label 或 evaluator 输出编译进 prompt。
+- adapter 若提供 `RolloutRunner`，必须支持固定 `dev_task_ids` 的真实 rollout。仅当该 rollout
+  的指标通过接受门时，候选才能标记为 accepted；没有 runner 时只允许生成提案，不能声称验证
+  成功。
+
 ## Required adapter surface
 
 - `PromptStore`: `load("base")` returns the unmodified static instruction;
@@ -105,6 +117,17 @@ These two are enough for first-stage prompt proposal.
   for the prompt `.txt`, adapter experiment directory, and rollout experiment
   directory when possible. Do not rename historical `promptevo_v*` or other old
   outputs; this convention applies to new runs only.
+- API-Bank rollout uses task-level durable JSONL writes. On `--resume`, a task
+  is complete only when both `predictions.jsonl` and `rollout.jsonl` contain
+  the same `(file, id)` key; an interrupted half-pair is rerun. Do not replace
+  these files with a deferred end-of-stage bulk write.
+- For low-resource overnight chains, API-Bank's `pipeline.py` may run before
+  `gepa_aime`, because both use only an external provider and no Terrabox GPU
+  tool service. The watcher must start the next experiment only after the
+  preceding pipeline reports `status=complete` *and* every Base/Stage1/Stage2
+  API-Bank stage has full prediction coverage. A stopped or failed pipeline is
+  terminal for that chain: do not treat partial JSONL output as completion and
+  do not automatically start OEA, tau2-bench, AgentDojo, or ToolBench.
 
 ## Terrabox/OEA adapter
 

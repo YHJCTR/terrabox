@@ -94,16 +94,22 @@ testing LongCat2 as the executable agent and user simulator. It keeps the same
 four-domain, four-trial, `max_steps=100` profile, uses dynamic chunk scheduling,
 does not start local vLLM containers, and passes LongCat credentials only
 through the child environment. The provider config lookup must be cwd-independent: tau2 subprocesses run from `/data1/yuhongjie2/tau2-bench`, so `agent_config.yaml` must resolve via `AGENT_CONFIG_PATH`, `TERRABOX_LLM_API_*`, or the Terrabox repo-root fallback, never only via the current working directory.
-For new LongCat agent experiments, use the generic PromptEvo v2 meta prompts by
-passing `--optimizer-version v2`. When another LongCat API-heavy run is active,
+New LongCat formal chains default to generic PromptEvo v2. Each stage proposes
+three typed protocol-patch candidates and validates them on the same fixed real
+12-task dev slice before full rollout; `stage1_protocol_patch.json` and
+`stage2_protocol_patch.json` are resumable checkpoints. Use
+`--optimizer-version v1` only for a historical reproduction. When another LongCat API-heavy run is active,
 start tau2 conservatively with `TERRABOX_TAU2_API_WORKERS=1-2`,
 `TERRABOX_TAU2_CHUNK_SIZE=1-2`, and `TERRABOX_TAU2_RUN_CONCURRENCY=1`; these
 change scheduling pressure only, not the benchmark prompt or task semantics.
 Even with one worker, a single tau2 simulation can issue rapid agent/user/eval
 LLM calls. External-provider runs therefore pace LiteLLM calls in the bootstrap
 with `TERRABOX_TAU2_API_MIN_INTERVAL_SECONDS` and
-`TERRABOX_TAU2_API_RATE_LOCK` (LongCat default 8s). Set the interval to `0` or
-increase workers only for a deliberate high-concurrency rerun, and restart the
+`TERRABOX_TAU2_API_RATE_LOCK` (LongCat default 10s and shared
+`tmp/service_locks/remote_llm_longcat.lock`). This keeps Tau2 serialized with
+other Terrabox LongCat workloads such as OEA/ExperienceEvo even when a watcher
+does not propagate its shell environment. Set the interval to `0` or increase
+workers only for a deliberate high-concurrency rerun, and restart the
 watcher/rollout parent after changing these env vars.
 Keep `TERRABOX_TAU2_OPENAI_TIMEOUT_SECONDS` finite (default 300s) so LiteLLM
 HTTP calls fail and requeue instead of hanging a chunk forever.
@@ -124,8 +130,8 @@ back of the queue. Keep `TERRABOX_TAU2_QUEUE_RETRIES` finite (default 12) so rea
 code/data bugs still surface instead of burning API tokens overnight.
 
 Restarting the same chain must reuse completed artifacts: a valid
-`rejudged_<provider>/rejudge_summary.json`, `stage1_proposal.json`, or
-`stage2_contrastive.json` is a checkpoint. Do not repeat paid rejudging or prompt
+`rejudged_<provider>/rejudge_summary.json`, `stage1_protocol_patch.json`, or
+`stage2_protocol_patch.json` is a checkpoint. Do not repeat paid rejudging or prompt
 optimization merely because the orchestration process exited between stages.
 
 NL rejudge responses use a compact index-based JSON contract rather than

@@ -137,16 +137,25 @@ def _sanitize(text: object, limit: int = 320) -> str:
     return value
 
 
-def _keywords(row: dict[str, Any], tools: list[str], limit: int = 20) -> list[str]:
+def _keywords(
+    row: dict[str, Any],
+    tools: list[str],
+    limit: int = 20,
+    *,
+    ignore_task_type: bool = False,
+) -> list[str]:
     counter: Counter[str] = Counter()
     counter.update(tokenize(row.get("question") or ""))
-    counter.update(tokenize(_task_type(row)))
+    if not ignore_task_type:
+        counter.update(tokenize(_task_type(row)))
     counter.update(tokenize(" ".join(tools)))
     return [token for token, _ in counter.most_common(limit)]
 
 
-def _state(row: dict[str, Any]) -> str:
+def _state(row: dict[str, Any], *, ignore_task_type: bool = False) -> str:
     question = _sanitize(row.get("question"), 360)
+    if ignore_task_type:
+        return f"request={question}"
     return f"task_type={_task_type(row)}; request={question}"
 
 
@@ -173,6 +182,7 @@ def build_casebank(
     max_cases: int = 2000,
     embedding_backend: str = "none",
     embedding_batch_size: int = 24,
+    ignore_task_type: bool = False,
 ) -> CaseBank:
     rows = _load_rows(results_dir)
     cases: list[MemoryCase] = []
@@ -188,13 +198,13 @@ def build_casebank(
             MemoryCase(
                 id=f"case-{len(cases) + 1:05d}",
                 task_id=task_id,
-                task_type=_task_type(row),
-                state=_state(row),
+                task_type="unknown" if ignore_task_type else _task_type(row),
+                state=_state(row, ignore_task_type=ignore_task_type),
                 action=tools,
                 reward=reward,
                 outcome=_outcome(row, reward),
                 lesson=_lesson(row, tools, reward),
-                keywords=_keywords(row, tools),
+                keywords=_keywords(row, tools, ignore_task_type=ignore_task_type),
                 tools=tools,
                 final_answer_excerpt=_final_excerpt(row),
                 tool_error=bool(row.get("has_tool_error")),
@@ -213,11 +223,16 @@ def build_casebank(
         "official_source": "/data1/yuhongjie2/external_repos/Memento",
         "source_results": str(Path(results_dir).resolve()),
         "uses_gold": False,
+        "uses_dataset_task_type": not ignore_task_type,
+        "ignore_task_type": ignore_task_type,
         "n_rows": len(rows),
         "n_cases": len(cases),
         "embedding_backend": embedding_backend,
         "created_at": datetime.now().isoformat(timespec="seconds"),
-        "notes": "Stores rollout-derived (state, action, reward) cases; prompt injection uses compressed case summaries, not full trajectories.",
+        "notes": (
+            "Stores rollout-derived (state, action, reward) cases; prompt injection uses compressed case summaries, not full trajectories."
+            + (" Dataset task_type is omitted from case text, keywords, and runtime retrieval." if ignore_task_type else "")
+        ),
     }
     bank.save()
     if embedding_backend == "qwen":
@@ -236,6 +251,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True, help="Output evolution store directory")
     parser.add_argument("--max-cases", type=int, default=2000)
     parser.add_argument(
+        "--ignore-task-type",
+        action="store_true",
+        help="Omit benchmark task_type labels from case state, keywords, and manifest-visible retrieval text.",
+    )
+    parser.add_argument(
         "--embedding-backend",
         choices=["none", "qwen"],
         default="none",
@@ -253,6 +273,7 @@ def main() -> None:
         max_cases=args.max_cases,
         embedding_backend=args.embedding_backend,
         embedding_batch_size=args.embedding_batch_size,
+        ignore_task_type=args.ignore_task_type,
     )
     print(json.dumps(bank.manifest, ensure_ascii=False, indent=2))
 

@@ -16,7 +16,15 @@
 注:优化路径是**开放式自发现**——只把原始提示词 + 采样日志交给 LLM,问题由它自己看出来;
 不把预设的失败标签喂给优化器。`mine_weaknesses` 仅作确定性指标视角,供人核对与 validate 用。
 """
-from .schemas import Weakness, PromptEdit, PromptProposal, ValidationResult
+from .schemas import (
+    Weakness,
+    PromptEdit,
+    PromptProposal,
+    ProtocolPatch,
+    PatchProposal,
+    PatchValidationReport,
+    ValidationResult,
+)
 from .trace_sampler import sample_traces
 from .weakness_miner import mine_weaknesses
 from .optimizer import PromptOptimizer
@@ -27,6 +35,9 @@ __all__ = [
     "Weakness",
     "PromptEdit",
     "PromptProposal",
+    "ProtocolPatch",
+    "PatchProposal",
+    "PatchValidationReport",
     "ValidationResult",
     "sample_traces",
     "mine_weaknesses",

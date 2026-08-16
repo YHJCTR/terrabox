@@ -84,13 +84,32 @@ class DockerResourceManagerTests(unittest.TestCase):
         ):
             mod.InstructSAMDockerManager._start_docker()
 
-        run_cmd = next(cmd for cmd in recorder.commands if cmd[:3] == ["docker", "run", "-d"])
-        self.assertIn("terrabox.service=instructsam", run_cmd)
-        self.assertIn("9016:9006", run_cmd)
-        self.assertIn("DEVICE=cuda:0", run_cmd)
-        self.assertIn("PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True", run_cmd)
-        self.assertTrue(any(str(arg).startswith("VLLM_API_URL=") for arg in run_cmd))
+        create_cmd = next(cmd for cmd in recorder.commands if cmd[:2] == ["docker", "create"])
+        self.assertIn("terrabox.service=instructsam", create_cmd)
+        self.assertIn("9016:9006", create_cmd)
+        self.assertIn("DEVICE=cuda:0", create_cmd)
+        self.assertIn("PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True", create_cmd)
+        self.assertTrue(any(str(arg).startswith("VLLM_API_URL=") for arg in create_cmd))
+        self.assertIn(["docker", "start", lease.container_name], recorder.commands)
         self.assertEqual(mod.InstructSAMDockerManager.API_URL, "http://127.0.0.1:9016")
+
+    def test_instructsam_docker_manager_cleans_up_when_docker_start_hangs(self):
+        from terrabox.managers.docker import instructsam_manager as mod
+
+        lease = _lease("instructsam", 9016, 9006)
+        timed_out = subprocess.TimeoutExpired(["docker", "run"], timeout=90)
+        inspect_miss = subprocess.CompletedProcess(["docker", "inspect"], 1, stdout="", stderr="")
+        cleanup_result = subprocess.CompletedProcess(["docker", "rm"], 0, stdout="", stderr="")
+        with (
+            mock.patch.object(mod.InstructSAMDockerManager, "_container_is_running", classmethod(lambda cls: False)),
+            mock.patch.object(mod, "acquire_docker_lease", return_value=lease),
+            mock.patch.object(mod, "remove_container_if_exists", return_value=False),
+            mock.patch.object(mod.subprocess, "run", side_effect=[timed_out, inspect_miss, cleanup_result]) as run,
+        ):
+            with self.assertRaisesRegex(TimeoutError, "did not return within"):
+                mod.InstructSAMDockerManager._start_docker()
+
+        self.assertEqual(run.call_args_list[2].args[0], ["docker", "rm", "-f", lease.container_name])
 
     def test_tool_manager_env_port_overrides_yaml_defaults(self):
         from terrabox.managers.docker import changeos_manager as changeos_mod
@@ -185,13 +204,32 @@ class DockerResourceManagerTests(unittest.TestCase):
         ):
             mod.VLLMDockerManager._start_docker()
 
-        run_cmd = next(cmd for cmd in recorder.commands if cmd[:3] == ["docker", "run", "-d"])
-        self.assertIn("terrabox.service=vlm", run_cmd)
-        self.assertIn("--gpus", run_cmd)
-        self.assertIn("device=3", run_cmd)
-        self.assertIn("CUDA_VISIBLE_DEVICES=0", run_cmd)
-        self.assertIn("9010:8000", run_cmd)
+        create_cmd = next(cmd for cmd in recorder.commands if cmd[:2] == ["docker", "create"])
+        self.assertIn("terrabox.service=vlm", create_cmd)
+        self.assertIn("--gpus", create_cmd)
+        self.assertIn("device=3", create_cmd)
+        self.assertIn("CUDA_VISIBLE_DEVICES=0", create_cmd)
+        self.assertIn("9010:8000", create_cmd)
+        self.assertIn(["docker", "start", lease.container_name], recorder.commands)
         self.assertEqual(mod.VLLMDockerManager.API_BASE, "http://127.0.0.1:9010/v1")
+
+    def test_vllm_docker_manager_cleans_up_when_docker_start_hangs(self):
+        from terrabox.managers.docker import vllm_manager as mod
+
+        lease = _lease("vlm", 9011, 8000)
+        timed_out = subprocess.TimeoutExpired(["docker", "run"], timeout=90)
+        inspect_miss = subprocess.CompletedProcess(["docker", "inspect"], 1, stdout="", stderr="")
+        cleanup_result = subprocess.CompletedProcess(["docker", "rm"], 0, stdout="", stderr="")
+        with (
+            mock.patch.object(mod.VLLMDockerManager, "_container_is_running", classmethod(lambda cls: False)),
+            mock.patch.object(mod, "acquire_docker_lease", return_value=lease),
+            mock.patch.object(mod, "remove_container_if_exists", return_value=False),
+            mock.patch.object(mod.subprocess, "run", side_effect=[timed_out, inspect_miss, cleanup_result]) as run,
+        ):
+            with self.assertRaisesRegex(TimeoutError, "did not return within"):
+                mod.VLLMDockerManager._start_docker()
+
+        self.assertEqual(run.call_args_list[2].args[0], ["docker", "rm", "-f", lease.container_name])
 
     def test_vllm_docker_manager_adopts_reusable_container(self):
         from terrabox.managers.docker import vllm_manager as mod

@@ -31,6 +31,7 @@ import logging
 from ..base_manager import BaseServiceManager
 from ..resource_allocator import (
     acquire_docker_lease,
+    find_reusable_managed_lease,
     labels_for_lease,
     record_service_event,
     remove_container_if_exists,
@@ -61,9 +62,13 @@ class InstructSAMDockerManager(BaseServiceManager):
 
     @classmethod
     def is_running(cls):
+        return cls._is_healthy_on_port(int(cls.API_URL.rsplit(":", 1)[-1]))
+
+    @classmethod
+    def _is_healthy_on_port(cls, port: int):
         try:
             return requests.get(
-                f"{cls.API_URL}/health",
+                f"http://127.0.0.1:{int(port)}/health",
                 timeout=1,
                 proxies={"http": None, "https": None},
             ).status_code == 200
@@ -88,6 +93,61 @@ class InstructSAMDockerManager(BaseServiceManager):
             cls.MODELS_HOST = os.environ["INSTRUCTSAM_MODELS_HOST"]
         if os.environ.get("DATA_MOUNT_HOST"):
             cls.DATA_MOUNT_HOST = os.environ["DATA_MOUNT_HOST"]
+
+    @classmethod
+    def _docker_timeout_seconds(cls) -> int:
+        try:
+            return max(5, int(os.environ.get("TERRABOX_DOCKER_START_TIMEOUT_SECONDS", "90")))
+        except ValueError:
+            return 90
+
+    @classmethod
+    def _remove_container_bounded(cls, *, reason: str) -> None:
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", cls.CONTAINER_NAME],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("Timed out removing InstructSAM container %s (%s).", cls.CONTAINER_NAME, reason)
+            record_service_event({
+                "event": "cleanup_timeout",
+                "service": "instructsam",
+                "container": cls.CONTAINER_NAME,
+                "reason": reason,
+            })
+
+    @classmethod
+    def _recover_created_container(cls, *, timeout_seconds: int) -> bool:
+        """Start a container that Docker created after its client timed out."""
+        try:
+            inspected = subprocess.run(
+                ["docker", "inspect", cls.CONTAINER_NAME],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if inspected.returncode != 0:
+                return False
+            started = subprocess.run(
+                ["docker", "start", cls.CONTAINER_NAME],
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+            if started.returncode != 0:
+                return False
+        except subprocess.TimeoutExpired:
+            return False
+        record_service_event({
+            "event": "start_recovered_after_client_timeout",
+            "service": "instructsam",
+            "container": cls.CONTAINER_NAME,
+        })
+        logger.warning("Recovered InstructSAM container %s after Docker client timeout.", cls.CONTAINER_NAME)
+        return True
 
     @classmethod
     def _start_docker(cls):
@@ -144,9 +204,47 @@ class InstructSAMDockerManager(BaseServiceManager):
 
         logger.info(f"Starting InstructSAM container (GPU: {lease.gpu_devices}, port: {lease.port})...")
         record_service_event({"event": "start_requested", "service": "instructsam", "lease": lease.__dict__})
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        timeout_seconds = cls._docker_timeout_seconds()
+        # On this host `docker run -d` can create the container yet leave the
+        # client blocked indefinitely. Split the equivalent lifecycle so the
+        # creation and start boundaries are independently bounded.
+        create_cmd = ["docker", "create", *cmd[3:]]
+        stage = "create"
+        try:
+            result = subprocess.run(
+                create_cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+            if result.returncode == 0:
+                stage = "start"
+                result = subprocess.run(
+                    ["docker", "start", cls.CONTAINER_NAME],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                )
+        except subprocess.TimeoutExpired as exc:
+            # Container creation/start should complete before model loading.
+            # A blocked Docker client is infrastructure failure, not a reason
+            # to consume the tool-call timeout for the whole task.
+            if cls._recover_created_container(timeout_seconds=timeout_seconds):
+                return
+            cls._remove_container_bounded(reason="start_timeout")
+            record_service_event({
+                "event": "start_timeout",
+                "service": "instructsam",
+                "container": cls.CONTAINER_NAME,
+                "stage": stage,
+                "timeout_seconds": timeout_seconds,
+                "lease": lease.__dict__,
+            })
+            raise TimeoutError(
+                f"docker {stage} for {cls.CONTAINER_NAME} did not return within {timeout_seconds}s"
+            ) from exc
         if result.returncode != 0:
-            subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
+            cls._remove_container_bounded(reason="start_failed")
             record_service_event({"event": "start_failed", "service": "instructsam", "stderr": result.stderr, "lease": lease.__dict__})
             raise RuntimeError(
                 f"Failed to start InstructSAM container.\nstderr: {result.stderr}"
@@ -166,6 +264,21 @@ class InstructSAMDockerManager(BaseServiceManager):
         cls._apply_env_overrides()
 
         if cls.is_running():
+            return
+
+        adopted = find_reusable_managed_lease(
+            service="instructsam",
+            image=cls.DOCKER_IMAGE,
+            container_base=cls.CONTAINER_BASE,
+            host="127.0.0.1",
+            internal_port=9006,
+            health_check=cls._is_healthy_on_port,
+        )
+        if adopted is not None:
+            cls._lease = adopted
+            cls.CONTAINER_NAME = adopted.container_name
+            cls.API_URL = adopted.api_url
+            logger.info("Adopted healthy InstructSAM container %s.", adopted.container_name)
             return
 
         cls._start_docker()
@@ -191,8 +304,16 @@ class InstructSAMDockerManager(BaseServiceManager):
     @classmethod
     def stop_service(cls):
         logger.info(f"Stopping container {cls.CONTAINER_NAME}...")
-        subprocess.run(["docker", "stop", cls.CONTAINER_NAME], capture_output=True)
-        subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
+        try:
+            subprocess.run(
+                ["docker", "stop", cls.CONTAINER_NAME],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("Timed out stopping InstructSAM container %s; forcing removal.", cls.CONTAINER_NAME)
+        cls._remove_container_bounded(reason="stop_service")
         record_service_event({"event": "stopped", "service": "instructsam", "container": cls.CONTAINER_NAME})
 
 

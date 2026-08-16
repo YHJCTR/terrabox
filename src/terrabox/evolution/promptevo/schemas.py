@@ -50,6 +50,49 @@ class PromptProposal:
 
 
 @dataclass
+class ProtocolPatch:
+    """一条可编译的、领域无关的静态行为协议补丁。"""
+    patch_id: str
+    kind: str                         # tool_selection / argument_validation / error_recovery / termination_and_repetition
+    trigger: str                      # 何时适用
+    rule: str                         # 写给 agent 的通用规则
+    scope: str = "global"
+    priority: int = 50
+    evidence: list[str] = field(default_factory=list)
+    risk: str = "low"                # low / medium / high
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class PatchProposal:
+    """结构化补丁提案及其编译后的静态 prompt。"""
+    base_prompt: str
+    patches: list[ProtocolPatch]
+    rationale: str
+    diagnosis: list[dict[str, Any]] = field(default_factory=list)
+    compiled_prompt: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class PatchValidationReport:
+    """协议补丁编译前后的确定性检查结果。"""
+    valid: bool
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    preserved_placeholders: bool = True
+    preserved_trailing_anchor: bool = True
+    duplicate_rules: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class ValidationResult:
     """回归验证结果。"""
     accepted: bool
@@ -101,6 +144,7 @@ class UpdateResult:
     dev_before: dict[str, float] = field(default_factory=dict)
     dev_after: dict[str, float] = field(default_factory=dict)
     reason: str = ""
+    protocol_patches: list[ProtocolPatch] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)

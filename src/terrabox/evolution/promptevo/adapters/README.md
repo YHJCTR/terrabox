@@ -21,6 +21,16 @@ Guidelines:
 - Treat metrics as adapter-owned. The adapter should expose stable aggregate
   metrics and `metric_specs()` with directions so the two-stage optimizer can
   reason about real gains and regressions.
+- The optional `--proposal-format patch` may compile only the generic protocol
+  kinds `tool_selection`, `argument_validation`, `error_recovery`, and
+  `termination_and_repetition`. Do not inject project-specific tool names,
+  task IDs, paths, benchmark names, entities, gold labels, or fixed workflows
+  into a patch. The compiler deterministically rejects task IDs, paths, and
+  known benchmark markers; the proposal prompt prohibits the remaining cases.
+- A patch candidate is accepted only after the adapter's `RolloutRunner` runs
+  the predeclared fixed dev task IDs and passes the real metric gate. Static
+  candidate ranking, gold trajectories, or evaluator labels are not a
+  substitute for validation.
 - Experiment outputs produced by an adapter should live under that adapter's
   `experiments/` directory, with generated prompt versions saved under
   `evolution_store/promptevo/<project>/versions/`.

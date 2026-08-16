@@ -173,19 +173,17 @@ class CaseBank:
     ) -> list[tuple[float, MemoryCase]]:
         if not self.cases or top_k <= 0:
             return []
-        q_tokens = tokenize(" ".join([str(task_type or ""), query]))
-        avail = normalize_tools(available_tools)
+        # Memento's non-parametric retriever ranks the complete memory pool
+        # from the natural-language task. ``task_type`` is benchmark metadata
+        # in OEA, not an observation available to a normal agent, so it must
+        # not narrow or rank the runtime candidate set.
+        del task_type, available_tools
+        q_tokens = tokenize(query)
         candidate_cases = self.cases
-        if task_type:
-            exact = [case for case in self.cases if case.task_type == task_type]
-            if exact:
-                candidate_cases = exact
         scored: list[tuple[float, MemoryCase]] = []
         for case in candidate_cases:
             c_tokens = set(case.keywords) | tokenize(case.state) | tokenize(case.lesson) | tokenize(" ".join(case.action))
             overlap = len(q_tokens & c_tokens)
-            type_bonus = 4.0 if task_type and case.task_type == task_type else 0.0
-            tool_bonus = len(avail & set(case.tools)) * 0.25 if avail else 0.0
             reward_bonus = case.reward * 3.0
             negative_bonus = 1.0 if include_negative and case.reward < 0.4 and overlap else 0.0
             negative_penalty = 3.0 if case.reward < 0.5 else 0.0
@@ -195,8 +193,8 @@ class CaseBank:
                     semantic = float(similarity_fn(query, case))
                 except Exception:
                     semantic = 0.0
-            score = overlap * 2.0 + type_bonus + tool_bonus + reward_bonus + negative_bonus + semantic * 8.0 - negative_penalty
-            if overlap == 0 and type_bonus == 0 and score < 2.5:
+            score = overlap * 2.0 + reward_bonus + negative_bonus + semantic * 8.0 - negative_penalty
+            if overlap == 0 and score < 2.5:
                 continue
             scored.append((score, case))
         if not scored:

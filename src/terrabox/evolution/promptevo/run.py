@@ -51,9 +51,40 @@ def _cmd_propose(args):
         llm_client=make_llm_client(args.provider),
         max_growth_ratio=args.max_growth_ratio,
     )
-    proposal = optimizer.propose(base, trace_text, max_tokens=args.max_tokens)
+    if args.proposal_format == "patch":
+        proposal = optimizer.propose_protocol_patches(
+            base, trace_text, max_tokens=args.max_tokens
+        )
+        if proposal is None:
+            print("LLM 补丁提案失败(返回空、非法 JSON 或未通过协议校验)。")
+            return
+        print("=== 类型化协议补丁 ===")
+        for patch in proposal.patches:
+            print(
+                f"[{patch.kind}] {patch.patch_id} priority={patch.priority} "
+                f"risk={patch.risk}\n"
+                f"  trigger: {patch.trigger}\n"
+                f"  rule: {patch.rule}"
+            )
+        print("\n=== 诊断与理由 ===")
+        for diagnosis in proposal.diagnosis:
+            if isinstance(diagnosis, dict):
+                print(f"- {diagnosis.get('issue', '')}: {diagnosis.get('evidence', '')}")
+        print(proposal.rationale)
+        print("\n=== 编译后的静态提示词 ===")
+        print(proposal.compiled_prompt)
+    else:
+        proposal = optimizer.propose(base, trace_text, max_tokens=args.max_tokens)
     if proposal is None:
         print("LLM 改写失败(返回空或非法 JSON)。")
+        return
+
+    if args.proposal_format == "patch":
+        if args.out:
+            os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+            with open(args.out, "w", encoding="utf-8") as f:
+                json.dump(proposal.to_dict(), f, ensure_ascii=False, indent=2)
+            print(f"\n补丁提案已存: {args.out}")
         return
 
     print("=== LLM 自诊断的问题 ===")
@@ -108,6 +139,7 @@ def _cmd_contrastive(args):
         objective=args.objective or None,
         max_tokens=args.max_tokens,
         diagnose_max_tokens=args.diagnose_max_tokens,
+        proposal_format=args.proposal_format,
     )
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -132,6 +164,8 @@ def _cmd_contrastive(args):
             a.to_dict() if hasattr(a, "to_dict") else asdict(a)
             for a in (result.diagnosis or [])
         ],
+        "proposal_format": args.proposal_format,
+        "protocol_patches": [patch.to_dict() for patch in result.protocol_patches],
     }
     meta_path = os.path.abspath(os.path.join(args.out_dir, f"{args.new_version}.meta.json"))
     with open(meta_path, "w", encoding="utf-8") as f:
@@ -153,17 +187,28 @@ def _cmd_accept(args):
     if not args.force and not prop.get("restrained", True):
         print("改动偏大(体量膨胀超阈值),加 --force 才接受。"); return
 
+    proposal_format = "patch" if "compiled_prompt" in prop else "prompt"
+    # Patch proposals are accepted only as the compiler output. Do not let a
+    # future producer accidentally bypass the deterministic patch checks by
+    # also carrying a stale revised_prompt field.
+    prompt_text = prop.get("compiled_prompt") if proposal_format == "patch" else prop.get("revised_prompt")
+    if not isinstance(prompt_text, str) or not prompt_text.strip():
+        print("提案缺少 revised_prompt/compiled_prompt，无法保存为提示词版本。"); return
+
     # 写成【带名字的一份纯文本提示词】,多版本并存。
     # rollout 时把它喂给 TERRABOX_REACT_SYSTEM_PROMPT_FILE 即覆盖生效;不设则用原始。
     os.makedirs(args.versions_dir, exist_ok=True)
     version_path = os.path.join(args.versions_dir, f"{args.name}.txt")
     with open(version_path, "w", encoding="utf-8") as f:
-        f.write(prop["revised_prompt"].strip() + "\n")
+        f.write(prompt_text.strip() + "\n")
     # 旁存一份元数据(诊断/改动记录),供溯源
     with open(os.path.join(args.versions_dir, f"{args.name}.meta.json"), "w", encoding="utf-8") as f:
         json.dump({"rationale": prop.get("rationale", ""),
                    "diagnosis": prop.get("diagnosis", []),
-                   "edits": prop.get("edits", [])}, f, ensure_ascii=False, indent=2)
+                   "edits": prop.get("edits", []),
+                   "proposal_format": proposal_format,
+                   "protocol_patches": prop.get("patches", [])}, f,
+                  ensure_ascii=False, indent=2)
 
     abspath = os.path.abspath(version_path)
     print(f"已保存版本 '{args.name}': {abspath}")
@@ -200,6 +245,8 @@ def main():
                     help="优化提示词用的 LLM provider；默认 local，可用 deepseek/longcat")
     pp.add_argument("--base-prompt-file", default="",
                     help="待优化的 base 提示词 txt(默认用代码内置 BASE_SYSTEM;可指向任意版本如坏提示词)")
+    pp.add_argument("--proposal-format", choices=["prompt", "patch"], default="prompt",
+                    help="提案格式；默认 prompt 保持历史整段改写，patch 为类型化协议补丁")
     pp.add_argument("--out", default="")
     pp.set_defaults(func=_cmd_propose)
 
@@ -219,6 +266,8 @@ def main():
     pc.add_argument("--diagnose-max-tokens", type=int, default=2500,
                     help="Stage2 归因诊断 LLM 输出 token 上限；thinking provider 建议调高")
     pc.add_argument("--objective", default="", help="可选优化目标；默认用通用地理 agent 目标")
+    pc.add_argument("--proposal-format", choices=["prompt", "patch"], default="prompt",
+                    help="候选格式；默认 prompt 保持历史整段改写，patch 为类型化协议补丁")
     pc.add_argument("--out-dir", default="tmp/promptevo/stage2",
                     help="Stage2 候选提示词和 meta 输出目录")
     pc.set_defaults(func=_cmd_contrastive)
