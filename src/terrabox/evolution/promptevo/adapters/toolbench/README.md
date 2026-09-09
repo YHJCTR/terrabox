@@ -104,8 +104,9 @@ backbones still fails explicitly rather than silently falling back.
 Actual StableToolBench rollout prerequisites:
 
 1. Either start services manually, or use `pipeline.py` below. The formal
-   pipeline starts the StableToolBench cached tool server and per-GPU vLLM
-   lanes explicitly, records logs/metadata, and stops resources it started.
+   pipeline starts the StableToolBench cached tool server, records logs/metadata,
+   and stops resources it started. The local-Qwen profile also starts per-GPU
+   vLLM lanes; `--agent-provider longcat` does not use local agent GPUs.
 2. If using `StableToolBenchRolloutRunner` directly, start a vLLM
    OpenAI-compatible server whose served model name matches
    `StableToolBenchRunConfig.model_path`; for Qwen-style runs the official
@@ -140,12 +141,12 @@ python -m terrabox.evolution.promptevo.adapters.toolbench.pipeline preflight'
 ```bash
 conda run -n unsloth bash -lc 'cd /data1/yuhongjie2/terrabox && PYTHONPATH=src \
 python -m terrabox.evolution.promptevo.adapters.toolbench.pipeline full-chain \
-  --base-experiment promptevo_stabletoolbench_base_qwen3_YYYYMMDD_HHMMSS \
-  --stage1-experiment promptevo_stabletoolbench_stage1_qwen3_YYYYMMDD_HHMMSS \
-  --stage2-experiment promptevo_stabletoolbench_stage2_qwen3_YYYYMMDD_HHMMSS \
-  --stage1-version promptevo_stabletoolbench_stage1_qwen3_YYYYMMDD_HHMMSS \
-  --stage2-version promptevo_stabletoolbench_stage2_qwen3_YYYYMMDD_HHMMSS \
-  --provider longcat --optimizer-version v2'
+  --base-experiment promptevo_stabletoolbench_longcat_agent_YYYYMMDD_HHMMSS_base \
+  --stage1-experiment promptevo_stabletoolbench_longcat_agent_YYYYMMDD_HHMMSS_stage1 \
+  --stage2-experiment promptevo_stabletoolbench_longcat_agent_YYYYMMDD_HHMMSS_stage2 \
+  --stage1-version promptevo_stabletoolbench_longcat_agent_YYYYMMDD_HHMMSS_stage1 \
+  --stage2-version promptevo_stabletoolbench_longcat_agent_YYYYMMDD_HHMMSS_stage2 \
+  --provider longcat --optimizer-version v2 --agent-provider longcat --api-workers 4'
 ```
 
 The default profile:
@@ -158,6 +159,13 @@ The default profile:
   `Qwen2Model` wrapper can keep using its official completion prompt path;
 - mirrors StepTool's official `qwen2` script: `DFS_woFilter_w2`,
   `max_observation_length=1024`, `max_query_count=30`, `num_thread=4`.
+
+For the LongCat-agent profile, `--agent-provider longcat` instead selects the
+official `chatgpt_function` route and sends agent completions to LongCat. It
+does not start vLLM containers or occupy local GPUs. Requests use the shared
+`pace_remote_llm_request` limiter with workload `toolbench`; do not configure a
+separate ToolBench lock to bypass the global provider limit. Restart the parent
+pipeline after changing any LongCat pacing environment variable.
 
 Progress/status:
 
@@ -181,8 +189,15 @@ Outputs:
 Important metric note:
 
 - `metrics_summary.json` is an immediate structural metric over rollout JSONs
-  (`valid_data` / `Finish(give_answer)` and error buckets). It is useful for
-  PromptEvo sampling and quick diagnosis.
+  (the official `win` flag when present, parsed DFS/ChatGPT `Finish` actions,
+  and error buckets). `valid_data` alone is not a task win because it may also
+  be true for a `give_up` termination. It is useful for PromptEvo sampling and
+  quick diagnosis.
+- For DFS/DFSDT outputs without `train_messages`, metrics use the whole nested
+  action tree, while PromptEvo diagnosis uses one representative root-to-leaf
+  path so mutually exclusive sibling branches are not fabricated into one
+  conversation. Static candidate selection is not rollout
+  validation; an unvalidated Stage2 candidate is rejected before formal rollout.
 - Paper-style semantic pass-rate should still be produced with StableToolBench's
   official `toolbench/tooleval` conversion and pass-rate scripts when reporting
   final results.

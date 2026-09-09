@@ -29,6 +29,36 @@ def _json_arg(obj: dict[str, Any]) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
 
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw in (None, ""):
+        return default
+    try:
+        value = int(float(raw))
+    except ValueError:
+        return default
+    return max(0, value)
+
+
+def _tau2_chunk_hard_timeout_seconds(run_config: "Tau2RunConfig") -> int:
+    """Parent-side timeout for a tau2 child process.
+
+    tau2's own simulation timeout is checked inside its event loop. If the
+    child blocks in an upstream API call, that timeout may not fire. Keep a
+    coarse parent guard so one stuck chunk can be requeued instead of blocking
+    the whole overnight chain.
+    """
+    configured = _int_env("TERRABOX_TAU2_CHUNK_TIMEOUT_SECONDS", -1)
+    if configured >= 0:
+        return configured
+    per_sim_timeout = int(run_config.timeout or 900)
+    task_count = len(run_config.task_ids or []) or int(run_config.num_tasks or 1)
+    sim_count = max(1, task_count) * max(1, int(run_config.num_trials or 1))
+    # The parent guard is intentionally coarse: large enough for normal chunks,
+    # finite enough that a single wedged HTTP call cannot stall the stage.
+    return min(6 * 3600, max(45 * 60, per_sim_timeout * min(sim_count, 4) + 15 * 60))
+
+
 def tau2_has_core_dependencies(
     tau2_root: str = DEFAULT_TAU2_ROOT,
     python_executable: str = sys.executable,
@@ -145,11 +175,10 @@ class Tau2RolloutRunner:
         code = '''"""Experiment-local tau2 bootstrap used by promptevo."""
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import re
-import time
+import sys
 from pathlib import Path
 
 
@@ -165,69 +194,21 @@ def _strip_think(text):
     return cleaned
 
 
+terrabox_root = os.environ.get("TERRABOX_ROOT")
+if terrabox_root:
+    sys.path.insert(0, str(Path(terrabox_root) / "src"))
+from terrabox.agent.llm_provider import pace_remote_llm_request
+
 import tau2.utils.llm_utils as llm_utils
 
 
-def _float_env(names, default):
-    for name in names:
-        raw = os.environ.get(name)
-        if raw not in (None, ""):
-            try:
-                return max(0.0, float(raw))
-            except ValueError:
-                return default
-    return default
-
-
-REQUEST_PROFILE = os.environ.get("TERRABOX_TAU2_REQUEST_PROFILE") or os.environ.get("TERRABOX_LLM_PROVIDER") or ""
-REQUEST_PROFILE = REQUEST_PROFILE.strip().lower()
-API_MIN_INTERVAL_SECONDS = _float_env(
-    [
-        "TERRABOX_TAU2_API_MIN_INTERVAL_SECONDS",
-        f"TERRABOX_{REQUEST_PROFILE.upper()}_MIN_INTERVAL_SECONDS" if REQUEST_PROFILE else "",
-        "TERRABOX_REMOTE_LLM_MIN_INTERVAL_SECONDS",
-    ],
-    8.0 if REQUEST_PROFILE == "longcat" else (1.0 if REQUEST_PROFILE else 0.0),
-)
-API_RATE_LOCK = Path(
-    os.environ.get(
-        "TERRABOX_TAU2_API_RATE_LOCK",
-        os.environ.get(
-            "TERRABOX_REMOTE_LLM_RATE_LOCK",
-            str(Path(os.environ.get("TERRABOX_ROOT", "/data1/yuhongjie2/terrabox")) / "tmp" / "service_locks" / f"tau2_{REQUEST_PROFILE or 'remote'}_api_rate.lock"),
-        ),
-    )
-)
-
-
 def _pace_external_api_request():
-    """Cross-process pacing for tau2 external API calls.
-
-    tau2 uses LiteLLM inside its own subprocess, so it bypasses Terrabox's
-    RemoteChatClient. Keep an equivalent configurable gap here; set the
-    interval to 0 only for deliberate high-concurrency reruns.
-    """
-    if not REQUEST_PROFILE or REQUEST_PROFILE in {"local", "qwen", "vllm"} or API_MIN_INTERVAL_SECONDS <= 0:
+    """Use the shared Terrabox provider lock immediately before each API call."""
+    provider = (os.environ.get("TERRABOX_TAU2_REQUEST_PROFILE")
+                or os.environ.get("TERRABOX_LLM_PROVIDER") or "").strip().lower()
+    if not provider or provider in {"local", "qwen", "vllm"}:
         return
-    API_RATE_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    with API_RATE_LOCK.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        handle.seek(0)
-        raw = handle.read().strip()
-        try:
-            last = float(raw) if raw else 0.0
-        except ValueError:
-            last = 0.0
-        now = time.monotonic()
-        wait_s = API_MIN_INTERVAL_SECONDS - (now - last)
-        if wait_s > 0:
-            time.sleep(wait_s)
-            now = time.monotonic()
-        handle.seek(0)
-        handle.truncate()
-        handle.write(f"{now:.6f}")
-        handle.flush()
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    pace_remote_llm_request(provider, workload=os.environ.get("TERRABOX_REMOTE_LLM_WORKLOAD"))
 
 
 def _decode_tool_arguments(value):
@@ -384,6 +365,11 @@ main()
 
         full_env = os.environ.copy()
         full_env.update(env or {})
+        full_env.setdefault("TERRABOX_ROOT", str(Path(__file__).resolve().parents[6]))
+        full_env.setdefault("TERRABOX_REMOTE_LLM_WORKLOAD", "tau2")
+        tau2_interval = full_env.get("TERRABOX_TAU2_API_MIN_INTERVAL_SECONDS")
+        if tau2_interval:
+            full_env.setdefault("TERRABOX_REMOTE_LLM_MIN_INTERVAL_SECONDS", tau2_interval)
         full_env["PYTHONPATH"] = os.path.join(self.tau2_root, "src") + os.pathsep + full_env.get("PYTHONPATH", "")
         full_env["TAU2_DATA_DIR"] = runtime_data_dir
         full_env["TAU2_PROMPTEVO_PROMPT_FILE"] = prompt_file
@@ -408,6 +394,7 @@ main()
 
         bootstrap_path = self._write_bootstrap(adapter_dir)
         cmd = self.command(run_config, save_to, bootstrap_path=bootstrap_path)
+        hard_timeout_seconds = _tau2_chunk_hard_timeout_seconds(run_config)
         meta = {
             "experiment": experiment,
             "tau2_root": self.tau2_root,
@@ -420,23 +407,47 @@ main()
             "strip_think_from_history": True,
             "auto_resume": run_config.auto_resume,
             "bootstrap_path": bootstrap_path,
+            "parent_chunk_timeout_seconds": hard_timeout_seconds,
             "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         _write_json(os.path.join(adapter_dir, "run_meta.json"), meta)
 
-        proc = subprocess.run(
-            cmd,
-            cwd=self.tau2_root,
-            env=full_env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-
-        with open(os.path.join(adapter_dir, "stdout.log"), "w", encoding="utf-8") as f:
-            f.write(proc.stdout)
-        with open(os.path.join(adapter_dir, "stderr.log"), "w", encoding="utf-8") as f:
-            f.write(proc.stderr)
+        stdout_path = os.path.join(adapter_dir, "stdout.log")
+        stderr_path = os.path.join(adapter_dir, "stderr.log")
+        try:
+            with open(stdout_path, "w", encoding="utf-8") as stdout_file, open(
+                stderr_path, "w", encoding="utf-8"
+            ) as stderr_file:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=self.tau2_root,
+                    env=full_env,
+                    text=True,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    timeout=hard_timeout_seconds or None,
+                )
+        except subprocess.TimeoutExpired as exc:
+            message = (
+                f"tau2 parent_chunk_timeout after {hard_timeout_seconds}s; "
+                "retryable provider/API timeout or stuck upstream simulation"
+            )
+            with open(stderr_path, "a", encoding="utf-8") as stderr_file:
+                stderr_file.write("\n" + message + "\n")
+            status: dict[str, Any] = {
+                "status": "failed",
+                "returncode": 124,
+                "reason": "parent_chunk_timeout",
+                "timeout_seconds": hard_timeout_seconds,
+                "error": str(exc),
+            }
+            if os.path.exists(external_dir):
+                copied = copy_results_tree(external_dir, os.path.join(adapter_dir, "tau2_results"))
+                status["tau2_results"] = copied
+                metrics = Tau2MetricProvider(results_path_fn=lambda _exp: copied)
+                _write_json(os.path.join(adapter_dir, "metrics_summary.json"), metrics.aggregate(experiment))
+            _write_json(os.path.join(adapter_dir, "run_status.json"), status)
+            raise RuntimeError(message) from exc
 
         status = {"status": "complete" if proc.returncode == 0 else "failed", "returncode": proc.returncode}
         if os.path.exists(external_dir):

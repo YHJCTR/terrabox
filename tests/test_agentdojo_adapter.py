@@ -6,6 +6,8 @@ import sys
 import types
 from pathlib import Path
 
+from openai._types import NOT_GIVEN
+
 
 def _write_result(
     root: Path,
@@ -81,6 +83,21 @@ def test_agentdojo_metrics_distinguish_clean_and_attacked_none_strings(tmp_path)
     assert summary["attacked_security_rate"] == 0.0
     assert summary["attack_success_rate"] == 1.0
     assert summary["balanced_score"] == 2 / 3
+
+
+def test_agentdojo_group_root_does_not_scan_nested_validation_runs(tmp_path):
+    from terrabox.evolution.promptevo.adapters.agentdojo import AgentDojoMetricProvider
+
+    formal_runs = tmp_path / "runs"
+    _write_result(formal_runs, user_task="user_task_0", utility=True, security=True)
+    validation_runs = tmp_path / "validation" / "candidate_0" / "runs"
+    _write_result(validation_runs, user_task="user_task_0", utility=False, security=False)
+
+    provider = AgentDojoMetricProvider(results_path_fn=lambda _exp: str(tmp_path))
+    metrics = provider.per_task("group")
+
+    assert len(metrics) == 1
+    assert metrics["workspace/user_task_0/none/none"].success is True
 
 
 def test_agentdojo_trace_recovers_tool_name_from_tool_call_id(tmp_path):
@@ -193,6 +210,55 @@ def test_agentdojo_qwen_patch_sends_no_think_on_every_request(monkeypatch):
 
     assert openai_llm.chat_completion_request is module._qwen_no_think_request
     assert captured["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def test_agentdojo_longcat_patch_uses_shared_remote_pacer(monkeypatch, tmp_path):
+    from terrabox.evolution.promptevo.adapters.agentdojo import pipeline
+
+    agentdojo = types.ModuleType("agentdojo")
+    agent_pipeline = types.ModuleType("agentdojo.agent_pipeline")
+    llms = types.ModuleType("agentdojo.agent_pipeline.llms")
+    openai_llm = types.ModuleType("agentdojo.agent_pipeline.llms.openai_llm")
+    openai_llm.chat_completion_request = object()
+    llms.openai_llm = openai_llm
+    for name, module in {
+        "agentdojo": agentdojo,
+        "agentdojo.agent_pipeline": agent_pipeline,
+        "agentdojo.agent_pipeline.llms": llms,
+        "agentdojo.agent_pipeline.llms.openai_llm": openai_llm,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    monkeypatch.setenv("TERRABOX_REMOTE_LLM_WORKLOAD", "agentdojo")
+    patch_path = Path(pipeline.__file__).with_name("qwen_no_think.py")
+    spec = importlib.util.spec_from_file_location("agentdojo_longcat_patch_test", patch_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.REQUEST_PROFILE = "longcat"
+    module.API_MIN_INTERVAL_SECONDS = 0.25
+    module.API_RATE_LOCK = tmp_path / "remote_llm_longcat.lock"
+
+    calls = []
+
+    def fake_pacer(provider, *, workload=None, interval=None, lock_path=None):
+        calls.append((provider, workload, interval, lock_path))
+
+    monkeypatch.setattr(module, "pace_remote_llm_request", fake_pacer)
+
+    captured = {}
+
+    class Completions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+    client = types.SimpleNamespace(chat=types.SimpleNamespace(completions=Completions()))
+    module._qwen_no_think_request(client, "model", [], [], "low")
+
+    assert calls == [("longcat", "agentdojo", 0.25, tmp_path / "remote_llm_longcat.lock")]
+    assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert captured["reasoning_effort"] is NOT_GIVEN
 
 
 def test_agentdojo_runner_uses_absolute_terrabox_pythonpath(tmp_path, monkeypatch):
@@ -321,14 +387,16 @@ def test_agentdojo_pipeline_reuses_saved_stage_prompts(tmp_path, monkeypatch):
     stage2_record = output_dir / "stage2"
     stage1_record.mkdir(parents=True)
     stage2_record.mkdir(parents=True)
+    (stage1_record / "optimization").mkdir()
+    (stage2_record / "optimization").mkdir()
     stage1_prompt = tmp_path / "stage1.txt"
     stage2_prompt = tmp_path / "stage2.txt"
     stage1_prompt.write_text("stage1", encoding="utf-8")
     stage2_prompt.write_text("stage2", encoding="utf-8")
-    (stage1_record / "stage1_proposal.json").write_text(
+    (stage1_record / "optimization" / "stage1_protocol_patch.json").write_text(
         json.dumps({"version": "s1", "prompt_path": str(stage1_prompt)}), encoding="utf-8"
     )
-    (stage2_record / "stage2_contrastive.json").write_text(
+    (stage2_record / "optimization" / "stage2_protocol_patch.json").write_text(
         json.dumps({"version": "s2", "prompt_path": str(stage2_prompt)}), encoding="utf-8"
     )
 

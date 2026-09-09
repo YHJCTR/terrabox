@@ -74,6 +74,14 @@ uses paired rejudged Base/Stage1 task IDs for Stage2. Multi-domain task IDs must
 remain `domain::task_id::trialN`; basename-only keys collide because every
 domain output is named `results.json`.
 
+历史正式口径里的“三阶段”指 Base / Stage1 / Stage2。可选 Stage3 是
+post-Stage2 refinement，不替代 Stage2：它以 Stage2 prompt 为当前基线，比较
+Stage1 与 Stage2 的同任务轨迹，只提出小幅 protocol patch 来修复 Stage2 引入的回归，
+并继续使用同一固定真实 dev slice 验证；候选没有通过接受门时保留 Stage2。
+可通过 `pipeline.py stage3-after-stage2` 单独接在已完成的 Stage2 后，也可在
+`chain-after-base` / `full-chain` 中显式传入 `--stage3-group` 与
+`--stage3-version` 自动接上。Stage3 的可恢复检查点为 `stage3_protocol_patch.json`。
+
 Use `pipeline.py full-chain --profile paper3` for the paper-comparable rerun:
 airline/retail/telecom only, Qwen3 8B no-think agent, fixed LongCat2 no-think
 user simulator, four trials, `max_steps=100`, and `max_tokens=2048` on three
@@ -104,15 +112,19 @@ start tau2 conservatively with `TERRABOX_TAU2_API_WORKERS=1-2`,
 change scheduling pressure only, not the benchmark prompt or task semantics.
 Even with one worker, a single tau2 simulation can issue rapid agent/user/eval
 LLM calls. External-provider runs therefore pace LiteLLM calls in the bootstrap
-with `TERRABOX_TAU2_API_MIN_INTERVAL_SECONDS` and
-`TERRABOX_TAU2_API_RATE_LOCK` (LongCat default 10s and shared
-`tmp/service_locks/remote_llm_longcat.lock`). This keeps Tau2 serialized with
-other Terrabox LongCat workloads such as OEA/ExperienceEvo even when a watcher
-does not propagate its shell environment. Set the interval to `0` or increase
-workers only for a deliberate high-concurrency rerun, and restart the
-watcher/rollout parent after changing these env vars.
+through `terrabox.agent.llm_provider.pace_remote_llm_request()`, using the same
+provider lock and JSON fairness state as Terrabox `RemoteChatClient` and
+LangChain remote rollouts. The tau2 pipeline injects
+`TERRABOX_REMOTE_LLM_WORKLOAD=tau2`; ExperienceEvo or another concurrent run
+should use its own workload name, for example `experienceevo`. When both are
+waiting, LongCat grants rotate by workload; when tau2 is alone, it continues at
+the configured provider interval. `TERRABOX_TAU2_API_MIN_INTERVAL_SECONDS`
+remains a compatibility alias for the interval, but do not point tau2 at a
+separate independent lock to bypass `TERRABOX_REMOTE_LLM_RATE_LOCK`. Restart the
+watcher/rollout parent after changing pacing or workload env vars.
 Keep `TERRABOX_TAU2_OPENAI_TIMEOUT_SECONDS` finite (default 300s) so LiteLLM
 HTTP calls fail and requeue instead of hanging a chunk forever.
+同时保持 `TERRABOX_TAU2_CHUNK_TIMEOUT_SECONDS` 有限（默认由单条模拟 timeout 和 chunk 大小推导，最多 6 小时；正式夜间实验可显式设为 3600-5400 秒）。tau2 自带 `--timeout` 只在其事件循环继续推进时生效；如果子进程卡在外部 API / 上游 SDK 内部，父进程硬超时会把该 chunk 标记为 `parent_chunk_timeout`，让 pipeline 按 retryable provider/API failure 回队重跑，避免单个任务无限挂住整个 Stage。
 
 `stable4` uses dynamic chunk scheduling, not fixed domain-to-GPU scheduling.
 Each GPU/port is a reusable lane; tau2 tasks are split into small `task_ids`
@@ -122,6 +134,13 @@ longer domains. Chunk outputs are written under `<group>/_chunks/...` and then
 merged back into the canonical `<group>/<domain>_base/tau2_results/results.json`
 with `(task_id, trial, seed)` de-duplication. Do not run multiple processes
 against the same domain `results.json` directly; use the chunk merger.
+Dynamic chunk directory names must include a stable signature of their exact
+`task_ids`; do not identify a chunk only by queue index. On resume, completed
+task counts can change the remaining queue, and reusing `domain_chunk_000N` for
+different task IDs makes upstream tau2 reject `--auto-resume` or, worse, risks
+cross-task result contamination. The adapter pipeline intentionally names new
+chunks as `domain_chunk_000N_tasks_<first>-<last>_<hash>` while still reading old
+`domain_chunk_*` outputs for backwards-compatible merges.
 
 External API provider/rate-limit errors are retryable queue events, not final
 rollout failures. Dynamic chunk workers inspect stderr/stdout for 429/rate-limit
@@ -130,9 +149,10 @@ back of the queue. Keep `TERRABOX_TAU2_QUEUE_RETRIES` finite (default 12) so rea
 code/data bugs still surface instead of burning API tokens overnight.
 
 Restarting the same chain must reuse completed artifacts: a valid
-`rejudged_<provider>/rejudge_summary.json`, `stage1_protocol_patch.json`, or
-`stage2_protocol_patch.json` is a checkpoint. Do not repeat paid rejudging or prompt
-optimization merely because the orchestration process exited between stages.
+`rejudged_<provider>/rejudge_summary.json`, `stage1_protocol_patch.json`,
+`stage2_protocol_patch.json`, or `stage3_protocol_patch.json` is a checkpoint.
+Do not repeat paid rejudging or prompt optimization merely because the
+orchestration process exited between stages.
 
 NL rejudge responses use a compact index-based JSON contract rather than
 echoing full assertion text. Parse the first valid JSON object, validate

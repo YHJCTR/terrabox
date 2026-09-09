@@ -118,6 +118,33 @@ def _load_rollout_rows(exp_dir: Path) -> list[dict[str, Any]]:
 
 
 def _result_to_memrl_record(row: dict[str, Any]) -> MemRLSourceRecord:
+    return _result_to_memrl_record_with_policy(row, strict_nolabel=False)
+
+
+def _result_to_memrl_record_with_policy(row: dict[str, Any], *, strict_nolabel: bool = False) -> MemRLSourceRecord:
+    if strict_nolabel:
+        from .source_adapter import _strict_reward_from_rollout, _strict_success_from_rollout, _redact_text
+
+        success = _strict_success_from_rollout(row)
+        reward = _strict_reward_from_rollout(row)
+        source = str(row.get("source") or "unknown")
+        return MemRLSourceRecord(
+            task_id=str(row.get("task_id") or row.get("id") or "unknown"),
+            task_description=_redact_text(row.get("question") or row.get("query") or ""),
+            trajectory=format_real_trajectory(row, strict_nolabel=True),
+            success=success,
+            reward=reward,
+            metadata={
+                "source_benchmark": f"terrabox_{source}_rollout",
+                "source": source,
+                "tool_sequence": row.get("tool_sequence") or row.get("tools_called") or row.get("tool_calls") or [],
+                "status": row.get("status", "unknown"),
+                "origin": "external_train_rollout_strict_nolabel",
+                "strict_nolabel": True,
+                "reward_basis": "completed_final_tools_and_observed_tool_error_only",
+            },
+        )
+
     metrics = row.get("metrics") or {}
     success = bool(row.get("real_success", row.get("success", False)))
     try:
@@ -308,6 +335,7 @@ def _build_external_rollout_runtime(args: argparse.Namespace) -> tuple[object, o
         store_dir=args.store_dir,
         backend=args.backend,
         memrl_root=args.memrl_root,
+        strict_nolabel=bool(getattr(args, "strict_nolabel", False)),
     )
     load_snapshot_id = getattr(args, "load_snapshot_id", "")
     if load_snapshot_id and hasattr(service, "load_snapshot"):
@@ -324,6 +352,8 @@ def _build_external_rollout_runtime(args: argparse.Namespace) -> tuple[object, o
 
 def _collect_records(args: argparse.Namespace) -> list[MemRLSourceRecord]:
     records: list[MemRLSourceRecord] = []
+    if getattr(args, "strict_nolabel", False) and args.sft:
+        raise ValueError("--strict-nolabel MemRL source population must use rollout trajectories, not SFT/gold data")
     if args.sft:
         expected_tool_overrides = None
         if getattr(args, "align_sft_tools_to_task_file", False):
@@ -341,6 +371,7 @@ def _collect_records(args: argparse.Namespace) -> list[MemRLSourceRecord]:
                 traj_path,
                 limit=args.limit_trajectories,
                 include_empty_failures=args.include_empty_failures,
+                strict_nolabel=bool(getattr(args, "strict_nolabel", False)),
             )
         )
     return records
@@ -351,6 +382,7 @@ def _create_service_and_add(args: argparse.Namespace, records: list[MemRLSourceR
         store_dir=args.store_dir,
         backend=args.backend,
         memrl_root=args.memrl_root,
+        strict_nolabel=bool(getattr(args, "strict_nolabel", False)),
     )
     try:
         return service, service.add_records(records)
@@ -361,6 +393,7 @@ def _create_service_and_add(args: argparse.Namespace, records: list[MemRLSourceR
             store_dir=args.store_dir,
             backend="lite",
             memrl_root=args.memrl_root,
+            strict_nolabel=bool(getattr(args, "strict_nolabel", False)),
         )
         manifest = service.add_records(records)
         manifest["fallback_reason"] = "external_memrl_add_failed"
@@ -371,7 +404,11 @@ def cmd_populate_source(args: argparse.Namespace) -> None:
     store_dir = Path(args.store_dir)
     records = _collect_records(args)
     records_path = store_dir / "data" / "memrl_source_records.jsonl"
-    write_memrl_records_jsonl(records, records_path)
+    write_memrl_records_jsonl(
+        records,
+        records_path,
+        strict_nolabel=bool(getattr(args, "strict_nolabel", False)),
+    )
     service, manifest = _create_service_and_add(args, records)
     snapshot = service.save_snapshot(args.snapshot_id)
     payload = {
@@ -383,6 +420,7 @@ def cmd_populate_source(args: argparse.Namespace) -> None:
         "success_count": sum(1 for r in records if r.success),
         "failure_count": sum(1 for r in records if not r.success),
         "align_sft_tools_to_task_file": bool(getattr(args, "align_sft_tools_to_task_file", False)),
+        "strict_nolabel": bool(getattr(args, "strict_nolabel", False)),
         "service": manifest,
         "snapshot": snapshot,
     }
@@ -464,13 +502,18 @@ def cmd_online_source(args: argparse.Namespace) -> None:
         load_trajectories_as_memrl_records(
             trajectory_path,
             include_empty_failures=args.include_empty_failures,
+            strict_nolabel=bool(getattr(args, "strict_nolabel", False)),
         )
         if trajectory_path.exists()
         else []
     )
     if not records:
         tmp_records_path = Path(args.store_dir) / "data" / f"{args.experiment}_rollout_rows.jsonl"
-        write_memrl_records_jsonl([], tmp_records_path.with_suffix(".empty.jsonl"))
+        write_memrl_records_jsonl(
+            [],
+            tmp_records_path.with_suffix(".empty.jsonl"),
+            strict_nolabel=bool(getattr(args, "strict_nolabel", False)),
+        )
         tmp_records_path.parent.mkdir(parents=True, exist_ok=True)
         with tmp_records_path.open("w", encoding="utf-8") as f:
             for row in rows:
@@ -478,11 +521,13 @@ def cmd_online_source(args: argparse.Namespace) -> None:
         records = load_trajectories_as_memrl_records(
             tmp_records_path,
             include_empty_failures=args.include_empty_failures,
+            strict_nolabel=bool(getattr(args, "strict_nolabel", False)),
         )
     service = create_memrl_source_service(
         store_dir=args.store_dir,
         backend=args.backend,
         memrl_root=args.memrl_root,
+        strict_nolabel=bool(getattr(args, "strict_nolabel", False)),
     )
     memory_before = service.manifest(added=0)
     retrieved_ids_list = []
@@ -600,7 +645,10 @@ def cmd_external_loop(args: argparse.Namespace) -> None:
         retrieved_ids = [str(x) for x in retrieval.get("retrieved_ids", []) if x]
         retrieved_queries = retrieval.get("retrieved_queries", []) or []
         retrieved_ids_list.append(retrieved_ids)
-        record = _result_to_memrl_record(row)
+        record = _result_to_memrl_record_with_policy(
+            row,
+            strict_nolabel=bool(getattr(args, "strict_nolabel", False)),
+        )
         record.metadata["retrieved_memory_ids"] = retrieved_ids
 
         if train:
@@ -627,6 +675,7 @@ def cmd_external_loop(args: argparse.Namespace) -> None:
         "num_tasks": len(rows),
         "skip_stats": skip_stats,
         "train_updates": bool(train),
+        "strict_nolabel": bool(getattr(args, "strict_nolabel", False)),
         "retrieval": {
             "top_k": args.top_k,
             "threshold": args.retrieve_threshold,
@@ -662,6 +711,7 @@ def _write_run_summary(args: argparse.Namespace, *, mode: str) -> dict[str, Any]
         store_dir=args.store_dir,
         backend="lite",
         memrl_root=getattr(args, "memrl_root", "/data1/yuhongjie2/MemRL"),
+        strict_nolabel=bool(getattr(args, "strict_nolabel", False)),
     )
     summary = {
         "mode": mode,
@@ -731,6 +781,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use matching task-file expected_tools as memory metadata while preserving raw SFT trajectory text.",
     )
     p_pop.add_argument("--include-empty-failures", action="store_true")
+    p_pop.add_argument("--strict-nolabel", action="store_true")
     p_pop.add_argument("--snapshot-id", default="final")
     p_pop.set_defaults(func=cmd_populate_source)
 
@@ -748,6 +799,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_online.add_argument("--retrieve-threshold", type=float, default=0.0)
     p_online.add_argument("--q-alpha", type=float, default=0.1)
     p_online.add_argument("--include-empty-failures", action="store_true")
+    p_online.add_argument("--strict-nolabel", action="store_true")
     p_online.add_argument("--snapshot-id", default="online")
     p_online.set_defaults(func=cmd_online_source)
 
@@ -757,6 +809,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--memrl-root", default="/data1/yuhongjie2/MemRL")
         p.add_argument("--top-k", type=int, default=5)
         p.add_argument("--retrieve-threshold", type=float, default=0.0)
+        p.add_argument("--strict-nolabel", action="store_true")
         p.add_argument("--snapshot-id", default="trained")
         p.add_argument(
             "--load-snapshot-id",

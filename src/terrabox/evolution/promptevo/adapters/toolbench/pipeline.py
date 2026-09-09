@@ -21,7 +21,7 @@ from pathlib import Path
 from queue import Queue
 from typing import Any
 
-from terrabox.agent.llm_provider import make_llm_client
+from terrabox.agent.llm_provider import make_llm_client, resolve_provider
 from terrabox.evolution.promptevo.contrastive_optimizer import ContrastiveOptimizer
 from terrabox.evolution.promptevo.contrastive_sampler import default_render
 from terrabox.evolution.promptevo.loop import ContrastiveUpdater
@@ -63,6 +63,8 @@ class StableToolBenchPipelineProfile:
     model_host_path: str = MODEL_PATH
     served_model_name: str = "qwen2"
     gpu_lanes: tuple[tuple[int, int], ...] = GPU_LANES
+    agent_provider: str = "qwen"
+    api_workers: int = 4
     stable_groups: tuple[str, ...] = DEFAULT_STABLE_GROUPS
     method: str = "DFS_woFilter_w2"
     backbone_model: str = "qwen2"
@@ -297,13 +299,31 @@ def _run_stable_group(
         return stable_group_results(experiment_dir(experiment, profile.output_dir), stable_group)
 
     _write_json(status_path, {"status": "running", "actual": actual, "expected": expected, "stage": stage})
+    env_overrides: dict[str, str] = {}
+    backbone_model = profile.backbone_model
+    chatgpt_model = "gpt-4-turbo-2024-04-09"
+    model_path = profile.served_model_name
+    vllm_api_base = f"http://127.0.0.1:{port}/v1/"
+    if profile.agent_provider == "longcat":
+        spec = resolve_provider("longcat")
+        backbone_model = "chatgpt_function"
+        chatgpt_model = spec.model
+        model_path = spec.model
+        vllm_api_base = ""
+        env_overrides = {
+            "OPENAI_API_BASE": spec.base_url,
+            "OPENAI_KEY": spec.api_key,
+            "TERRABOX_TOOLBENCH_REQUEST_PROFILE": "longcat",
+            "TERRABOX_REMOTE_LLM_WORKLOAD": os.getenv("TERRABOX_REMOTE_LLM_WORKLOAD", "toolbench"),
+        }
     cfg = StableToolBenchRunConfig(
         stable_root=profile.stable_root,
         group=stable_group,
         method=profile.method,
-        backbone_model=profile.backbone_model,
-        model_path=profile.served_model_name,
-        vllm_api_base=f"http://127.0.0.1:{port}/v1/",
+        backbone_model=backbone_model,
+        chatgpt_model=chatgpt_model,
+        model_path=model_path,
+        vllm_api_base=vllm_api_base,
         service_url=profile.service_url,
         max_observation_length=profile.max_observation_length,
         max_source_sequence_length=profile.max_source_sequence_length,
@@ -313,6 +333,7 @@ def _run_stable_group(
         observ_compress_method=profile.observ_compress_method,
         num_thread=profile.num_thread,
         extra_args=list(profile.extra_runner_args),
+        env_overrides=env_overrides,
     )
     runner = StableToolBenchRolloutRunner(
         output_dir=profile.output_dir,
@@ -378,8 +399,9 @@ def rollout_experiment(
         tool_proc, tool_log = _ensure_tool_server(profile)
         if tool_log:
             print(f"[{time.strftime('%F %T')}] tool server log: {tool_log}", flush=True)
-        for gpu, port in profile.gpu_lanes:
-            containers.append(_start_server(stage, gpu, port, profile))
+        if profile.agent_provider != "longcat":
+            for gpu, port in profile.gpu_lanes:
+                containers.append(_start_server(stage, gpu, port, profile))
 
         queue: Queue[str] = Queue()
         for stable_group, row in group_status(experiment, profile).items():
@@ -400,8 +422,11 @@ def rollout_experiment(
                     queue.task_done()
 
         results: dict[str, str] = {}
-        with ThreadPoolExecutor(max_workers=len(profile.gpu_lanes)) as pool:
-            for future in as_completed([pool.submit(worker, port) for _, port in profile.gpu_lanes]):
+        lanes = profile.gpu_lanes
+        if profile.agent_provider == "longcat":
+            lanes = tuple((index, 0) for index in range(max(1, profile.api_workers)))
+        with ThreadPoolExecutor(max_workers=len(lanes)) as pool:
+            for future in as_completed([pool.submit(worker, port) for _, port in lanes]):
                 results.update(future.result())
 
         final = group_status(experiment, profile)
@@ -495,7 +520,9 @@ def optimize_stage2(
         try:
             saved = json.loads(contrastive_path.read_text(encoding="utf-8"))
             prompt_path = Path(str(saved.get("prompt_path") or ""))
-            if saved.get("version") == stage2_version and prompt_path.is_file():
+            if (saved.get("version") == stage2_version
+                    and saved.get("accepted", True)
+                    and prompt_path.is_file()):
                 return str(prompt_path)
         except (OSError, ValueError, TypeError):
             pass
@@ -523,6 +550,20 @@ def optimize_stage2(
             "and do not encode task-specific APIs or answers."
         ),
     )
+    if not result.accepted:
+        # Static selection is diagnostic only. Do not turn an unvalidated
+        # candidate into a formal benchmark prompt.
+        record.mkdir(parents=True, exist_ok=True)
+        _write_json(contrastive_path, {"version": stage2_version,
+                                       "accepted": False,
+                                       "result": result.to_dict(),
+                                       "base_experiment": base_experiment,
+                                       "stage1_experiment": stage1_experiment,
+                                       "optimizer_version": optimizer_version})
+        raise RuntimeError(
+            "ToolBench Stage2 candidate was not rollout-validated; refusing to "
+            "launch a formal Stage2 rollout"
+        )
     prompt_path = store.save(stage2_version, result.revised_prompt,
                              {"result": result.to_dict(), "base_experiment": base_experiment,
                               "stage1_experiment": stage1_experiment, "optimizer_version": optimizer_version})
@@ -566,6 +607,8 @@ def _profile_from_args(args: argparse.Namespace) -> StableToolBenchPipelineProfi
         model_host_path=args.model_host_path,
         served_model_name=args.served_model_name,
         gpu_lanes=lanes,
+        agent_provider=args.agent_provider,
+        api_workers=args.api_workers,
         stable_groups=_parse_groups(args.stable_groups, base.stable_groups),
         method=args.method,
         backbone_model=base.backbone_model,
@@ -591,6 +634,8 @@ def _add_profile_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output-dir", default=DEFAULT_TOOLBENCH_EXPERIMENTS_DIR)
     parser.add_argument("--model-host-path", default=MODEL_PATH)
     parser.add_argument("--served-model-name", default="qwen2")
+    parser.add_argument("--agent-provider", default="qwen", choices=["qwen", "longcat"])
+    parser.add_argument("--api-workers", type=int, default=4)
     parser.add_argument("--gpus", default="0,1,2,3")
     parser.add_argument("--start-port", type=int, default=9300)
     parser.add_argument("--stable-groups", default=",".join(DEFAULT_STABLE_GROUPS))

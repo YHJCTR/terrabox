@@ -17,6 +17,9 @@ so the LLM only needs to pass a placeholder reference.
 
 import json
 import os
+import sqlite3
+import hashlib
+import fcntl
 import logging
 import re
 import copy
@@ -641,13 +644,17 @@ def add_pois_layer_handler(arguments: Dict[str, Any], context: Any, account: Any
         if limit is not None and len(pois) > limit:
             pois = pois.head(limit)
         pois = _clean_for_gpkg(pois)
-        pois.to_file(gpkg, layer=layer_name, driver="GPKG")
+        write_response = _write_vector_layer_once(gpkg, layer_name, pois)
+        if write_response.get("status") == "error":
+            return write_response
         gpkg_basename = os.path.basename(gpkg)
         return {
             "status": "success",
             "text": f"Saved {len(pois)} POIs to layer '{layer_name}' in {gpkg_basename}",
             "gpkg": gpkg,
+            "layer_name": layer_name,
             "poi_count": len(pois),
+            "reused": bool(write_response.get("reused")),
         }
 
     if not isinstance(query, dict):
@@ -676,7 +683,9 @@ def add_pois_layer_handler(arguments: Dict[str, Any], context: Any, account: Any
         return {"status": "error", "message": f"No named POIs found for {query} inside boundary."}
 
     pois = _clean_for_gpkg(pois)
-    pois.to_file(gpkg, layer=layer_name, driver="GPKG")
+    write_response = _write_vector_layer_once(gpkg, layer_name, pois)
+    if write_response.get("status") == "error":
+        return write_response
 
     gpkg_basename = os.path.basename(gpkg)
     text = f"Saved {len(pois)} POIs to layer '{layer_name}' in {gpkg_basename}"
@@ -686,7 +695,9 @@ def add_pois_layer_handler(arguments: Dict[str, Any], context: Any, account: Any
         "status": "success",
         "text": text,
         "gpkg": gpkg,
+        "layer_name": layer_name,
         "poi_count": len(pois),
+        "reused": bool(write_response.get("reused")),
     }
 
 
@@ -900,7 +911,9 @@ def _compute_dist_gpkg(arguments: Dict[str, Any], context: Any, account: Any) ->
     # Save distances as line layer
     dist_layer_name = f"{src_layer}_to_{tar_layer}_distances"
     dist_gdf = gpd.GeoDataFrame(results, geometry="geometry", crs=CRS)
-    dist_gdf.to_file(gpkg, layer=dist_layer_name, driver="GPKG")
+    write_response = _write_vector_layer_once(gpkg, dist_layer_name, dist_gdf)
+    if write_response.get("status") == "error":
+        return write_response
 
     # Build text summary
     out_lines = [f"Distances (in meters) saved to line layer: '{dist_layer_name}': "]
@@ -918,6 +931,8 @@ def _compute_dist_gpkg(arguments: Dict[str, Any], context: Any, account: Any) ->
         "text": "\n".join(out_lines),
         "gpkg": gpkg,
         "pair_count": len(results),
+        "layer_name": dist_layer_name,
+        "reused": bool(write_response.get("reused")),
     }
 
 
@@ -1144,6 +1159,26 @@ def compute_index_change_handler(arguments: Dict[str, Any], context: Any, accoun
         return {"status": "error", "message": "index_type must be one of NDVI, NDBI, NBR."}
     if not os.path.exists(gpkg):
         return {"status": "error", "message": f"GeoPackage not found: {gpkg}"}
+
+    # The difference layer is an append-style GeoPackage artifact too. Check
+    # the catalog before doing the raster work so retries cannot issue a second
+    # CREATE TABLE against an existing or orphaned layer.
+    existing = _gpkg_existing_layer_type(gpkg, str(diff_layer_name))
+    existing_response = _existing_index_layer_response(
+        gpkg, str(diff_layer_name), existing
+    )
+    if existing_response is not None:
+        if existing_response.get("status") == "error":
+            return existing_response
+        return {
+            "status": "success",
+            "diff_layer_name": diff_layer_name,
+            "index_type": index_type,
+            "layer_saved": True,
+            "reused": True,
+            "message": existing_response["message"],
+        }
+
     ds1 = gdal.Open(f"GPKG:{gpkg}:{l1}")
     ds2 = gdal.Open(f"GPKG:{gpkg}:{l2}")
     if ds1 is None or ds2 is None:
@@ -1177,20 +1212,49 @@ def compute_index_change_handler(arguments: Dict[str, Any], context: Any, accoun
     out = np.where(np.isfinite(diff), diff, -9999.0).astype("float32")
     mem.GetRasterBand(1).WriteArray(out)
     mem.GetRasterBand(1).SetNoDataValue(-9999.0)
+    reused = False
     try:
-        gdal.GetDriverByName("GPKG").CreateCopy(
-            gpkg, mem, options=["APPEND_SUBDATASET=YES", f"RASTER_TABLE={diff_layer_name}"]
-        )
-        saved = True
-    except Exception as exc:  # raster save is best-effort; stats are the main output
-        saved = False
-        summary += f"  (note: could not append raster layer to gpkg: {exc})\n"
+        # Keep the catalog recheck adjacent to GDAL's append operation. The
+        # initial preflight is outside the lock because the raster computation
+        # above may be expensive.
+        with _gpkg_write_lock(gpkg):
+            existing = _gpkg_existing_layer_type(gpkg, str(diff_layer_name))
+            existing_response = _existing_index_layer_response(
+                gpkg, str(diff_layer_name), existing
+            )
+            if existing_response is not None:
+                if existing_response.get("status") == "error":
+                    return existing_response
+                saved = True
+                reused = True
+            else:
+                created = gdal.GetDriverByName("GPKG").CreateCopy(
+                    gpkg,
+                    mem,
+                    options=[
+                        "APPEND_SUBDATASET=YES",
+                        f"RASTER_TABLE={diff_layer_name}",
+                    ],
+                )
+                if created is None:
+                    raise RuntimeError(
+                        "GDAL returned no dataset while appending the difference raster"
+                    )
+                saved = True
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error_type": "gpkg_layer_write_failed",
+            "diff_layer_name": diff_layer_name,
+            "index_type": index_type,
+            "message": f"Could not append difference layer '{diff_layer_name}' to GeoPackage: {exc}",
+        }
     finally:
         mem = ds1 = ds2 = None
     gpkg_name = os.path.basename(gpkg)
     return {
         "status": "success", "diff_layer_name": diff_layer_name, "index_type": index_type,
-        "class_percentages": classes_pct, "layer_saved": saved, "summary": summary,
+        "class_percentages": classes_pct, "layer_saved": saved, "reused": reused, "summary": summary,
         "message": f"delta-{index_type} layer saved to {gpkg_name} as '{diff_layer_name}'\n" + summary,
     }
 
@@ -1418,6 +1482,210 @@ def _aoi_bounds_lonlat(gpkg: str):
 _STAC_MAX_DIM = int(os.environ.get("TERRABOX_STAC_MAX_DIM", "512"))
 
 
+def _gpkg_existing_layer_type(gpkg: str, layer_name: str) -> str | None:
+    """Return the existing GeoPackage layer state, if any.
+
+    GDAL ``CreateCopy(APPEND_SUBDATASET=YES)`` is not idempotent. Inspect the
+    SQLite catalog before creating an index raster so a retry can reuse a
+    complete raster and report an incomplete/orphaned table instead of
+    attempting a second ``CREATE TABLE``.
+    """
+    name = str(layer_name)
+    try:
+        with sqlite3.connect(gpkg) as conn:
+            conn.execute("PRAGMA busy_timeout=5000")
+            contents = conn.execute(
+                "SELECT data_type FROM gpkg_contents "
+                "WHERE lower(table_name)=lower(?) LIMIT 1",
+                (name,),
+            ).fetchone()
+            table = conn.execute(
+                "SELECT type FROM sqlite_master WHERE lower(name)=lower(?) LIMIT 1",
+                (name,),
+            ).fetchone()
+            if contents is None and table is None:
+                return None
+            if contents is None or table is None:
+                return "incomplete"
+            data_type = str(contents[0]).lower()
+            if data_type == "features":
+                geometry_catalog = conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND lower(name)='gpkg_geometry_columns' LIMIT 1"
+                ).fetchone()
+                if geometry_catalog is None:
+                    return "incomplete"
+                geometry = conn.execute(
+                    "SELECT 1 FROM gpkg_geometry_columns "
+                    "WHERE lower(table_name)=lower(?) LIMIT 1",
+                    (name,),
+                ).fetchone()
+                return "features" if geometry is not None else "incomplete"
+            if data_type not in {"tiles", "2d-gridded-coverage"}:
+                return f"wrong_type:{data_type}"
+            matrix = conn.execute(
+                "SELECT 1 FROM gpkg_tile_matrix WHERE lower(table_name)=lower(?) LIMIT 1",
+                (name,),
+            ).fetchone()
+            return data_type if matrix is not None else "incomplete"
+    except (sqlite3.Error, OSError) as exc:
+        logger.warning("Could not inspect GeoPackage layer %r in %s: %s", name, gpkg, exc)
+        # Do not treat an unreadable catalog as an empty GeoPackage. Proceeding
+        # to GDAL CreateCopy in that case can recreate an existing table and
+        # corrupt the artifact contract.
+        return "inspection_error"
+
+
+@contextmanager
+def _gpkg_write_lock(gpkg: str):
+    """Serialize append-style writes to one GeoPackage across processes.
+
+    GDAL's ``APPEND_SUBDATASET`` operation and the SQLite catalog inspection
+    are separate operations. A process lock keeps the final recheck and write
+    atomic from the toolkit's point of view, while leaving network/STAC work
+    outside the critical section.
+    """
+    absolute = os.path.abspath(gpkg)
+    digest = hashlib.sha256(absolute.encode("utf-8")).hexdigest()[:16]
+    lock_dir = os.environ.get("TERRABOX_GPKG_LOCK_DIR") or os.path.join(
+        os.environ.get("TERRABOX_ROOT", os.getcwd()), "tmp", "service_locks"
+    )
+    os.makedirs(lock_dir, exist_ok=True)
+    lock_path = os.path.join(lock_dir, f"gpkg_{digest}.lock")
+    with open(lock_path, "a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _existing_index_layer_response(gpkg: str, layer_name: str, existing: str | None):
+    """Convert an existing layer state into the public tool response."""
+    if existing is None:
+        return None
+    if existing == "inspection_error":
+        return {
+            "status": "error",
+            "error_type": "gpkg_inspection_failed",
+            "layer_name": layer_name,
+            "message": f"Could not safely inspect GeoPackage before writing layer '{layer_name}'.",
+        }
+    if existing == "incomplete":
+        return {
+            "status": "error",
+            "error_type": "gpkg_layer_incomplete",
+            "layer_name": layer_name,
+            "message": (
+                f"GeoPackage layer '{layer_name}' is already present but incomplete; "
+                "refusing to overwrite it automatically. Use a new layer_name or repair the artifact."
+            ),
+        }
+    if existing.startswith("wrong_type:"):
+        return {
+            "status": "error",
+            "error_type": "gpkg_layer_type_conflict",
+            "layer_name": layer_name,
+            "message": f"Layer '{layer_name}' already exists with {existing[10:]} type.",
+        }
+    if existing == "features":
+        return {
+            "status": "error",
+            "error_type": "gpkg_layer_type_conflict",
+            "layer_name": layer_name,
+            "message": f"Layer '{layer_name}' already exists as a vector feature layer.",
+        }
+    return {
+        "status": "success",
+        "layer_name": layer_name,
+        "index_type": None,
+        "existing": True,
+        "reused": True,
+        "message": (
+            f"Index layer '{layer_name}' already exists in {os.path.basename(gpkg)}; "
+            "reused it without recreating the raster table."
+        ),
+    }
+
+
+def _existing_vector_layer_response(gpkg: str, layer_name: str, existing: str | None):
+    """Convert a GeoPackage state into the public vector-layer response."""
+    if existing is None:
+        return None
+    if existing == "inspection_error":
+        return {
+            "status": "error",
+            "error_type": "gpkg_inspection_failed",
+            "layer_name": layer_name,
+            "message": f"Could not safely inspect GeoPackage before writing layer '{layer_name}'.",
+        }
+    if existing == "incomplete":
+        return {
+            "status": "error",
+            "error_type": "gpkg_layer_incomplete",
+            "layer_name": layer_name,
+            "message": (
+                f"GeoPackage layer '{layer_name}' is already present but incomplete; "
+                "refusing to overwrite it automatically. Use a new layer_name or repair the artifact."
+            ),
+        }
+    if existing == "features":
+        return {
+            "status": "success",
+            "layer_name": layer_name,
+            "existing": True,
+            "reused": True,
+            "message": (
+                f"Vector layer '{layer_name}' already exists in {os.path.basename(gpkg)}; "
+                "reused it without rewriting the GeoPackage."
+            ),
+        }
+    if existing.startswith("wrong_type:"):
+        layer_type = existing[len("wrong_type:"):]
+    else:
+        layer_type = existing
+    return {
+        "status": "error",
+        "error_type": "gpkg_layer_type_conflict",
+        "layer_name": layer_name,
+        "message": f"Layer '{layer_name}' already exists with {layer_type} type.",
+    }
+
+
+def _write_vector_layer_once(gpkg: str, layer_name: str, gdf):
+    """Write one vector layer with catalog rechecks and a per-GPKG lock."""
+    existing = _gpkg_existing_layer_type(gpkg, layer_name)
+    response = _existing_vector_layer_response(gpkg, layer_name, existing)
+    if response is not None:
+        return response
+
+    # Network and geometry preparation stay outside the critical section. Only
+    # the final catalog check and GeoPackage write are serialized.
+    try:
+        with _gpkg_write_lock(gpkg):
+            existing = _gpkg_existing_layer_type(gpkg, layer_name)
+            response = _existing_vector_layer_response(gpkg, layer_name, existing)
+            if response is not None:
+                return response
+            gdf.to_file(gpkg, layer=layer_name, driver="GPKG")
+    except Exception as exc:
+        logger.warning("Failed to write vector layer %r to %s: %s", layer_name, gpkg, exc)
+        return {
+            "status": "error",
+            "error_type": "gpkg_layer_write_failed",
+            "layer_name": layer_name,
+            "message": f"Failed to write vector layer '{layer_name}': {exc}",
+        }
+
+    return {
+        "status": "success",
+        "layer_name": layer_name,
+        "existing": False,
+        "reused": False,
+        "message": f"Wrote vector layer '{layer_name}' to {os.path.basename(gpkg)}.",
+    }
+
+
 def _stac_cache_dir() -> str:
     d = os.environ.get("TERRABOX_STAC_CACHE_DIR", "").strip() or os.path.join(
         os.path.expanduser("~"), ".verl_cache", "stac_index_cache")
@@ -1458,7 +1726,7 @@ def _stac_fetch_index(index_type: str, year: int, month, gpkg: str):
     import rasterio
     from rasterio.enums import Resampling
     from rasterio.warp import transform_bounds
-    from rasterio.windows import from_bounds
+    from rasterio.windows import Window, from_bounds
     from pystac_client import Client
 
     if month:
@@ -1481,6 +1749,17 @@ def _stac_fetch_index(index_type: str, year: int, month, gpkg: str):
         with rasterio.open(href) as ds:
             bnds = transform_bounds("EPSG:4326", ds.crs, minx, miny, maxx, maxy)
             win = from_bounds(*bnds, transform=ds.transform)
+            # An AOI may touch or extend beyond a scene boundary. Crop the
+            # window before RasterIO so edge AOIs do not request out-of-range
+            # pixels. A completely disjoint AOI remains an explicit data error.
+            try:
+                win = win.intersection(Window(0, 0, ds.width, ds.height))
+            except ValueError as exc:
+                raise ValueError(
+                    f"AOI does not overlap source raster {href!r}"
+                ) from exc
+            if win.width <= 0 or win.height <= 0:
+                raise ValueError(f"AOI has no positive-size overlap with source raster {href!r}")
             nat_tr = ds.window_transform(win)
             if out_shape is None:
                 h = max(1, int(round(win.height)))
@@ -1539,6 +1818,13 @@ def add_index_layer_handler(arguments: Dict[str, Any], context: Any, account: An
     if not os.path.exists(gpkg):
         return {"status": "error", "message": f"GeoPackage not found: {gpkg}"}
 
+    existing = _gpkg_existing_layer_type(gpkg, str(layer_name))
+    existing_response = _existing_index_layer_response(gpkg, str(layer_name), existing)
+    if existing_response is not None:
+        if existing_response.get("index_type") is None:
+            existing_response["index_type"] = index_type
+        return existing_response
+
     cloud = None
     if band_a_path and band_b_path:
         rasterio = _lazy_rasterio()
@@ -1570,10 +1856,29 @@ def add_index_layer_handler(arguments: Dict[str, Any], context: Any, account: An
     if crs_wkt:
         mem.SetProjection(crs_wkt)
     mem.GetRasterBand(1).WriteArray(enc)
+    # STAC download/decoding happens before this point. Recheck under the
+    # artifact lock because another worker/task may have created the same layer
+    # after the initial preflight.
     try:
-        gdal.GetDriverByName("GPKG").CreateCopy(
-            gpkg, mem, options=["APPEND_SUBDATASET=YES", f"RASTER_TABLE={layer_name}"]
-        )
+        with _gpkg_write_lock(gpkg):
+            existing = _gpkg_existing_layer_type(gpkg, str(layer_name))
+            existing_response = _existing_index_layer_response(gpkg, str(layer_name), existing)
+            if existing_response is not None:
+                if existing_response.get("index_type") is None:
+                    existing_response["index_type"] = index_type
+                return existing_response
+            created = gdal.GetDriverByName("GPKG").CreateCopy(
+                gpkg, mem, options=["APPEND_SUBDATASET=YES", f"RASTER_TABLE={layer_name}"]
+            )
+            if created is None:
+                raise RuntimeError("GDAL returned no dataset while appending the raster layer")
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error_type": "gpkg_layer_write_failed",
+            "layer_name": layer_name,
+            "message": f"Could not append raster layer '{layer_name}' to GeoPackage: {exc}",
+        }
     finally:
         mem = None
     valid = idx[np.isfinite(idx)]

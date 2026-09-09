@@ -22,6 +22,10 @@ checkout at `/data1/yuhongjie2/ToolBench`.
   `max_observation_length=1024`, `max_query_count=30`, `num_thread=4`.
 - The local pipeline serves `/data1/yuhongjie2/Earth-Agent/llm/qwen/3_8B` as
   model name `qwen2` so the upstream qwen2 completion wrapper remains unchanged.
+- For a LongCat agent experiment, pass `--agent-provider longcat`. The adapter
+  uses StableToolBench's official `chatgpt_function` route against LongCat,
+  starts no local vLLM/GPU lanes, and joins the shared LongCat limiter with
+  workload `toolbench`.
 - Experiment outputs live under
   `src/terrabox/evolution/promptevo/adapters/toolbench/experiments/<experiment>/`.
 - Generated prompt versions live under
@@ -29,16 +33,26 @@ checkout at `/data1/yuhongjie2/ToolBench`.
 
 ## Services
 
-- `pipeline.py` may explicitly start the StableToolBench cached tool server
-  (`server/main.py`, port 8081) and per-GPU vLLM lanes.
+- `pipeline.py` starts the StableToolBench cached tool server (`server/main.py`,
+  port 8081). The local-Qwen profile also starts per-GPU vLLM lanes; the
+  LongCat-agent profile does not.
 - Record service logs and per-group metadata. Stop only resources started by the
   current pipeline run.
+- LongCat requests must use `pace_remote_llm_request`, the shared lock at
+  `tmp/service_locks/remote_llm_longcat.lock`, and workload-aware fair pacing.
+  Do not add an adapter-specific lock that bypasses the provider limit.
 - Do not silently fall back to another benchmark implementation, another prompt
   slot, or synthetic metrics if the official pipeline fails.
 
 ## Metrics
 
 - Adapter `metrics_summary.json` is structural: it reflects saved rollout JSONs,
-  `valid_data` / `Finish(give_answer)`, and error buckets.
+  the official top-level `win` flag when present, DFS `Finish` actions, and
+  error buckets. `answer_generation.valid_data` alone is not treated as a task
+  win because it may also be true for a `give_up` termination.
+- For DFS/DFSDT outputs without `train_messages`, metrics may consume the whole
+  nested tree, but PromptEvo diagnosis must select one representative path and
+  must not concatenate sibling branches. Static selection is not rollout validation;
+  an unvalidated Stage2 candidate must be rejected before formal rollout.
 - For paper-style final reporting, use StableToolBench's official
   `toolbench/tooleval` conversion and pass-rate scripts on generated answers.

@@ -336,6 +336,39 @@ def cmd_build_v4_clean(args: argparse.Namespace) -> None:
     print(json.dumps(store.stats(), ensure_ascii=False, indent=2))
 
 
+def cmd_build_v5_hybrid_index(args: argparse.Namespace) -> None:
+    """Build the Qwen embedding index used by v5 hybrid retrieval."""
+    from .v2.store import ExperienceEvoV2Store
+    from .v5_hybrid.semantic_index import ExperienceEvoFamilyEmbeddingIndex
+
+    store = ExperienceEvoV2Store(args.store_dir)
+    families = store.load_families()
+    if not families:
+        raise SystemExit(f"no families found in {store.families_path}; build v4-clean store first")
+    summary = ExperienceEvoFamilyEmbeddingIndex.build(
+        args.store_dir,
+        families,
+        batch_size=args.batch_size,
+        force=args.force,
+    )
+    store.write_manifest(
+        {
+            "experience_evo_v5_hybrid_qwen": {
+                "phase": "build-index",
+                "built_at": datetime.now().isoformat(timespec="seconds"),
+                "retrieval": "state hard filter + BM25/structured/Qwen-embedding RRF + Quse/risk rerank + v5 final verifier",
+                "strict_rollout_only": True,
+                "label_policy": (
+                    "Embedding documents exclude task_id/task_type/expected_tools/gold answers/"
+                    "gold tool calls/evaluation metrics."
+                ),
+                **summary,
+            }
+        }
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
 def cmd_preview_v2(args: argparse.Namespace) -> None:
     from .v2.runtime import ExperienceEvoV2Runtime
 
@@ -592,6 +625,15 @@ def build_parser() -> argparse.ArgumentParser:
     add_source_flags_v2(p_build_v4_clean)
     add_distill_flags_v2(p_build_v4_clean)
     p_build_v4_clean.set_defaults(func=cmd_build_v4_clean)
+
+    p_build_v5_hybrid_index = sub.add_parser(
+        "build-v5-hybrid-index",
+        help="Build Qwen embedding index for v5 hybrid retrieval over v4-clean families",
+    )
+    p_build_v5_hybrid_index.add_argument("--store-dir", default=DEFAULT_STORE_V2)
+    p_build_v5_hybrid_index.add_argument("--batch-size", type=int, default=24)
+    p_build_v5_hybrid_index.add_argument("--force", action="store_true", help="Re-embed all family documents")
+    p_build_v5_hybrid_index.set_defaults(func=cmd_build_v5_hybrid_index)
 
     p_preview_v2 = sub.add_parser("preview-v2", help="Preview the v2 injected product-transition block")
     p_preview_v2.add_argument("--store-dir", default=DEFAULT_STORE_V2)

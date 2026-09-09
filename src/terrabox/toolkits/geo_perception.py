@@ -349,6 +349,28 @@ def _reduced_vlm_output_budget(error_text: str) -> int | None:
     return max(1, retry_budget)
 
 
+def _initial_vlm_output_budget(requested: Any, *, context_length: int | None = None) -> int:
+    """Clamp the requested VLM output budget before sending the request.
+
+    vLLM requires input tokens plus ``max_tokens`` to fit its context. The
+    handler does not have the server's exact image-token accounting, so reserve
+    a small margin up front; the response-based retry remains available for
+    unusually large image or prompt inputs.
+    """
+    try:
+        requested_tokens = int(requested)
+    except (TypeError, ValueError):
+        requested_tokens = 4096
+    if context_length is None:
+        try:
+            context_length = int(os.environ.get("VLM_MAX_MODEL_LEN", "8192"))
+        except (TypeError, ValueError):
+            context_length = 8192
+    context_length = max(256, int(context_length))
+    safe_limit = max(1, context_length - 128)
+    return max(1, min(requested_tokens, safe_limit))
+
+
 def _call_service(manager, url: str, payload: dict, timeout: int = 120) -> dict:
     """Start *manager* if not running, POST to *url*, return parsed JSON or error dict."""
     service = _service_name_for_manager(manager)
@@ -618,11 +640,9 @@ def vlm_analyze_handler(arguments: Dict[str, Any], context: Any, account: Any) -
         default_max_tokens = int(os.environ.get("TERRABOX_VLM_ANALYZE_DEFAULT_MAX_TOKENS", "8192"))
     except Exception:
         default_max_tokens = 8192
-    max_tokens = arguments.get("max_tokens", default_max_tokens)
-    try:
-        max_tokens = int(max_tokens)
-    except Exception:
-        max_tokens = 8192
+    max_tokens = _initial_vlm_output_budget(
+        arguments.get("max_tokens", default_max_tokens)
+    )
     
     try:
         lock_ctx = _service_call_lock("vlm")

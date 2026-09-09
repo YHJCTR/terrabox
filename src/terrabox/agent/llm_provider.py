@@ -25,6 +25,7 @@ import random
 import fcntl
 import socket
 import time
+import uuid
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -221,8 +222,9 @@ def remote_llm_min_interval_seconds(provider: str) -> float:
 
     This is intentionally configurable, not a permanent concurrency ban. Set
     provider-specific env/yaml keys, or set the value to 0 to disable pacing.
-    LongCat defaults higher because AgentDojo single-worker rollouts can still
-    issue rapid multi-turn calls and trigger 429s.
+    LongCat defaults to a conservative 5-second gap because a single rollout
+    can still issue rapid multi-turn calls and trigger 429s. Formal watchers
+    should set the provider-specific value explicitly for reproducibility.
     """
 
     provider = (provider or "remote").strip().lower()
@@ -231,12 +233,12 @@ def remote_llm_min_interval_seconds(provider: str) -> float:
         or os.environ.get("TERRABOX_REMOTE_LLM_MIN_INTERVAL_SECONDS")
         or _yaml_get(f"{provider}_min_interval_seconds")
         or _yaml_get("remote_llm_min_interval_seconds")
-        or ("8.0" if provider == "longcat" else "1.0")
+        or ("5.0" if provider == "longcat" else "1.0")
     )
     try:
         return max(0.0, float(raw))
     except (TypeError, ValueError):
-        return 8.0 if provider == "longcat" else 1.0
+        return 5.0 if provider == "longcat" else 1.0
 
 
 def _remote_llm_rate_lock_path(provider: str) -> Path:
@@ -252,30 +254,240 @@ def _remote_llm_rate_lock_path(provider: str) -> Path:
     return Path(lock_dir) / f"remote_llm_{provider}.lock"
 
 
-def _pace_remote_llm_request(provider: str) -> None:
-    interval = remote_llm_min_interval_seconds(provider)
+def _remote_llm_state_path(lock_path: Path) -> Path:
+    return lock_path.with_name(f"{lock_path.name}.json")
+
+
+def _remote_llm_workload(value: str | None = None) -> str:
+    raw = value if value is not None else os.environ.get("TERRABOX_REMOTE_LLM_WORKLOAD")
+    if not raw:
+        return ""
+    return re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(raw).strip().lower())
+
+
+def _process_alive(pid: int, host: str | None) -> bool:
+    if pid <= 0:
+        return False
+    current_host = socket.gethostname()
+    if host and host != current_host:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        if getattr(exc, "errno", None) == getattr(os, "ESRCH", None):
+            return False
+        return True
+    return True
+
+
+def _remote_llm_load_state(path: Path) -> dict:
+    if not path.exists():
+        return {"version": 1, "last_grant": {}, "order": [], "queues": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("Resetting unreadable remote LLM pacing state: %s", path)
+        return {"version": 1, "last_grant": {}, "order": [], "queues": {}}
+    if not isinstance(data, dict):
+        return {"version": 1, "last_grant": {}, "order": [], "queues": {}}
+    if not isinstance(data.get("last_grant"), dict):
+        data["last_grant"] = {}
+    if not isinstance(data.get("order"), list):
+        data["order"] = []
+    if not isinstance(data.get("queues"), dict):
+        data["queues"] = {}
+    data.setdefault("version", 1)
+    return data
+
+
+def _remote_llm_save_state(path: Path, state: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+
+def _remote_llm_clean_state(state: dict, *, now: float, stale_after_seconds: float) -> None:
+    queues = state.setdefault("queues", {})
+    cleaned_queues: dict[str, list[dict]] = {}
+    for workload, entries in list(queues.items()):
+        normalized_workload = _remote_llm_workload(workload)
+        if not normalized_workload:
+            continue
+        if not isinstance(entries, list):
+            entries = []
+        kept: list[dict] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            pid = int(entry.get("pid") or 0)
+            host = str(entry.get("host") or "")
+            if _process_alive(pid, host):
+                kept.append(entry)
+        if kept:
+            cleaned_queues[normalized_workload] = kept
+    state["queues"] = cleaned_queues
+    order: list[str] = []
+    seen: set[str] = set()
+    for workload in state.get("order") or []:
+        normalized_workload = _remote_llm_workload(workload)
+        if normalized_workload and normalized_workload in cleaned_queues and normalized_workload not in seen:
+            order.append(normalized_workload)
+            seen.add(normalized_workload)
+    for workload in cleaned_queues:
+        if workload not in seen:
+            order.append(workload)
+            seen.add(workload)
+    state["order"] = order
+
+
+def _remote_llm_next_workload(state: dict, current_workload: str) -> str | None:
+    order = state.get("order") or []
+    queues = state.get("queues") or {}
+    if not order:
+        return None
+    last_grant = state.get("last_grant") or {}
+    last_workload = _remote_llm_workload(last_grant.get("workload") if isinstance(last_grant, dict) else None)
+    start = 0
+    if last_workload and last_workload in order:
+        start = (order.index(last_workload) + 1) % len(order)
+    for offset in range(len(order)):
+        workload = _remote_llm_workload(order[(start + offset) % len(order)])
+        if workload and queues.get(workload):
+            return workload
+    current_workload = _remote_llm_workload(current_workload)
+    return current_workload or None
+
+
+def pace_remote_llm_request(
+    provider: str,
+    workload: str | None = None,
+    interval: float | None = None,
+    lock_path: Path | str | None = None,
+) -> None:
+    interval = remote_llm_min_interval_seconds(provider) if interval is None else max(0.0, float(interval))
     if interval <= 0:
         return
-    lock_path = _remote_llm_rate_lock_path(provider)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        handle.seek(0)
-        raw = handle.read().strip()
-        try:
-            last = float(raw) if raw else 0.0
-        except ValueError:
-            last = 0.0
-        now = time.monotonic()
-        wait_s = interval - (now - last)
-        if wait_s > 0:
-            time.sleep(wait_s)
+    lock_path = Path(lock_path) if lock_path is not None else _remote_llm_rate_lock_path(provider)
+    workload = _remote_llm_workload(workload)
+    if not workload:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            handle.seek(0)
+            raw = handle.read().strip()
+            try:
+                last = float(raw) if raw else 0.0
+            except ValueError:
+                last = 0.0
             now = time.monotonic()
-        handle.seek(0)
-        handle.truncate()
-        handle.write(f"{now:.6f}")
-        handle.flush()
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            if last > now + max(interval, 60.0):
+                logger.warning(
+                    "Ignoring stale future remote LLM pacing timestamp: "
+                    "provider=%s last=%.3f now=%.3f lock=%s",
+                    provider,
+                    last,
+                    now,
+                    lock_path,
+                )
+                last = 0.0
+            wait_s = interval - (now - last)
+            if wait_s > 0:
+                time.sleep(wait_s)
+                now = time.monotonic()
+            handle.seek(0)
+            handle.truncate()
+            handle.write(f"{now:.6f}")
+            handle.flush()
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return
+
+    state_path = _remote_llm_state_path(lock_path)
+    host = socket.gethostname()
+    pid = os.getpid()
+    request_id = f"{host}:{pid}:{time.monotonic():.6f}:{uuid.uuid4().hex}"
+    poll_s = min(max(interval / 4.0, 0.25), 2.0)
+    stale_after_seconds = max(3600.0, interval * 720.0)
+
+    while True:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            now = time.monotonic()
+            state = _remote_llm_load_state(state_path)
+            last_grant = state.get("last_grant") or {}
+            last_mono = float(last_grant.get("mono") or 0.0) if isinstance(last_grant, dict) else 0.0
+            if last_mono > now + max(interval, 60.0):
+                logger.warning(
+                    "Ignoring stale future remote LLM pacing state: "
+                    "provider=%s workload=%s last=%.3f now=%.3f lock=%s",
+                    provider,
+                    workload,
+                    last_mono,
+                    now,
+                    lock_path,
+                )
+                state["last_grant"] = {}
+                last_mono = 0.0
+            _remote_llm_clean_state(state, now=now, stale_after_seconds=stale_after_seconds)
+            queues = state.setdefault("queues", {})
+            queue = queues.setdefault(workload, [])
+            if not isinstance(queue, list):
+                queue = []
+                queues[workload] = queue
+            entry = next((item for item in queue if isinstance(item, dict) and item.get("request_id") == request_id), None)
+            if entry is None:
+                entry = {
+                    "request_id": request_id,
+                    "pid": pid,
+                    "host": host,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                queue.append(entry)
+            else:
+                entry["updated_at"] = now
+            if workload not in state["order"]:
+                state["order"].append(workload)
+
+            next_workload = _remote_llm_next_workload(state, workload)
+            queue_head = queue[0] if queue else None
+            if (
+                next_workload == workload
+                and isinstance(queue_head, dict)
+                and queue_head.get("request_id") == request_id
+                and (now - last_mono) >= interval
+            ):
+                queue.pop(0)
+                if not queue:
+                    queues.pop(workload, None)
+                    state["order"] = [item for item in state["order"] if item != workload]
+                state["last_grant"] = {
+                    "workload": workload,
+                    "mono": now,
+                    "pid": pid,
+                    "host": host,
+                }
+                _remote_llm_save_state(state_path, state)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                return
+
+            if next_workload == workload:
+                wait_s = max(0.0, interval - (now - last_mono))
+            else:
+                wait_s = poll_s
+            _remote_llm_save_state(state_path, state)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        time.sleep(min(max(wait_s, 0.05), max(interval, poll_s)))
+
+
+def _pace_remote_llm_request(provider: str, workload: str | None = None) -> None:
+    pace_remote_llm_request(provider, workload=workload)
 
 
 def _retry_after_seconds(exc: BaseException) -> float | None:

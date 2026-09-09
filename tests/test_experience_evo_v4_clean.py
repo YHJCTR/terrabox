@@ -12,6 +12,13 @@ from terrabox.evolution.experience_evo.v4_clean.extractor import (
     extract_clean_transition_events_from_row,
 )
 from terrabox.evolution.experience_evo.v4_clean.runtime import ExperienceEvoV4CleanRuntime
+from terrabox.evolution.experience_evo.v4_clean.ablations import (
+    ExperienceEvoV4CleanNoQnrQuseRuntime,
+    ExperienceEvoV4CleanNoStepHintRuntime,
+    ExperienceEvoV4CleanNoVerifierRuntime,
+    ExperienceEvoV4CleanRandomRetrievalRuntime,
+    ExperienceEvoV4GenericGuardRuntime,
+)
 
 
 def _row() -> dict:
@@ -131,3 +138,51 @@ def test_build_v4_clean_writes_strict_manifest(tmp_path: Path):
     assert manifest["schema_version"] == 4
     event_text = (store / "events_v2.jsonl").read_text(encoding="utf-8")
     assert "benchmark-secret" not in event_text
+
+
+def test_core_ablation_contracts_keep_or_remove_only_intended_hooks(tmp_path: Path):
+    store = ExperienceEvoV2Store(tmp_path / "store")
+    family = _family(
+        "transition",
+        task_type="hidden_label",
+        tool="compute.calculator",
+        target="result:from:compute.calculator",
+    )
+    store.write_families([family])
+    kwargs = {
+        "current_product_state": ["task_request"],
+        "available_tools": {"compute.calculator"},
+    }
+
+    no_qnr = ExperienceEvoV4CleanNoQnrQuseRuntime(store.store_dir, top_k=1)
+    no_qnr_text = no_qnr.augment("Calculate the ratio.", **kwargs)
+    assert "Transition:" in no_qnr_text
+    assert "Qsig=" not in no_qnr_text
+    assert "Quse=" not in no_qnr_text
+    assert "Rsig=" not in no_qnr_text
+
+    no_step = ExperienceEvoV4CleanNoStepHintRuntime(store.store_dir, top_k=1)
+    assert "Transition:" in no_step.augment("Calculate the ratio.", **kwargs)
+    assert no_step.step_hint("Calculate the ratio.", **kwargs) == ""
+
+    no_verifier = ExperienceEvoV4CleanNoVerifierRuntime(store.store_dir, top_k=1)
+    no_verifier_text = no_verifier.augment("Calculate the ratio.", **kwargs)
+    assert "status=disabled" in no_verifier_text
+    assert "Verifier checkpoint" in no_verifier_text
+
+    random_a = ExperienceEvoV4CleanRandomRetrievalRuntime(store.store_dir, top_k=1)
+    random_b = ExperienceEvoV4CleanRandomRetrievalRuntime(store.store_dir, top_k=1)
+    assert [item.family_id for item in random_a.retrieve("unrelated query", **kwargs)] == [
+        item.family_id for item in random_b.retrieve("unrelated query", **kwargs)
+    ]
+
+
+def test_generic_guard_is_an_actual_guard_hook():
+    runtime = ExperienceEvoV4GenericGuardRuntime()
+    assert runtime.hard_guard_enabled is True
+    message = runtime.guard_tool_call(
+        "Calculate.",
+        "compute.calculator",
+        selected_args={},
+    )
+    assert "requires" in message

@@ -45,7 +45,7 @@ def get_prompt_augmenter(
     """Return a ready-to-use PromptAugmenter for the specified evolution method.
 
     Args:
-        method: One of "skillrl", "skillrl_rollout", "skillrl_full", "evoskill", "agentevolver", "memrl", "memrl_full", "memrl_full_source", "reflection", "experience_evo", "ace_playbook", "memento_casebank", "causalevo", "rewardevo", "graphskillevo", "seqgraphevo", "causaltextevo", "causalpolicyevo", "expel".
+        method: One of "skillrl", "skillrl_rollout", "skillrl_full", "evoskill", "agentevolver", "memrl", "memrl_full", "memrl_full_source", "reflection", "experience_evo", "ace_playbook", "memento_casebank", "evolver_lifecycle", "causalevo", "rewardevo", "graphskillevo", "seqgraphevo", "causaltextevo", "causalpolicyevo", "expel".
         store_dir: Directory containing evolution store. Defaults to
                    "evolution_store/{method}". For memrl, pass memory_db=...
         top_k: Number of skills/memories to inject per query.
@@ -209,6 +209,78 @@ def get_prompt_augmenter(
             q_use_smoothing_k=float(kwargs.get("q_use_smoothing_k", 5.0)),
         )
 
+    elif method in {"experience_evo_v5", "experienceevo_v5", "product_transition_evo_v5"}:
+        from .experience_evo.v5 import ExperienceEvoV5Runtime
+
+        v5_top_k = int(kwargs.get("v5_top_k", kwargs.get("v4_top_k", 3 if top_k == 5 else top_k)))
+        return ExperienceEvoV5Runtime(
+            store_dir or "evolution_store/experience_evo/oea_train2000_v4_clean",
+            top_k=v5_top_k,
+            min_q=float(kwargs.get("min_q", 0.0)),
+            max_risk=float(kwargs.get("max_risk", 0.75)),
+            q_use_smoothing_k=float(kwargs.get("q_use_smoothing_k", 5.0)),
+        )
+
+    elif method in {
+        "experience_evo_v5_hybrid",
+        "experience_evo_v5_hybrid_qwen",
+        "experienceevo_v5_hybrid",
+        "experienceevo_v5_hybrid_qwen",
+        "product_transition_evo_v5_hybrid",
+    }:
+        from .experience_evo.v5_hybrid import ExperienceEvoV5HybridRuntime
+
+        v5_top_k = int(kwargs.get("v5_top_k", kwargs.get("v4_top_k", 3 if top_k == 5 else top_k)))
+        return ExperienceEvoV5HybridRuntime(
+            store_dir or "evolution_store/experience_evo/oea_train2000_v4_clean",
+            top_k=v5_top_k,
+            min_q=float(kwargs.get("min_q", 0.0)),
+            max_risk=float(kwargs.get("max_risk", 0.75)),
+            q_use_smoothing_k=float(kwargs.get("q_use_smoothing_k", 5.0)),
+        )
+
+    elif method in {"experience_evo_v4_no_store_soft_only", "experienceevo_v4_no_store_soft_only"}:
+        from .experience_evo.v4_clean import ExperienceEvoV4NoStoreSoftRuntime
+
+        return ExperienceEvoV4NoStoreSoftRuntime()
+
+    elif method in {"experience_evo_v4_generic_guard", "experienceevo_v4_generic_guard"}:
+        from .experience_evo.v4_clean import ExperienceEvoV4GenericGuardRuntime
+
+        return ExperienceEvoV4GenericGuardRuntime()
+
+    elif method in {"experience_evo_v4_wo_qnr_quse", "experienceevo_v4_wo_qnr_quse"}:
+        from .experience_evo.v4_clean import ExperienceEvoV4CleanNoQnrQuseRuntime
+
+        return ExperienceEvoV4CleanNoQnrQuseRuntime(
+            store_dir or "evolution_store/experience_evo/oea_train2000_v4_clean",
+            top_k=int(kwargs.get("v4_top_k", 3 if top_k == 5 else top_k)),
+        )
+
+    elif method in {"experience_evo_v4_wo_step_hint", "experienceevo_v4_wo_step_hint"}:
+        from .experience_evo.v4_clean import ExperienceEvoV4CleanNoStepHintRuntime
+
+        return ExperienceEvoV4CleanNoStepHintRuntime(
+            store_dir or "evolution_store/experience_evo/oea_train2000_v4_clean",
+            top_k=int(kwargs.get("v4_top_k", 3 if top_k == 5 else top_k)),
+        )
+
+    elif method in {"experience_evo_v4_wo_verifier", "experienceevo_v4_wo_verifier"}:
+        from .experience_evo.v4_clean import ExperienceEvoV4CleanNoVerifierRuntime
+
+        return ExperienceEvoV4CleanNoVerifierRuntime(
+            store_dir or "evolution_store/experience_evo/oea_train2000_v4_clean",
+            top_k=int(kwargs.get("v4_top_k", 3 if top_k == 5 else top_k)),
+        )
+
+    elif method in {"experience_evo_v4_random_retrieval_control", "experienceevo_v4_random_retrieval_control"}:
+        from .experience_evo.v4_clean import ExperienceEvoV4CleanRandomRetrievalRuntime
+
+        return ExperienceEvoV4CleanRandomRetrievalRuntime(
+            store_dir or "evolution_store/experience_evo/oea_train2000_v4_clean",
+            top_k=int(kwargs.get("v4_top_k", 3 if top_k == 5 else top_k)),
+        )
+
     elif method in {"ace", "ace_playbook", "ace_style"}:
         from .ace_playbook.prompt_injector import ACEPlaybookPromptInjector
 
@@ -223,6 +295,15 @@ def get_prompt_augmenter(
         return MementoCaseBankPromptInjector(
             store_dir or "evolution_store/casebank",
             top_k=top_k,
+        )
+
+    elif method in {"evolver", "evolver_lifecycle", "evolver_lifecycle_strict", "evolver_adapted"}:
+        from .evolver_lifecycle.prompt_injector import EvolveRLifecyclePromptInjector
+
+        return EvolveRLifecyclePromptInjector(
+            store_dir or "evolution_store/evolver_lifecycle",
+            top_k=top_k,
+            threshold=float(kwargs.get("threshold", 0.0)),
         )
 
     elif method == "causalevo":
@@ -323,8 +404,8 @@ def get_prompt_augmenter(
         raise ValueError(
             f"Unknown evolution method: {method!r}. "
             f"Choose from: 'skillrl', 'skillrl_rollout', 'skillrl_full', 'evoskill', 'agentevolver', 'memrl', 'memrl_full', 'memrl_full_source', 'causalevo', "
-            f"'reflection', 'experience_evo', 'rewardevo', 'graphskillevo', 'seqgraphevo', 'causaltextevo', 'causalpolicyevo', "
-            f"'ace_playbook', 'memento_casebank', 'expel', 'selfcritic'"
+            f"'reflection', 'experience_evo', 'experience_evo_v5_hybrid_qwen', 'rewardevo', 'graphskillevo', 'seqgraphevo', 'causaltextevo', 'causalpolicyevo', "
+            f"'ace_playbook', 'memento_casebank', 'evolver_lifecycle', 'expel', 'selfcritic'"
         )
 
 

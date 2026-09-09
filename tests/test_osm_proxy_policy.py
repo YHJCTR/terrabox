@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from pathlib import Path
+import sqlite3
 
 from terrabox.toolkits import osm_gis
 
@@ -149,3 +150,75 @@ def test_get_area_boundary_rejects_excessive_buffer_before_geocode(monkeypatch):
     assert result["error_type"] == "osm_buffer_too_large"
     assert not fake_ox.geocode_to_gdf_called
     assert not fake_ox.geocode_called
+
+
+def _make_gpkg_catalog(path, *, contents=None, table=False, matrix=False, geometry=False):
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE gpkg_contents (table_name TEXT, data_type TEXT)")
+        conn.execute("CREATE TABLE gpkg_tile_matrix (table_name TEXT)")
+        if geometry:
+            conn.execute(
+                "CREATE TABLE gpkg_geometry_columns "
+                "(table_name TEXT, column_name TEXT)"
+            )
+        if table:
+            conn.execute("CREATE TABLE NDVI_Change (tile_data BLOB)")
+        if contents is not None:
+            conn.execute("INSERT INTO gpkg_contents VALUES (?, ?)", ("NDVI_Change", contents))
+        if matrix:
+            conn.execute("INSERT INTO gpkg_tile_matrix VALUES (?)", ("NDVI_Change",))
+        if geometry:
+            conn.execute(
+                "INSERT INTO gpkg_geometry_columns VALUES (?, ?)",
+                ("NDVI_Change", "geometry"),
+            )
+
+
+def test_gpkg_existing_layer_type_distinguishes_catalog_states(tmp_path):
+    missing = tmp_path / "missing.gpkg"
+    _make_gpkg_catalog(missing)
+    assert osm_gis._gpkg_existing_layer_type(str(missing), "NDVI_Change") is None
+
+    complete = tmp_path / "complete.gpkg"
+    _make_gpkg_catalog(complete, contents="tiles", table=True, matrix=True)
+    assert osm_gis._gpkg_existing_layer_type(str(complete), "NDVI_Change") == "tiles"
+
+    orphan = tmp_path / "orphan.gpkg"
+    _make_gpkg_catalog(orphan, contents="tiles", table=True)
+    assert osm_gis._gpkg_existing_layer_type(str(orphan), "NDVI_Change") == "incomplete"
+
+    wrong_type = tmp_path / "wrong_type.gpkg"
+    _make_gpkg_catalog(wrong_type, contents="attributes", table=True)
+    assert osm_gis._gpkg_existing_layer_type(str(wrong_type), "NDVI_Change") == "wrong_type:attributes"
+
+    vector = tmp_path / "vector.gpkg"
+    _make_gpkg_catalog(vector, contents="features", table=True, geometry=True)
+    assert osm_gis._gpkg_existing_layer_type(str(vector), "NDVI_Change") == "features"
+
+
+def test_vector_layer_writer_does_not_rewrite_existing_layer(monkeypatch, tmp_path):
+    gpkg = tmp_path / "vector.gpkg"
+    _make_gpkg_catalog(gpkg, contents="features", table=True, geometry=True)
+
+    class _ShouldNotWrite:
+        def to_file(self, *args, **kwargs):
+            raise AssertionError("existing vector layer was rewritten")
+
+    result = osm_gis._write_vector_layer_once(str(gpkg), "NDVI_Change", _ShouldNotWrite())
+
+    assert result["status"] == "success"
+    assert result["reused"] is True
+
+
+def test_gpkg_inspection_failure_is_not_treated_as_missing(monkeypatch, tmp_path):
+    gpkg = tmp_path / "unreadable.gpkg"
+
+    def fail_connect(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(osm_gis.sqlite3, "connect", fail_connect)
+    assert osm_gis._gpkg_existing_layer_type(str(gpkg), "NDVI_Change") == "inspection_error"
+    response = osm_gis._existing_index_layer_response(
+        str(gpkg), "NDVI_Change", "inspection_error"
+    )
+    assert response["error_type"] == "gpkg_inspection_failed"

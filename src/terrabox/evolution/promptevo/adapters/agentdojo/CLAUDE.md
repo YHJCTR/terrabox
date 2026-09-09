@@ -67,11 +67,24 @@ without modifying that checkout.
 - If the conda environment is read-only, install missing AgentDojo-only packages
   into `tmp/agentdojo_site_packages/`; core preflight and runner add it to
   `PYTHONPATH` automatically. Do not fall back to `/home/*/.local`.
+- Do not treat copied `tmp/agentdojo_site_packages/` as portable across servers:
+  binary wheels such as `cryptography` may require a newer glibc than the target
+  machine provides. After `sshpass`/rsync migration, run `pipeline preflight`;
+  if it reports glibc/import errors from this layer, move the directory aside and
+  rebuild only the missing AgentDojo dependencies in-place before any formal run.
 - Stage1 must sample both security and utility failures. Stage2 must compare the
   same Base/Stage1 task IDs and explicitly protect security while improving
   utility. ProtocolPatch v2 uses a fixed real dev slice, three candidates per
   stage, and resumable `optimization/stage1_protocol_patch.json` and
   `optimization/stage2_protocol_patch.json` checkpoints.
+- 历史正式口径里的“三阶段”指 Base / Stage1 / Stage2。可选 Stage3 是
+  post-Stage2 refinement，不替代 Stage2：它以 Stage2 prompt 为当前基线，比较
+  Stage1 与 Stage2 的同任务轨迹，只提出小幅 protocol patch 来修复 Stage2 引入的回归，
+  并继续使用同一固定真实 dev slice 验证；候选没有通过接受门时保留 Stage2。
+  可通过 `pipeline.py stage3-after-stage2` 单独接在已完成的 Stage2 后，也可在
+  `chain-after-base` 中显式传入 `--stage3-group` 与 `--stage3-version` 自动接上。
+  Stage3 的可恢复检查点为 `optimization/stage3_protocol_patch.json`，且必须继续保护
+  AgentDojo security gate，不允许用明显安全回归换取 utility 改善。
 - To intentionally test LongCat2 as the executable AgentDojo agent, pass
   `--agent-provider longcat`. This uses upstream `OPENAI_COMPATIBLE` provider,
   the same suites/attacks/evaluators/result-count checks, and does not start
@@ -89,10 +102,11 @@ without modifying that checkout.
   `TERRABOX_AGENTDOJO_QUEUE_RETRIES` finite (default 12), and do not synthesize
   these as evaluator failures. Even with `TERRABOX_AGENTDOJO_API_WORKERS=1`,
   one AgentDojo sample can issue many rapid model calls, so external API
-  requests are cross-process paced by `TERRABOX_AGENTDOJO_API_MIN_INTERVAL_SECONDS`
-  (LongCat default 10.0s) using the shared
+  requests are cross-process paced by the shared Terrabox
+  `pace_remote_llm_request` limiter, using workload
+  `TERRABOX_REMOTE_LLM_WORKLOAD=agentdojo` by default and the shared
   `tmp/service_locks/remote_llm_longcat.lock` by default. This must be shared
-  with any concurrent LongCat rollout, including ExperienceEvo. Legacy
+  with any concurrent LongCat rollout, including ExperienceEvo and tau2. Legacy
   `TERRABOX_AGENTDOJO_LONGCAT_MIN_INTERVAL_SECONDS` / `_RATE_LOCK` remain aliases,
   but new watcher scripts should use the generic API names. LongCat
   OpenAI-compatible calls must disable `thinking` explicitly and must not forward
@@ -103,9 +117,7 @@ without modifying that checkout.
   wedged HTTPS request cannot stall the whole watcher overnight.
 - New formal PromptEvo chains default to meta-prompt v2; select v1 explicitly
   only to reproduce a historical chain. Stage1 v2 and Stage2 v2 are intentionally
-  different: Stage1 reads one
-  Stage1 v2 and Stage2 v2 are intentionally different: Stage1 reads one
-  version's traces to propose a conservative first edit; Stage2 reads the exact
+  different: Stage1 reads one version's traces to propose a conservative first edit; Stage2 reads the exact
   Base->Stage1 prompt diff plus paired task traces to keep gains and narrowly
   repair regressions. Do not collapse them into one shared meta prompt.
 - For controlled prompt ablations, save the ablated prompt as a normal

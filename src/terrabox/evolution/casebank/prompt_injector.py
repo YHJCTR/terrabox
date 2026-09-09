@@ -17,6 +17,10 @@ class MementoCaseBankPromptInjector(PromptAugmenter):
         self.top_k = top_k
         self.semantic_index: CaseBankEmbeddingIndex | None = None
         retrieval = os.environ.get("TERRABOX_CASEBANK_RETRIEVAL", "lexical").strip().lower()
+        if self.bank.manifest.get("strict_nolabel") and retrieval not in {"qwen", "semantic", "embedding"}:
+            raise RuntimeError(
+                "Strict CaseBank requires TERRABOX_CASEBANK_RETRIEVAL=qwen; lexical fallback is not allowed."
+            )
         if retrieval in {"qwen", "semantic", "embedding"}:
             self.semantic_index = CaseBankEmbeddingIndex(store_dir, required=True)
 

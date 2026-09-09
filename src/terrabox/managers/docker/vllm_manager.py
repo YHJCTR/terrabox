@@ -25,6 +25,7 @@ from ..base_manager import BaseServiceManager
 from ..resource_allocator import (
     acquire_docker_lease,
     find_reusable_managed_lease,
+    is_port_available,
     labels_for_lease,
     record_service_event,
     remove_container_if_exists,
@@ -117,6 +118,37 @@ class VLLMDockerManager(BaseServiceManager):
                 cls.MIN_IMAGE_MODEL_LEN,
             )
             cls.MAX_MODEL_LEN = int(cls.MIN_IMAGE_MODEL_LEN)
+
+    @classmethod
+    def _startup_timeout_seconds(cls) -> int:
+        try:
+            return max(5, int(os.environ.get("TERRABOX_VLM_STARTUP_TIMEOUT_SECONDS", "900")))
+        except ValueError:
+            return 900
+
+    @classmethod
+    def _compatible_adopted_lease(cls):
+        return find_reusable_managed_lease(
+            service="vlm",
+            image=cls.DOCKER_IMAGE,
+            container_base=cls.CONTAINER_BASE,
+            host=cls.HOST,
+            internal_port=8000,
+            required_model_path=cls.MODEL_PATH,
+            required_cmd_args={
+                "--tensor-parallel-size": cls.TENSOR_PARALLEL_SIZE,
+                "--max-model-len": str(cls.MAX_MODEL_LEN),
+            },
+            health_check=cls._is_healthy_on_port,
+        )
+
+    @classmethod
+    def _adopt_lease(cls, lease) -> None:
+        cls._lease = lease
+        cls.CONTAINER_NAME = lease.container_name
+        cls.PORT = lease.port
+        cls.API_BASE = f"http://{cls.HOST}:{cls.PORT}/v1"
+        logger.info("Adopted existing vLLM container %s on port %s", lease.container_name, lease.port)
 
     @classmethod
     def _apply_env_overrides(cls):
@@ -384,26 +416,37 @@ class VLLMDockerManager(BaseServiceManager):
             )
             cls.stop_service()
 
-        adopted = find_reusable_managed_lease(
-            service="vlm",
-            image=cls.DOCKER_IMAGE,
-            container_base=cls.CONTAINER_BASE,
-            host=cls.HOST,
-            internal_port=8000,
-            required_model_path=cls.MODEL_PATH,
-            required_cmd_args={
-                "--tensor-parallel-size": cls.TENSOR_PARALLEL_SIZE,
-                "--max-model-len": str(cls.MAX_MODEL_LEN),
-            },
-            health_check=cls._is_healthy_on_port,
-        )
+        adopted = cls._compatible_adopted_lease()
         if adopted is not None:
-            cls._lease = adopted
-            cls.CONTAINER_NAME = adopted.container_name
-            cls.PORT = adopted.port
-            cls.API_BASE = f"http://{cls.HOST}:{cls.PORT}/v1"
-            logger.info("Adopted existing vLLM container %s on port %s", adopted.container_name, adopted.port)
+            cls._adopt_lease(adopted)
             return
+
+        # External-API OEA watchers keep one VLM service warm for the GPU lane.
+        # During cold load the pinned port can be occupied but not yet healthy;
+        # starting a second VLM on the same GPU just OOMs. In warm-service mode,
+        # wait for the existing service instead of allocating an alternate port.
+        if (
+            os.environ.get("TERRABOX_KEEP_VLM_WARM", "").strip().lower()
+            in {"1", "true", "yes", "on"}
+            and not is_port_available(cls.PORT, cls.HOST)
+        ):
+            deadline = time.time() + cls._startup_timeout_seconds()
+            logger.info(
+                "VLM port %s is occupied but not healthy; waiting for warm service before launching another container.",
+                cls.PORT,
+            )
+            while time.time() < deadline:
+                adopted = cls._compatible_adopted_lease()
+                if adopted is not None:
+                    cls._adopt_lease(adopted)
+                    return
+                if cls.is_running():
+                    return
+                time.sleep(5)
+            raise RuntimeError(
+                f"VLM port {cls.PORT} is occupied but no compatible healthy service became ready "
+                f"within {cls._startup_timeout_seconds()}s."
+            )
 
         cls._start_docker()
 
@@ -411,12 +454,7 @@ class VLLMDockerManager(BaseServiceManager):
         # Cold-loading a multimodal checkpoint is infrastructure setup, not an
         # inference request.  Callers that prewarm the service can raise this
         # budget without changing normal per-tool request timeouts.
-        try:
-            startup_timeout_seconds = max(
-                5, int(os.environ.get("TERRABOX_VLM_STARTUP_TIMEOUT_SECONDS", "900"))
-            )
-        except ValueError:
-            startup_timeout_seconds = 900
+        startup_timeout_seconds = cls._startup_timeout_seconds()
         max_retries = max(1, (startup_timeout_seconds + 4) // 5)
         for i in range(max_retries):
             if cls.is_running():

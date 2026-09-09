@@ -177,6 +177,8 @@ def run_sequential_react_loop(
     premature_final_guard_enabled = bool(getattr(evolution_augmenter, "premature_final_guard_enabled", True))
     hard_guard_enabled = bool(getattr(evolution_augmenter, "hard_guard_enabled", True))
     allow_synthetic_final_answer = bool(getattr(evolution_augmenter, "allow_synthetic_final_answer", True))
+    final_answer_guard_max_calls = int(getattr(evolution_augmenter, "final_answer_guard_max_calls", 0) or 0)
+    final_answer_guard_calls = 0
 
     def maybe_append_evolution_hint(step: int) -> None:
         nonlocal last_step_hint, last_hint_trace_index, answer_ready_guard_active, answer_ready_trace_index
@@ -404,6 +406,65 @@ def run_sequential_react_loop(
                 trace.update(update)
                 answer_ready_guard_active = False
                 answer_ready_trace_index = None
+            if (
+                evolution_augmenter is not None
+                and final_answer_guard_calls < final_answer_guard_max_calls
+                and hasattr(evolution_augmenter, "final_answer_guard")
+            ):
+                try:
+                    current_state = product_state_tokens(artifact_state)
+                    kwargs = {
+                        "draft_answer": ai_msg.content or "",
+                        "task_type": task_type,
+                        "current_product_state": current_state,
+                        "available_tools": available_tools,
+                        "images": image_paths,
+                        "data_files": data_files,
+                        "artifact_state": artifact_state,
+                        "step": _step,
+                    }
+                    method = evolution_augmenter.final_answer_guard
+                    signature = inspect.signature(method)
+                    params = signature.parameters
+                    accepts_kwargs = any(
+                        param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()
+                    )
+                    if accepts_kwargs:
+                        guard = method(task_question, **kwargs)
+                    else:
+                        accepted = {key: value for key, value in kwargs.items() if key in params}
+                        guard = method(task_question, **accepted)
+                except Exception as exc:
+                    guard = ""
+                    evolution_trace.append(
+                        {"step": _step, "error": f"final_answer_guard {type(exc).__name__}: {exc}"}
+                    )
+                guard = str(guard or "").strip()
+                final_answer_guard_calls += 1
+                if guard:
+                    if trace_index is not None and 0 <= trace_index < len(evolution_trace):
+                        evolution_trace[trace_index].update(
+                            {
+                                "model_decision": "blocked_by_final_answer_verifier",
+                                "selected_tool": None,
+                                "selected_in_recommendations": None,
+                                "draft_answer_preview": strip_think(ai_msg.content or "")[:700],
+                                "final_answer_guard_preview": guard[:1500],
+                            }
+                        )
+                    else:
+                        evolution_trace.append(
+                            {
+                                "step": _step,
+                                "product_state": product_state_tokens(artifact_state),
+                                "model_decision": "blocked_by_final_answer_verifier",
+                                "draft_answer_preview": strip_think(ai_msg.content or "")[:700],
+                                "final_answer_guard_preview": guard[:1500],
+                            }
+                        )
+                    messages.append(ai_msg)
+                    messages.append(HumanMessage(content=guard))
+                    continue
             messages.append(ai_msg)
             return messages, ai_msg.content or ""
 

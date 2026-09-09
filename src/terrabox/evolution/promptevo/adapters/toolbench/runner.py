@@ -13,9 +13,14 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+
+from openai import OpenAI
+
+from terrabox.agent.llm_provider import pace_remote_llm_request
 
 from .core import (
     DEFAULT_STABLE_TOOLBENCH_ROOT,
@@ -129,6 +134,82 @@ def _install_stable_import_compat() -> None:
     try:
         chatgpt_model = importlib.import_module("toolbench.inference.LLM.chatgpt_model")
         sys.modules.setdefault("toolbench.inference.LLM.chatgpt_function_model", chatgpt_model)
+        if os.getenv("TERRABOX_TOOLBENCH_REQUEST_PROFILE", "").strip().lower() == "longcat":
+            def _longcat_chat_completion_request(
+                key,
+                base_url,
+                messages,
+                tools=None,
+                tool_choice="required",
+                key_pos=None,
+                model="LongCat-2.0",
+                stop=None,
+                process_id=0,
+                **args,
+            ):
+                use_messages = [
+                    message
+                    for message in messages
+                    if not ("valid" in message and message.get("valid") is False)
+                ]
+                for message in use_messages:
+                    message.pop("function_call", None)
+                payload = {
+                    "model": model,
+                    "temperature": 0,
+                    "messages": use_messages,
+                    "max_tokens": int(os.getenv("TERRABOX_TOOLBENCH_LONGCAT_MAX_TOKENS", "1024")),
+                    "frequency_penalty": 0,
+                    "presence_penalty": 0,
+                    "extra_body": {"thinking": {"type": "disabled"}},
+                    **args,
+                }
+                if stop is not None:
+                    payload["stop"] = stop
+                if tools is not None:
+                    payload["tools"] = tools
+                if tool_choice is not None:
+                    payload["tool_choice"] = tool_choice
+                pace_remote_llm_request(
+                    "longcat",
+                    workload=os.getenv("TERRABOX_REMOTE_LLM_WORKLOAD", "toolbench"),
+                )
+                client = OpenAI(base_url=base_url, api_key=key)
+                response = client.chat.completions.create(**payload)
+                return response.model_dump()
+
+            def _longcat_parse(self, tools, process_id, key_pos=None, **args):
+                """StableToolBench's ChatGPT parser without upstream pdb breakpoints."""
+                response: dict[str, Any] | None = None
+                for attempt in range(self.TRY_TIME):
+                    if attempt:
+                        time.sleep(min(15, 2 ** attempt))
+                    try:
+                        response = _longcat_chat_completion_request(
+                            self.openai_key,
+                            self.base_url,
+                            self.conversation_history,
+                            tools=tools or None,
+                            process_id=process_id,
+                            key_pos=key_pos,
+                            model=self.model,
+                            **args,
+                        )
+                        total_tokens = int((response.get("usage") or {}).get("total_tokens") or 0)
+                        message = dict(response["choices"][0]["message"])
+                        if process_id == 0:
+                            print(f"[process({process_id})] total tokens: {total_tokens}")
+                        return message, 0, total_tokens
+                    except Exception as exc:
+                        print(
+                            f"[process({process_id})] LongCat completion/parse failed "
+                            f"({attempt + 1}/{self.TRY_TIME}): {exc!r}",
+                            flush=True,
+                        )
+                return {"role": "assistant", "content": str(response)}, -1, 0
+
+            chatgpt_model.chat_completion_request = _longcat_chat_completion_request
+            chatgpt_model.ChatGPTFunction.parse = _longcat_parse
     except Exception:
         pass
 
@@ -225,6 +306,7 @@ class StableToolBenchRunConfig:
     config_file: str = ""
     method: str = "DFS_woFilter_w2"
     backbone_model: str = "qwen2"
+    chatgpt_model: str = "gpt-4-turbo-2024-04-09"
     model_path: str = "qwen2"
     vllm_api_base: str = "http://127.0.0.1:8084/v1/"
     service_url: str = "http://localhost:8081/virtual"
@@ -243,6 +325,7 @@ class StableToolBenchRunConfig:
     lora: bool = False
     lora_path: str = ""
     extra_args: list[str] = field(default_factory=list)
+    env_overrides: dict[str, str] = field(default_factory=dict)
 
     def resolved_config_file(self) -> str:
         return self.config_file or os.path.join(self.stable_root, "config.yml")
@@ -260,6 +343,8 @@ class StableToolBenchRunConfig:
             prompt_file,
             "--backbone-model",
             self.backbone_model,
+            "--chatgpt-model",
+            self.chatgpt_model,
             "--model-path",
             self.model_path,
             "--max-observation-length",
@@ -376,6 +461,7 @@ class StableToolBenchRolloutRunner:
             "output_answer_file": output_answer_file,
             "method": cfg.method,
             "backbone_model": cfg.backbone_model,
+            "chatgpt_model": cfg.chatgpt_model,
             "model_path": cfg.model_path,
             "vllm_api_base": cfg.vllm_api_base,
             "service_url": cfg.service_url,
@@ -407,6 +493,7 @@ class StableToolBenchRolloutRunner:
 
         env = os.environ.copy()
         env["PYTHONPATH"] = _toolbench_pythonpath(cfg.stable_root, env.get("PYTHONPATH", ""))
+        env.update(cfg.env_overrides)
         env["VLLM_API_BASE"] = cfg.vllm_api_base
         env["SERVICE_URL"] = cfg.service_url
         env.setdefault("no_proxy", "localhost,127.0.0.1")
@@ -493,8 +580,8 @@ def _run_stable_official(args: argparse.Namespace) -> int:
     _install_stable_import_compat()
 
     config = _config_with_absolute_paths(args.config_file, stable_root)
-    os.environ["OPENAI_API_BASE"] = str(config.get("api_base") or "")
-    os.environ["OPENAI_KEY"] = str(config.get("api_key") or "")
+    os.environ["OPENAI_API_BASE"] = str(os.getenv("OPENAI_API_BASE") or config.get("api_base") or "")
+    os.environ["OPENAI_KEY"] = str(os.getenv("OPENAI_KEY") or config.get("api_key") or "")
     os.environ["TOOLBENCH_KEY"] = str(config.get("toolbench_key") or "")
     os.environ["TOOL_ROOT_DIR"] = str(config.get("tool_root_dir") or os.path.join(stable_root, "server", "tools"))
     os.environ["VLLM_API_BASE"] = args.vllm_api_base

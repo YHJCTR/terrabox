@@ -169,8 +169,19 @@ def _steps_from_messages(messages: list[dict]) -> list[Step]:
                     )
                 )
             else:
-                steps.append(Step(role="assistant", text=content))
-        elif role == "function":
+                for tool_call in msg.get("tool_calls") or []:
+                    function = tool_call.get("function") or {}
+                    steps.append(
+                        Step(
+                            role="assistant",
+                            text=content,
+                            tool=str(function.get("name") or ""),
+                            args=_parse_args(function.get("arguments")),
+                        )
+                    )
+                if not msg.get("tool_calls"):
+                    steps.append(Step(role="assistant", text=content))
+        elif role in ("function", "tool"):
             steps.append(Step(role="tool", text=content, errored=_tool_error(content)))
     return steps
 
@@ -239,6 +250,46 @@ def _all_nodes(data: dict) -> list[dict]:
         if isinstance(chain, list):
             nodes.extend(x for x in chain if isinstance(x, dict))
     return nodes
+
+
+def _preferred_tree_path(data: dict) -> list[dict]:
+    """Return one representative DFS path for prompt diagnosis.
+
+    Metrics need all nodes to count search cost and error exposure, but sibling
+    nodes are alternative branches and must not be concatenated into one fake
+    conversation for the optimizer.
+    """
+    root = (data.get("tree") or {}).get("tree") or {}
+    if not isinstance(root, dict) or not root:
+        return []
+
+    paths: list[list[dict]] = []
+
+    def walk(node: dict, path: list[dict]) -> None:
+        current = path + [node]
+        children = [child for child in node.get("children") or [] if isinstance(child, dict)]
+        if not children:
+            paths.append(current)
+            return
+        for child in children:
+            walk(child, current)
+
+    walk(root, [])
+    if not paths:
+        return []
+
+    def rank(path: list[dict]) -> tuple[int, int, int, float, int]:
+        codes = {node.get("observation_code") for node in path}
+        completed = any(bool(node.get("finished") or node.get("is_terminal")) for node in path)
+        return (
+            int(completed),
+            int(3 in codes),
+            int(not bool(path[-1].get("pruned"))),
+            max(float(node.get("Elo") or 0.0) for node in path),
+            len(path),
+        )
+
+    return max(paths, key=rank)
 
 
 def _called_tools_from_steps(steps: list[Step]) -> list[str]:
@@ -366,6 +417,13 @@ class ToolBenchTrajectorySource:
     def _to_trace(self, path: str, data: dict, success: bool) -> Trace:
         steps = _steps_from_messages(_last_train_messages(data))
         if not steps:
+            # DFS/DFSDT commonly stores the actual rollout only in the nested
+            # tree. Empty traces make the optimizer infer generic advice
+            # without seeing tool failures or the Finish decision.
+            steps = _steps_from_nodes(_preferred_tree_path(data))
+        if not steps:
+            # Keep compatibility with CoT/single-chain and older DFS exports
+            # that contain a linear candidate but no nested tree.
             steps = _steps_from_nodes(_linear_nodes_from_result(data))
         return Trace(
             task_id=_task_id_from_path(path),
@@ -383,7 +441,7 @@ class ToolBenchTrajectorySource:
             if not data:
                 continue
             ag = data.get("answer_generation") or {}
-            success = bool(ag.get("valid_data") or data.get("win"))
+            success = bool(data["win"]) if "win" in data else bool(ag.get("valid_data"))
             yield self._to_trace(path, data, success)
 
 
@@ -392,9 +450,9 @@ class ToolBenchMetricProvider:
 
     If ``tool_eval_label_fn`` is provided and returns a ToolEval label file for
     an experiment, ``success`` and ``pass_rate`` use those labels. Otherwise
-    success falls back to ToolBench's structural ``valid_data`` / ``win`` flag,
-    which means the agent reached ``Finish(give_answer)`` rather than a judged
-    task pass.
+    success falls back to the official top-level ``win`` flag when present;
+    older outputs without that flag use ``valid_data`` as a compatibility
+    fallback.
     """
 
     def __init__(
@@ -409,10 +467,12 @@ class ToolBenchMetricProvider:
         task_id = _task_id_from_path(path)
         ag = data.get("answer_generation") or {}
         steps = _steps_from_messages(_last_train_messages(data))
-        if not steps:
-            steps = _steps_from_nodes(_linear_nodes_from_result(data))
-        tools = _called_tools_from_steps(steps)
         nodes = _all_nodes(data)
+        if not steps:
+            # DFS outputs commonly omit train_messages and compare_candidates.
+            # Their complete action trace is stored in the nested result tree.
+            steps = _steps_from_nodes(nodes)
+        tools = _called_tools_from_steps(steps)
         codes = [
             n.get("observation_code")
             for n in nodes
@@ -423,7 +483,10 @@ class ToolBenchMetricProvider:
         invalid_input = sum(1 for c in codes if c == 2)
         transient = sum(1 for c in codes if c in _TRANSIENT_CODES)
         error_calls = sum(1 for c in codes if c not in (0, 3))
-        structural_success = bool(ag.get("valid_data") or data.get("win"))
+        # ``valid_data`` means the answer structure was accepted by the
+        # upstream pipeline; it can still be true for ``finish_type=give_up``.
+        # ``win`` is the stronger official structural outcome when present.
+        structural_success = bool(data["win"]) if "win" in data else bool(ag.get("valid_data"))
         judged = labels.get(task_id)
         success = structural_success if judged is None else judged
         max_repeat = _max_repeat([t for t in tools if t != "Finish"])
@@ -457,12 +520,14 @@ class ToolBenchMetricProvider:
             "error_calls": error_calls,
             "observation_codes": Counter(codes),
         }
-        # ToolBench has no gold tool list in rollout output; use structural
-        # success/pass labels as the primary scalar expected by promptevo.
+        # ToolBench rollout JSON has no gold tool list, and a boolean ToolEval
+        # pass label is not a tool-F1 value. Keep this field unavailable until
+        # a true tool-level evaluator is wired in.
+        tool_f1 = 0.0
         return TaskMetric(
             task_id=task_id,
             success=success,
-            tool_f1=1.0 if success else 0.0,
+            tool_f1=tool_f1,
             failure_flags=flags,
             extra=extra,
         )
@@ -518,9 +583,10 @@ class ToolBenchMetricProvider:
 
     def metric_specs(self) -> list[MetricSpec]:
         return [
-            MetricSpec("success_rate", "Primary success rate. Uses ToolEval labels when provided; otherwise uses ToolBench structural valid_data/win.", "higher_better"),
+            MetricSpec("success_rate", "Primary success rate. Uses ToolEval labels when provided; otherwise uses the official ToolBench win flag.", "higher_better"),
             MetricSpec("pass_rate", "ToolEval judged pass rate when a ToolEval label file is supplied.", "higher_better"),
-            MetricSpec("structural_success_rate", "Rate of rollouts that reached Finish(give_answer); not a semantic correctness metric.", "higher_better"),
+            MetricSpec("tool_f1", "Tool-level F1 is unavailable without an external ToolEval label file; zero means unavailable, not zero tool quality.", "neutral"),
+            MetricSpec("structural_success_rate", "Rate of rollouts with the official ToolBench win flag; not a semantic pass-rate substitute.", "higher_better"),
             MetricSpec("avg_tool_calls", "Average non-Finish tool calls per task; high values often indicate over-exploration.", "lower_better"),
             MetricSpec("avg_query_count", "Average LLM calls per task.", "lower_better"),
             MetricSpec("avg_total_tokens", "Average generated token count reported by ToolBench.", "lower_better"),

@@ -83,16 +83,20 @@ These two are enough for first-stage prompt proposal.
   pacing because multi-turn agent tasks can burst requests even at low job
   concurrency; set the interval to `0` only for a deliberate high-concurrency
   rerun.
+- LongCat-heavy adapters must share the same remote-provider lock and JSON
+  fairness state. Set `TERRABOX_REMOTE_LLM_WORKLOAD` to a stable workload name
+  such as `tau2` or `experienceevo`; when both workloads are waiting, the shared
+  pacer rotates request grants by workload. If only one workload is waiting, it
+  may continue using the configured provider interval. Do not create a separate
+  adapter lock to bypass the service-level LongCat limit, and restart the
+  watcher/rollout parent after changing pacing or workload env vars.
 - Adapters that bypass `RemoteChatClient` and call an upstream OpenAI-compatible
   SDK directly must implement equivalent cross-process pacing and finite queue
   retries. A single worker can still issue many rapid API calls inside one
-  agent sample, so do not assume `API_WORKERS=1` is enough to avoid 429s. Prefer
-  adapter-specific generic knobs like `TERRABOX_AGENTDOJO_API_MIN_INTERVAL_SECONDS`
-  / `TERRABOX_AGENTDOJO_API_RATE_LOCK` and
-  `TERRABOX_TAU2_API_MIN_INTERVAL_SECONDS` / `TERRABOX_TAU2_API_RATE_LOCK`,
-  while retaining provider-specific aliases for backward compatibility. If
-  pacing env vars change, restart the watcher or rollout parent process;
-  already-running Python parents keep their old env.
+  agent sample, so do not assume `API_WORKERS=1` is enough to avoid 429s. Route
+  direct SDK calls through the same shared provider pacer; adapter-specific env
+  names may remain only as compatibility aliases for interval settings, not as
+  an independent rate-limit lock.
 
 ## Trace rendering
 

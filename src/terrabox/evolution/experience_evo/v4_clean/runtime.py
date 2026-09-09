@@ -28,6 +28,26 @@ class ExperienceEvoV4CleanRuntime(ExperienceEvoV4Runtime):
         self.store = ExperienceEvoV2Store(store_dir)
         self._families = self.store.load_families()
 
+    def _retrieval_family_allowed(self, family: TransitionFamily) -> bool:
+        """Hook for causal controls; the default keeps v4-clean filtering."""
+        exp = family.product_experience
+        return exp.q >= self.min_q and exp.risk <= self.max_risk
+
+    def _retrieval_policies(
+        self,
+        family: TransitionFamily,
+        *,
+        available_tools: set[str] | None,
+    ) -> list[dict[str, object]]:
+        return self._rank_tool_policies(family, available_tools=available_tools)
+
+    def _retrieval_quality_score(self, family: TransitionFamily) -> float:
+        exp = family.product_experience
+        return exp.q + min(exp.n, 12) * 0.04 + (0.2 if family.status == "positive" else 0.0)
+
+    def _retrieval_risk_penalty(self, family: TransitionFamily) -> float:
+        return family.product_experience.risk * 3.0
+
     def retrieve(
         self,
         user_query: str,
@@ -47,14 +67,13 @@ class ExperienceEvoV4CleanRuntime(ExperienceEvoV4Runtime):
 
         candidates: list[tuple[TransitionFamily, float, float, set[str]]] = []
         for family in self._families:
-            exp = family.product_experience
-            if exp.q < self.min_q or exp.risk > self.max_risk:
+            if not self._retrieval_family_allowed(family):
                 continue
             if not _preconditions_match(current_state, family.input_product_state):
                 continue
             if state_satisfies(current_state, family.target_product_state):
                 continue
-            policies = self._rank_tool_policies(family, available_tools=available_tools)
+            policies = self._retrieval_policies(family, available_tools=available_tools)
             if not policies:
                 continue
             tools = [str(item["policy"].tool) for item in policies if isinstance(item["policy"], ToolPolicy)]
@@ -85,10 +104,11 @@ class ExperienceEvoV4CleanRuntime(ExperienceEvoV4Runtime):
         structured_rank = {idx: rank for rank, idx in enumerate(structured_order, 1)}
         scored: list[tuple[float, TransitionFamily]] = []
         for idx, (family, structured, _overlap, _tokenset) in enumerate(candidates):
-            exp = family.product_experience
             rrf = 1.0 / (60 + lexical_rank[idx]) + 1.0 / (60 + structured_rank[idx])
-            quality = exp.q + min(exp.n, 12) * 0.04 + (0.2 if family.status == "positive" else 0.0)
-            scored.append((rrf * 100.0 + quality + structured * 0.08 - exp.risk * 3.0, family))
+            exp = family.product_experience
+            quality = self._retrieval_quality_score(family)
+            risk_penalty = self._retrieval_risk_penalty(family)
+            scored.append((rrf * 100.0 + quality + structured * 0.08 - risk_penalty, family))
 
         scored.sort(key=lambda item: item[0], reverse=True)
         output: list[TransitionFamily] = []

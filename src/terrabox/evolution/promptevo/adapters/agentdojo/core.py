@@ -71,7 +71,12 @@ def _iter_result_files(path: str) -> Iterable[str]:
     if os.path.isfile(path) and path.endswith(".json"):
         yield path
         return
-    for result_path in glob.glob(os.path.join(path, "**", "*.json"), recursive=True):
+    # A completed adapter group may contain optimization/validation groups
+    # beside its formal ``runs`` directory.  When the caller passes the group
+    # root, only the formal run tree belongs to that group; otherwise candidate
+    # validation results can silently overwrite formal task IDs.
+    scan_root = os.path.join(path, "runs") if os.path.isdir(os.path.join(path, "runs")) else path
+    for result_path in glob.glob(os.path.join(scan_root, "**", "*.json"), recursive=True):
         if os.path.isfile(result_path):
             yield result_path
 

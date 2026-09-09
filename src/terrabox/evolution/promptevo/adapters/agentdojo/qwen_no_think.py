@@ -2,16 +2,15 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-import fcntl
 import os
 from pathlib import Path
-import time
 
 import openai
 from openai._types import NOT_GIVEN
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletionReasoningEffort, ChatCompletionToolParam
 from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_random_exponential
 
+from terrabox.agent.llm_provider import pace_remote_llm_request
 from agentdojo.agent_pipeline.llms import openai_llm
 
 
@@ -88,25 +87,12 @@ def _pace_external_api_request() -> None:
     """
     if REQUEST_PROFILE in {"", "qwen", "local", "vllm", "vllm_parsed"} or API_MIN_INTERVAL_SECONDS <= 0:
         return
-    API_RATE_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    with API_RATE_LOCK.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        handle.seek(0)
-        raw = handle.read().strip()
-        try:
-            last = float(raw) if raw else 0.0
-        except ValueError:
-            last = 0.0
-        now = time.monotonic()
-        wait_s = API_MIN_INTERVAL_SECONDS - (now - last)
-        if wait_s > 0:
-            time.sleep(wait_s)
-            now = time.monotonic()
-        handle.seek(0)
-        handle.truncate()
-        handle.write(f"{now:.6f}")
-        handle.flush()
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    pace_remote_llm_request(
+        REQUEST_PROFILE,
+        workload=os.getenv("TERRABOX_REMOTE_LLM_WORKLOAD", "agentdojo"),
+        interval=API_MIN_INTERVAL_SECONDS,
+        lock_path=API_RATE_LOCK,
+    )
 
 
 # Pydantic 2.13 no longer resolves this TypedDict forward reference lazily when

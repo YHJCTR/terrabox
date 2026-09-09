@@ -18,7 +18,7 @@
 `create_memrl_source_service(backend=...)`：
 - **`external_memrl`**：真正的原始 MemRL（需要原仓库依赖 + LLM/embedding 端点就绪）。**做原方法对比必须用它。**
 - `lite`：可移植的 token-overlap 检索 + Q 更新兜底，纯本地、无外部依赖。仅用于冒烟/端点不可用时。
-- `auto`（默认）：先试 external，失败自动降级 lite，并在 manifest 里写 `fallback_reason`。
+- `auto`（默认）：先试 external，失败自动降级 lite，并在 manifest 里写 `fallback_reason`。`--strict-nolabel` 会禁用 `auto`，必须显式选择 `lite` 或 `external_memrl`。
 
 > ⚠️ 做正式对比时**显式传 `--backend external_memrl`**，不要用 `auto`，否则一旦端点没配好会静默退化成 lite，得到的就不是原方法的结果。
 
@@ -39,14 +39,14 @@
 
 ### embedding 模型与维度
 
-原 MemRL 当前在 `/data1/yuhongjie2/MemRL/memrl/service/memory_service.py` 里把 Qdrant `vector_dimension` 写死为 **3072**。因此：
+原 MemRL 默认 Qdrant `vector_dimension` 为 **3072**；本机已做最小兼容补丁，使 `/data1/yuhongjie2/MemRL/memrl/service/memory_service.py` 优先读取 `MEMRL_VECTOR_DIMENSION` / `MEMRL_EMBED_DIM`，未设置时仍保持 3072。因此：
 
 - 如果用 `text-embedding-3-large`，默认 3072 维，与当前原代码匹配。
-- 如果用本机已下载的 Qwen3 Embedding 4B：`/data1/yuhongjie2/Earth-Agent/llm/qwen/3_4B_Embedding`，默认维度是 **2560**（`hidden_size=2560` / `word_embedding_dimension=2560`），和 3072 不匹配；需要先把原 MemRL 的 `vector_dimension` 改成可配置，或让 embedding 服务固定输出一个与 Qdrant 配置一致的维度。
+- 如果用本机已下载的 Qwen3 Embedding 4B：`/data1/yuhongjie2/Earth-Agent/llm/qwen/3_4B_Embedding`，默认维度是 **2560**（`hidden_size=2560` / `word_embedding_dimension=2560`），必须设置 `MEMRL_EMBED_DIM=2560` 或 `MEMRL_VECTOR_DIMENSION=2560`。
 - 如果用 Qwen3 Embedding 8B，默认最大维度是 4096，也同样需要改维度配置。
 - 每次更换 embedding 模型或输出维度，都应使用新的 `--store-dir` 重新建库，不要复用旧 Qdrant/memory snapshot。
 
-推荐下一步：把 `vector_dimension` 做成环境变量（如 `MEMRL_EMBED_DIM`），然后用小样本先检查：
+正式跑前先用小样本检查：
 
 ```bash
 curl http://localhost:<EMBED_PORT>/v1/embeddings \
@@ -54,7 +54,13 @@ curl http://localhost:<EMBED_PORT>/v1/embeddings \
   -d '{"model":"<embedding-model>","input":["test"]}'
 ```
 
-确认返回的 `embedding` 长度与 `MEMRL_EMBED_DIM` 一致后，再跑 `populate-source`。当前如果使用 Qwen3 Embedding 4B，建议设置 `MEMRL_EMBED_DIM=2560`（需要先给原 MemRL 加这个环境变量支持）。
+确认返回的 `embedding` 长度与 `MEMRL_EMBED_DIM` 一致后，再跑 `populate-source`。当前如果使用 Qwen3 Embedding 4B，建议设置 `MEMRL_EMBED_DIM=2560`。
+
+## 严格无标签 OEA 口径
+
+`--strict-nolabel` 只允许消费 rollout 轨迹，不允许 SFT/gold bootstrap；建库与在线写回都会删除 `task_id`、`task_type`、`expected_tools`、`metrics/F1`、gold answer/calls 和顶层 final answer，过滤明确 infrastructure/API/Docker/OOM/context/quota/auth/billing 等失败，只用 `completed`、最终回答是否存在、实际工具调用和可观测工具错误形成 reward。正式 OEA 对比应标为 `MemRL (official-source adapted, strict rollout-only)`，其中 value-driven retrieval/Q 更新来自官方 MemRL，Terrabox 侧只做 OEA 适配和脱敏。
+
+本机已做 smoke：`tmp/memrl_strict_lite_smoke_20260830_225111`，20 条 rollout-derived 记录，15 成功/5 失败，静态扫描未命中 `task_id/task_type/expected_tools/metrics/F1/gold/绝对路径`。这只是 lite 后端脱敏 smoke，不是正式 external MemRL 结果。
 
 ## Python 环境建议
 

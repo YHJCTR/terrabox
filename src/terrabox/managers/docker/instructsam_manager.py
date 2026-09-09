@@ -102,6 +102,54 @@ class InstructSAMDockerManager(BaseServiceManager):
             return 90
 
     @classmethod
+    def _startup_timeout_seconds(cls) -> int:
+        """Return the health-check budget for loading SAM2 and GeoRSCLIP."""
+        try:
+            return max(30, int(os.environ.get("TERRABOX_INSTRUCTSAM_STARTUP_TIMEOUT_SECONDS", "420")))
+        except ValueError:
+            return 420
+
+    @classmethod
+    def _record_startup_diagnostics(cls, *, reason: str) -> None:
+        """Keep bounded Docker diagnostics so startup failures are actionable."""
+        try:
+            inspect = subprocess.run(
+                ["docker", "inspect", cls.CONTAINER_NAME],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            inspect_text = inspect.stdout if inspect.returncode == 0 else inspect.stderr
+            inspect_rc = inspect.returncode
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            inspect_text = f"diagnostic inspect failed: {exc}"
+            inspect_rc = -1
+        try:
+            logs = subprocess.run(
+                ["docker", "logs", "--tail", "120", cls.CONTAINER_NAME],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            logs_text = logs.stdout + logs.stderr
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logs_text = f"diagnostic logs failed: {exc}"
+        record_service_event({
+            "event": "startup_diagnostics",
+            "service": "instructsam",
+            "container": cls.CONTAINER_NAME,
+            "reason": reason,
+            "inspect": inspect_text[-12000:],
+            "logs": logs_text[-12000:],
+        })
+        logger.error(
+            "InstructSAM startup diagnostics (%s): inspect_rc=%s logs_tail=%s",
+            reason,
+            inspect_rc,
+            logs_text[-2000:].replace("\n", " | "),
+        )
+
+    @classmethod
     def _remove_container_bounded(cls, *, reason: str) -> None:
         try:
             subprocess.run(
@@ -283,22 +331,31 @@ class InstructSAMDockerManager(BaseServiceManager):
 
         cls._start_docker()
 
-        # SAM2 (~15s) + CLIP (~5s), no Qwen — ready in ~30s
-        logger.info("Waiting for InstructSAM service (SAM2 + CLIP loading ~30s)...")
-        max_retries = 60    # poll every 2s, wait up to 120s total
-        for i in range(max_retries):
+        startup_timeout_seconds = cls._startup_timeout_seconds()
+        # The first SAM2/GeoRSCLIP load can take several minutes on a cold host.
+        logger.info(
+            "Waiting for InstructSAM service (SAM2 + CLIP cold start; timeout=%ss)...",
+            startup_timeout_seconds,
+        )
+        deadline = time.monotonic() + startup_timeout_seconds
+        poll_count = 0
+        while time.monotonic() < deadline:
             if cls.is_running():
                 logger.info("InstructSAM service is READY.")
                 record_service_event({"event": "ready", "service": "instructsam", "lease": cls._lease.__dict__ if cls._lease else None})
                 return
-            if i % 15 == 0 and i > 0:
-                logger.info(f"Still loading... ({i * 2}s elapsed)")
+            poll_count += 1
+            if poll_count % 15 == 0:
+                elapsed = startup_timeout_seconds - max(0, int(deadline - time.monotonic()))
+                logger.info("Still loading... (%ss elapsed)", elapsed)
             time.sleep(2)
 
+        cls._record_startup_diagnostics(reason="health_timeout")
         cls.stop_service()
         raise RuntimeError(
             "InstructSAM service failed to start. "
-            "Check: docker logs terrabox-instructsam"
+            f"Health did not become ready within {startup_timeout_seconds}s; "
+            "startup diagnostics were recorded."
         )
 
     @classmethod

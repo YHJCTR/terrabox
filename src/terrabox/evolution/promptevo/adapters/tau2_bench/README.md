@@ -166,12 +166,20 @@ The adapter does not write into the tau2 checkout. It sets `TAU2_DATA_DIR` to
 checkpoints under its local `simulations/`. Completed results are mirrored to
 the adapter experiment's `tau2_results/` directory.
 
-## Three-stage Qwen pipeline
+## Three-stage pipeline and optional Stage3
 
 `pipeline.py chain-after-base` continues from an existing Base group, while
 `pipeline.py full-chain` is the formal Base -> Stage1 -> Stage2 entry. Both
 commands require an explicit experiment group for every stage and accept a
 named rollout profile.
+
+历史正式口径里的“三阶段”指 Base / Stage1 / Stage2。新增的 Stage3 是可选的
+post-Stage2 refinement，不替代 Stage2：它以 Stage2 prompt 为当前基线，比较
+Stage1 与 Stage2 的同任务轨迹，只提出小幅 protocol patch 来修复 Stage2 引入的回归，
+并继续使用同一固定真实 dev slice 验证；候选没有通过接受门时保留 Stage2。
+可通过 `pipeline.py stage3-after-stage2` 单独接在已完成的 Stage2 后，也可在
+`chain-after-base` / `full-chain` 中显式传入 `--stage3-group` 与
+`--stage3-version` 自动接上。Stage3 的可恢复检查点为 `stage3_protocol_patch.json`。
 
 - `legacy4` preserves the first four-domain experiment: local Qwen3 8B agent
   and user, one trial, `max_steps=80`, `max_tokens=512`, and offline BM25 for
@@ -202,9 +210,14 @@ named rollout profile.
   caps this so real code/data bugs still surface.
 - tau2 external-agent runs call LongCat/DeepSeek through LiteLLM inside tau2
   subprocesses, so they bypass Terrabox `RemoteChatClient`. The bootstrap must
-  pace those calls with `TERRABOX_TAU2_API_MIN_INTERVAL_SECONDS` and
-  `TERRABOX_TAU2_API_RATE_LOCK` (LongCat default 8s). `longcat_agent4` defaults
-  to conservative `api_workers=1` / `run_concurrency=1`; raise
+  route those calls through `pace_remote_llm_request()` with the shared
+  `TERRABOX_REMOTE_LLM_RATE_LOCK` and JSON fairness state. The pipeline injects
+  `TERRABOX_REMOTE_LLM_WORKLOAD=tau2`; concurrent ExperienceEvo runs should use
+  `TERRABOX_REMOTE_LLM_WORKLOAD=experienceevo` so LongCat request grants rotate
+  by workload when both are waiting. `TERRABOX_TAU2_API_MIN_INTERVAL_SECONDS`
+  remains a compatibility alias for the provider interval, but tau2 must not use
+  an independent lock to bypass the service-level limit. `longcat_agent4`
+  defaults to conservative `api_workers=1` / `run_concurrency=1`; raise
   `TERRABOX_TAU2_API_WORKERS`, `TERRABOX_TAU2_RUN_CONCURRENCY`, and/or set the
   interval to `0` only for an intentional high-concurrency rerun. Changing these
   env vars requires restarting the watcher or rollout parent process.

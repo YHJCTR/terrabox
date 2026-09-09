@@ -1,5 +1,9 @@
 """Resumable AgentDojo Base -> Stage1 -> Stage2 orchestration.
 
+Stage3 is optional and runs as a post-Stage2 refinement: it compares Stage1 and
+Stage2 paired traces, treats Stage2 as the current baseline prompt, and accepts
+only candidates that pass the same fixed real-dev validation gates.
+
 The benchmark itself stays in the upstream AgentDojo checkout. This module owns
 only experiment-local prompts, vLLM lifecycle, result directories, and
 PromptEvo stage transitions.
@@ -1074,7 +1078,7 @@ class _AgentDojoValidationRunner:
         rollout_group(
             group,
             prompt_version="validation_inline",
-            stage="validation",
+        stage="validation",
             output_dir=self.output_dir,
             agent_provider=self.agent_provider,
             prompt_override=prompt,
@@ -1264,6 +1268,108 @@ def optimize_stage2(
     return prompt_path
 
 
+def optimize_stage3(
+    stage1_group: str,
+    stage2_group: str,
+    stage1_version: str,
+    stage2_version: str,
+    stage3_version: str,
+    record_group: str,
+    provider: str = "longcat",
+    output_dir: str = DEFAULT_AGENTDOJO_EXPERIMENTS_DIR,
+    optimizer_version: str = "v2",
+    base_prompt_version: str = "base",
+    validation_tasks: int = 12,
+    candidates: int = 3,
+    max_tokens: int = 12000,
+    agent_provider: str = "longcat",
+) -> str:
+    """Refine Stage2 by repairing Stage2 regressions against Stage1.
+
+    This additive pass does not replace the historical Base->Stage1->Stage2
+    chain. Candidate generation starts from Stage2, and acceptance is measured
+    against Stage2 on the same fixed real AgentDojo dev slice.
+    """
+
+    record = Path(experiment_dir(record_group, output_dir))
+    contrastive_path = record / "optimization" / "stage3_protocol_patch.json"
+    if contrastive_path.is_file():
+        try:
+            saved = json.loads(contrastive_path.read_text(encoding="utf-8"))
+            prompt_path = Path(str(saved.get("prompt_path") or ""))
+            if (
+                saved.get("version") == stage3_version
+                and saved.get("optimizer_version") == optimizer_version
+                and prompt_path.is_file()
+            ):
+                print(f"[{time.strftime('%F %T')}] reusing AgentDojo Stage3 prompt {prompt_path}", flush=True)
+                return str(prompt_path)
+        except (OSError, ValueError, TypeError):
+            pass
+    stage1_results = agentdojo_adapter_results_path(stage1_group, output_dir)
+    stage2_results = agentdojo_adapter_results_path(stage2_group, output_dir)
+    store = AgentDojoPromptStore()
+    dev_ids, jobs = _agentdojo_validation_selection(stage2_results, validation_tasks)
+    _write_json(record / "optimization" / "validation_jobs.json", {"task_ids": dev_ids, "jobs": jobs})
+    updater = ContrastiveUpdater(
+        store,
+        AgentDojoTrajectorySource(results_path_fn=lambda exp: exp),
+        AgentDojoMetricProvider(results_path_fn=lambda exp: exp),
+        optimizer=ContrastiveOptimizer(
+            llm=make_llm_client(provider),
+            meta_prompt_version=optimizer_version,
+        ),
+        runner=_AgentDojoValidationRunner(record_group, output_dir, agent_provider),
+        score_fn=_agentdojo_score,
+        candidate_filter=_agentdojo_security_gate,
+        acceptance_fn=_agentdojo_accept,
+    )
+    objective = (
+        "Stage3 post-Stage2 refinement for AgentDojo: preserve Stage2 security and utility, "
+        "repair only recurring Stage2 regressions visible in paired Stage1-vs-Stage2 traces, "
+        "and keep any protocol patch minimal, auditable, and suite-general. Never trade a "
+        "material prompt-injection security regression for a utility gain."
+    )
+    result = updater.update(
+        stage1_version,
+        stage2_version,
+        stage1_results,
+        stage2_results,
+        stage3_version,
+        dev_task_ids=dev_ids,
+        n_candidates=candidates,
+        max_tokens=max_tokens,
+        diagnose_max_tokens=max_tokens,
+        objective=objective,
+        proposal_format="patch",
+    )
+    prompt_path = store.save(
+        stage3_version,
+        result.revised_prompt,
+        {
+            "result": result.to_dict(),
+            "stage1_group": stage1_group,
+            "stage2_group": stage2_group,
+            "validation_task_ids": dev_ids,
+            "optimizer_version": optimizer_version,
+            "base_prompt_version": base_prompt_version,
+            "stage_role": "post_stage2_refinement",
+        },
+    )
+    _write_json(
+        contrastive_path,
+        {
+            "version": stage3_version,
+            "prompt_path": prompt_path,
+            "result": result.to_dict(),
+            "optimizer_version": optimizer_version,
+            "base_prompt_version": base_prompt_version,
+            "stage_role": "post_stage2_refinement",
+        },
+    )
+    return prompt_path
+
+
 def chain_after_base(
     base_group: str,
     stage1_group: str,
@@ -1279,6 +1385,9 @@ def chain_after_base(
     stage1_candidates: int = 3,
     stage2_candidates: int = 3,
     optimizer_max_tokens: int = 12000,
+    stage3_group: str | None = None,
+    stage3_version: str | None = None,
+    stage3_candidates: int = 3,
 ) -> None:
     if provider == "longcat":
         os.environ["TERRABOX_LONGCAT_THINKING"] = "disabled"
@@ -1313,7 +1422,66 @@ def chain_after_base(
         agent_provider,
     )
     rollout_group(stage2_group, stage2_version, "stage2", output_dir=output_dir, agent_provider=agent_provider)
-    print(f"[{time.strftime('%F %T')}] AgentDojo Base -> Stage1 -> Stage2 chain complete", flush=True)
+    if stage3_group and stage3_version:
+        optimize_stage3(
+            stage1_group,
+            stage2_group,
+            stage1_version,
+            stage2_version,
+            stage3_version,
+            stage3_group,
+            provider,
+            output_dir,
+            optimizer_version,
+            base_prompt_version,
+            validation_tasks,
+            stage3_candidates,
+            optimizer_max_tokens,
+            agent_provider,
+        )
+        rollout_group(stage3_group, stage3_version, "stage3", output_dir=output_dir, agent_provider=agent_provider)
+        print(f"[{time.strftime('%F %T')}] AgentDojo Base -> Stage1 -> Stage2 -> Stage3 chain complete", flush=True)
+    else:
+        print(f"[{time.strftime('%F %T')}] AgentDojo Base -> Stage1 -> Stage2 chain complete", flush=True)
+
+
+def chain_stage3_after_stage2(
+    stage1_group: str,
+    stage2_group: str,
+    stage3_group: str,
+    stage1_version: str,
+    stage2_version: str,
+    stage3_version: str,
+    provider: str = "longcat",
+    output_dir: str = DEFAULT_AGENTDOJO_EXPERIMENTS_DIR,
+    optimizer_version: str = "v2",
+    agent_provider: str = "longcat",
+    base_prompt_version: str = "base",
+    validation_tasks: int = 12,
+    stage3_candidates: int = 3,
+    optimizer_max_tokens: int = 12000,
+) -> None:
+    if provider == "longcat":
+        os.environ["TERRABOX_LONGCAT_THINKING"] = "disabled"
+    wait_for_group(stage2_group, output_dir)
+    optimize_stage3(
+        stage1_group,
+        stage2_group,
+        stage1_version,
+        stage2_version,
+        stage3_version,
+        stage3_group,
+        provider,
+        output_dir,
+        optimizer_version,
+        base_prompt_version,
+        validation_tasks,
+        stage3_candidates,
+        optimizer_max_tokens,
+        agent_provider,
+    )
+    rollout_group(stage3_group, stage3_version, "stage3", output_dir=output_dir, agent_provider=agent_provider)
+    print(f"[{time.strftime('%F %T')}] AgentDojo Stage3 refinement complete", flush=True)
 
 
 def main() -> None:
@@ -1328,7 +1496,7 @@ def main() -> None:
     rollout = sub.add_parser("rollout")
     rollout.add_argument("--group", required=True)
     rollout.add_argument("--prompt-version", required=True)
-    rollout.add_argument("--stage", required=True, choices=["base", "stage1", "stage2"])
+    rollout.add_argument("--stage", required=True, choices=["base", "stage1", "stage2", "stage3"])
     rollout.add_argument("--attack", default=DEFAULT_ATTACK)
     rollout.add_argument("--agent-provider", default="qwen", choices=["qwen", "longcat"])
 
@@ -1344,8 +1512,30 @@ def main() -> None:
     chain.add_argument("--validation-tasks", type=int, default=12)
     chain.add_argument("--stage1-candidates", type=int, default=3)
     chain.add_argument("--stage2-candidates", type=int, default=3)
+    chain.add_argument("--stage3-group")
+    chain.add_argument("--stage3-version")
+    chain.add_argument("--stage3-candidates", type=int, default=3)
     chain.add_argument("--optimizer-max-tokens", type=int, default=12000)
     chain.add_argument(
+        "--base-prompt-version",
+        default="base",
+        help="Prompt version used by the Base rollout; default keeps historical official-base behavior.",
+    )
+
+    stage3 = sub.add_parser("stage3-after-stage2")
+    stage3.add_argument("--stage1-group", required=True)
+    stage3.add_argument("--stage2-group", required=True)
+    stage3.add_argument("--stage3-group", required=True)
+    stage3.add_argument("--stage1-version", required=True)
+    stage3.add_argument("--stage2-version", required=True)
+    stage3.add_argument("--stage3-version", required=True)
+    stage3.add_argument("--provider", default="longcat", choices=["longcat", "deepseek"])
+    stage3.add_argument("--optimizer-version", default="v2", choices=["v1", "v2"])
+    stage3.add_argument("--agent-provider", default="longcat", choices=["qwen", "longcat"])
+    stage3.add_argument("--validation-tasks", type=int, default=12)
+    stage3.add_argument("--stage3-candidates", type=int, default=3)
+    stage3.add_argument("--optimizer-max-tokens", type=int, default=12000)
+    stage3.add_argument(
         "--base-prompt-version",
         default="base",
         help="Prompt version used by the Base rollout; default keeps historical official-base behavior.",
@@ -1379,6 +1569,25 @@ def main() -> None:
             validation_tasks=args.validation_tasks,
             stage1_candidates=args.stage1_candidates,
             stage2_candidates=args.stage2_candidates,
+            optimizer_max_tokens=args.optimizer_max_tokens,
+            stage3_group=args.stage3_group,
+            stage3_version=args.stage3_version,
+            stage3_candidates=args.stage3_candidates,
+        )
+    elif args.command == "stage3-after-stage2":
+        chain_stage3_after_stage2(
+            args.stage1_group,
+            args.stage2_group,
+            args.stage3_group,
+            args.stage1_version,
+            args.stage2_version,
+            args.stage3_version,
+            args.provider,
+            optimizer_version=args.optimizer_version,
+            agent_provider=args.agent_provider,
+            base_prompt_version=args.base_prompt_version,
+            validation_tasks=args.validation_tasks,
+            stage3_candidates=args.stage3_candidates,
             optimizer_max_tokens=args.optimizer_max_tokens,
         )
 

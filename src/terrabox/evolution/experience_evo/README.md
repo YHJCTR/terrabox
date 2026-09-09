@@ -72,6 +72,89 @@ PYTHONPATH=src /home/yuhongjie/miniconda3/envs/unsloth/bin/python \
 具体任务文本、地点名、文件路径、layer 名和自由文本参数会被替换为
 `<named_area>`、`<artifact_reference>`、`<task_specific_text_prompt>` 等占位符。
 
+## 2026-08-22 v5：最终答案证据校验增强
+
+`experience_evo_v5` 是 v4-clean 的独立增强版，不覆盖 v4-clean 代码、store 或结果。它复用
+v4-clean 的 rollout-only transition store、混合检索、`Quse` 排序、risk 约束和 soft verifier，
+额外在主 agent 准备输出最终答案时触发一次 verifier 子 agent：
+
+```text
+当前任务 + 当前 artifact state + 成功/失败工具调用 + observation + draft final answer
+  -> artifact-state evidence summary
+  -> final-answer verifier 检查数值、单位、阈值、最近/最远、计数、实体选择和产物是否被证据支持
+  -> accept：直接输出；revise：回注修正提示，让主 agent 再回答或补一次必要工具调用
+```
+
+v5 verifier 只看当前运行证据，不看 train 轨迹、eval gold、`task_type`、`expected_tools`、task id
+或 answer judge。它的目的不是通用压缩整段对话，而是把工具产物压成面向最终答案的结构化证据表，
+专门修正“工具链基本正确但最终数值/单位/阈值/计数/实体解释错误”的问题。
+
+运行入口：
+
+```bash
+PYTHONPATH=src python scripts/run_trajectory_experiment.py rollout \
+  --task-file data/oea_full_sft/openearth_test_tasks.json \
+  --experiment experience_evo_v5_full_dockerfixed_20260822 \
+  --mode standard \
+  --llm-provider longcat \
+  --evolution-method experience_evo_v5 \
+  --evolution-store evolution_store/experience_evo/oea_train2000_v4_clean_longcat_20260814 \
+  --use-docker --resume
+```
+
+可用环境变量：
+
+- `TERRABOX_EXPEVO_V5_DISABLE_FINAL_VERIFIER=1`：关闭最终答案 verifier，应退化为近似 v4-clean，用于 sanity/消融。
+- `TERRABOX_EXPEVO_V5_VERIFIER_PROVIDER=longcat`：指定 verifier 子 agent provider。
+- `TERRABOX_EXPEVO_V5_VERIFIER_MAX_TOKENS=520`：控制 verifier JSON 输出预算。
+
+## 2026-08-24 v5-hybrid-qwen：Qwen embedding 混合检索
+
+`experience_evo_v5_hybrid_qwen` 是 v5 的独立检索增强版，不覆盖 `experience_evo_v5`、v4-clean
+store 或已有结果。它保留 v5 final-answer verifier，只把 transition family 的候选排序改成：
+
+```text
+当前任务 + 当前 product state
+  -> v4-clean 前置硬过滤：Q/Risk、precondition、已满足 target、可用工具、query profile hard mismatch
+  -> 三路排序：BM25 lexical rank + structured artifact-state rank + Qwen embedding semantic rank
+  -> RRF 融合 + Q/N/Risk rerank
+  -> prompt 中仍展示 product transition、Quse 工具排序和 v5 final verifier
+```
+
+embedding 文档只由 rollout-derived family 构成，包括 `intent_signature`、`input_product_state`、
+`target_product_state`、product/tool experience、输入绑定规则、输出检查、恢复建议和公开工具名；不包含
+`task_type`、task id、`expected_tools`、gold answer、gold tool calls 或 gold 指标。embedding 只参与候选排序，
+不替代 product-state hard filter，避免语义相似但当前状态接不上的经验被塞入 prompt。
+
+使用前必须先启动 OpenAI-compatible Qwen embedding 服务，并构建 family index：
+
+```bash
+PYTHONPATH=src TERRABOX_EXPEVO_EMBEDDING_URL=http://127.0.0.1:9101/v1/embeddings \
+TERRABOX_EXPEVO_EMBEDDING_MODEL=/model \
+python -m terrabox.evolution.experience_evo.runner build-v5-hybrid-index \
+  --store-dir evolution_store/experience_evo/oea_train2000_v4_clean_longcat_20260814 \
+  --batch-size 24
+```
+
+运行入口：
+
+```bash
+PYTHONPATH=src TERRABOX_EXPEVO_EMBEDDING_URL=http://127.0.0.1:9101/v1/embeddings \
+TERRABOX_EXPEVO_EMBEDDING_MODEL=/model \
+python scripts/run_trajectory_experiment.py rollout \
+  --task-file data/oea_full_sft/openearth_test_tasks.json \
+  --experiment experience_evo_v5_hybrid_qwen_oea_train2000_longcat_eval_20260824 \
+  --mode standard --llm-provider longcat \
+  --evolution-method experience_evo_v5_hybrid_qwen \
+  --evolution-store evolution_store/experience_evo/oea_train2000_v4_clean_longcat_20260814 \
+  --use-docker --resume
+```
+
+该模式显式依赖 `qwen_family_embedding_index.json`。index 缺失、模型名不一致或 family 覆盖不完整时，
+runtime 会报错退出；不得静默退化为纯 BM25/v5，否则实验口径会被污染。调试时可临时设置
+`TERRABOX_EXPEVO_HYBRID_DISABLE_SEMANTIC_RANK=1` 或
+`TERRABOX_EXPEVO_HYBRID_ALLOW_PARTIAL_INDEX=1`，正式实验不能使用这两个开关。
+
 ## 2026-07-26 MVP 行为
 
 当前代码仍是离线 MVP，但已经更接近 4.2 的产物状态转移方向：
@@ -180,6 +263,13 @@ OEA symbolic artifact alias（`gpkg_N` / `tif_N` / `img_N`，以及少量命名 
 也会把 OEA 原始 observation 中的固定产物名（例如 `out.tif` / `out.png` /
 `dummy_generated_image.jpg`）绑定到最近一次真实生成的图像或栅格产物，但不会改写
 `out_file` / `output_path` 这类输出参数本身。
+
+GeoPackage 产物契约：`osm_gis.add_index_layer`、`osm_gis.compute_index_change`、
+`osm_gis.add_pois_layer` 和 `osm_gis.compute_route_dist` 的 append-style 写入都会检查
+SQLite/GPKG catalog，并在 GDAL 写入前对同一 GeoPackage 加进程锁、在锁内再次检查。完整的
+raster/vector layer 会幂等复用；不完整 layer、类型冲突、catalog 检查失败或 GDAL 写入失败会
+返回明确错误，不会删除或覆盖 artifact，也不会把统计结果伪造成成功。STAC
+raster 读取会把窗口裁剪到源影像范围；这些修复不改变工具 timeout。
 每条任务会使用独立 artifact 目录，实际重跑某条任务前会先清空该任务自己的 artifact 子目录，
 避免旧 `artifact_index.json` 污染新的 alias 绑定。输出是标准
 `results/<task_id>.json` schema，可直接用 `rollout_report` / `rollout_metrics` 看工具链执行
@@ -494,6 +584,20 @@ v4 消融开关默认都关闭，只用于固定子集/正式消融，不改变�
 
 推荐消融顺序：先跑同一固定子集的 v4 default，再跑 `checker_on`、`quse_off`、`step_hint_off`；
 每组都要同时保存 rollout report 和 LongCat answer judge，不能只用 success rate 判断。
+
+### v4-clean 因果对照模式
+
+为避免把通用执行修复误认为经验收益，当前代码还提供两个不覆盖主方法的显式入口：
+
+| 入口 | 保留内容 | 移除内容 |
+|---|---|---|
+| `experience_evo_v4_no_store_soft_only` | 当前运行产物状态和通用 evidence-state checklist | 历史 transition、经验文本、工具推荐、Quse 和 store |
+| `experience_evo_v4_generic_guard` | 当前任务图片路径检查、`compute.calculator` expression schema 检查 | 所有经验检索、产物转移提示和历史统计 |
+
+这两个模式只用于固定子集的因果消融，不能替代 `experience_evo_v4_clean`，也不能读取
+`task_type`、`expected_tools` 或 gold。`v4-clean checker_on` 则通过
+`TERRABOX_EXPEVO_V4_LLM_CHECKER=1` 开启独立 LongCat checker，用于量化多 agent 校验的
+收益与额外请求成本。正式结果必须同时保存 rollout report、完整结果 JSONL 和 answer judge。
 
 正式 OEA eval 示例：
 

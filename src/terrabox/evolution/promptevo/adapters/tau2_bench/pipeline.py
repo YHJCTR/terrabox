@@ -1,7 +1,13 @@
-"""Resumable tau2 PromptEvo base -> stage1 -> stage2 orchestration."""
+"""Resumable tau2 PromptEvo base -> stage1 -> stage2 orchestration.
+
+Stage3 is optional and runs as a post-Stage2 refinement: it compares Stage1 and
+Stage2 paired traces, keeps Stage2 as the current prompt, and only accepts a
+small protocol patch after the same fixed-dev real rollout gate passes.
+"""
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -251,22 +257,52 @@ def _queue_retry_delay(attempt: int) -> float:
     return min(300.0, 10.0 * max(1, attempt) + random.uniform(1.0, 8.0))
 
 
-def _tau2_chunk_dir(group: str, domain: str, chunk_index: int) -> Path:
-    return Path(experiment_dir(f"{group}/_chunks/{domain}_chunk_{chunk_index:04d}"))
+def _safe_chunk_token(value: str) -> str:
+    token = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(value))
+    return token[:32] or "task"
 
 
-def _tau2_runtime_chunk_dir(group: str, domain: str, chunk_index: int) -> Path:
-    return Path("tmp", "tau2_runtime", group, "_chunks", f"{domain}_chunk_{chunk_index:04d}")
+def _tau2_chunk_name(domain: str, chunk_index: int, task_ids: list[str] | None = None) -> str:
+    base = f"{domain}_chunk_{chunk_index:04d}"
+    if not task_ids:
+        return base
+    joined = ",".join(str(task_id) for task_id in task_ids)
+    digest = hashlib.sha1(joined.encode("utf-8")).hexdigest()[:8]
+    first = _safe_chunk_token(str(task_ids[0]))
+    last = _safe_chunk_token(str(task_ids[-1]))
+    return f"{base}_tasks_{first}-{last}_{digest}"
 
 
-def _clear_tau2_chunk_outputs(group: str, domain: str, chunk_index: int) -> None:
-    for path in (_tau2_chunk_dir(group, domain, chunk_index), _tau2_runtime_chunk_dir(group, domain, chunk_index)):
+def _tau2_chunk_dir(group: str, domain: str, chunk_index: int, task_ids: list[str] | None = None) -> Path:
+    return Path(experiment_dir(f"{group}/_chunks/{_tau2_chunk_name(domain, chunk_index, task_ids)}"))
+
+
+def _tau2_runtime_chunk_dir(group: str, domain: str, chunk_index: int, task_ids: list[str] | None = None) -> Path:
+    return Path("tmp", "tau2_runtime", group, "_chunks", _tau2_chunk_name(domain, chunk_index, task_ids))
+
+
+def _clear_tau2_chunk_outputs(
+    group: str,
+    domain: str,
+    chunk_index: int,
+    task_ids: list[str] | None = None,
+) -> None:
+    for path in (
+        _tau2_chunk_dir(group, domain, chunk_index, task_ids),
+        _tau2_runtime_chunk_dir(group, domain, chunk_index, task_ids),
+    ):
         if path.exists() or path.is_symlink():
             shutil.rmtree(path, ignore_errors=True)
 
 
-def _tau2_chunk_failure_text(group: str, domain: str, chunk_index: int, exc: BaseException) -> str:
-    chunk_dir = _tau2_chunk_dir(group, domain, chunk_index)
+def _tau2_chunk_failure_text(
+    group: str,
+    domain: str,
+    chunk_index: int,
+    exc: BaseException,
+    task_ids: list[str] | None = None,
+) -> str:
+    chunk_dir = _tau2_chunk_dir(group, domain, chunk_index, task_ids)
     parts = [repr(exc)]
     for name in ("stderr.log", "stdout.log", "run_status.json"):
         path = chunk_dir / name
@@ -278,9 +314,14 @@ def _tau2_chunk_failure_text(group: str, domain: str, chunk_index: int, exc: Bas
     return "\n".join(parts)
 
 
-def _tau2_chunk_has_retryable_provider_failure(group: str, domain: str, chunk_index: int) -> bool:
-    chunk_dir = _tau2_chunk_dir(group, domain, chunk_index)
-    text = _tau2_chunk_failure_text(group, domain, chunk_index, RuntimeError("completed_chunk_audit"))
+def _tau2_chunk_has_retryable_provider_failure(
+    group: str,
+    domain: str,
+    chunk_index: int,
+    task_ids: list[str] | None = None,
+) -> bool:
+    chunk_dir = _tau2_chunk_dir(group, domain, chunk_index, task_ids)
+    text = _tau2_chunk_failure_text(group, domain, chunk_index, RuntimeError("completed_chunk_audit"), task_ids)
     if not is_retryable_remote_error_text(text):
         return False
     metrics_path = chunk_dir / "metrics_summary.json"
@@ -329,7 +370,25 @@ def _llm_settings(
                 "TERRABOX_LLM_API_BASE": spec.base_url,
                 "TERRABOX_LLM_MODEL": spec.model,
                 "TERRABOX_LLM_PROVIDER": provider,
+                "TERRABOX_REMOTE_LLM_WORKLOAD": os.getenv("TERRABOX_REMOTE_LLM_WORKLOAD", "tau2"),
                 "TERRABOX_TAU2_REQUEST_PROFILE": provider,
+                "TERRABOX_REMOTE_LLM_RATE_LOCK": os.getenv(
+                    "TERRABOX_REMOTE_LLM_RATE_LOCK",
+                    os.getenv(
+                        "TERRABOX_TAU2_API_RATE_LOCK",
+                        str(TERRABOX_ROOT / "tmp" / "service_locks" / f"remote_llm_{provider}.lock"),
+                    ),
+                ),
+                "TERRABOX_REMOTE_LLM_MIN_INTERVAL_SECONDS": os.getenv(
+                    "TERRABOX_REMOTE_LLM_MIN_INTERVAL_SECONDS",
+                    os.getenv(
+                        "TERRABOX_TAU2_API_MIN_INTERVAL_SECONDS",
+                        os.getenv(
+                            f"TERRABOX_{provider.upper()}_MIN_INTERVAL_SECONDS",
+                            "10.0" if provider == "longcat" else "1.0",
+                        ),
+                    ),
+                ),
                 "TERRABOX_TAU2_API_MIN_INTERVAL_SECONDS": os.getenv(
                     "TERRABOX_TAU2_API_MIN_INTERVAL_SECONDS",
                     os.getenv(
@@ -470,13 +529,14 @@ def _run_domain_chunk(
     port: int,
     profile: Tau2PipelineProfile,
 ) -> str:
-    experiment = f"{group}/_chunks/{domain}_chunk_{chunk_index:04d}"
+    chunk_name = _tau2_chunk_name(domain, chunk_index, task_ids)
+    experiment = f"{group}/_chunks/{chunk_name}"
     status_path = Path(experiment_dir(experiment), "run_status.json")
     if status_path.is_file():
         try:
             if json.loads(status_path.read_text(encoding="utf-8")).get("status") == "complete":
-                if _tau2_chunk_has_retryable_provider_failure(group, domain, chunk_index):
-                    _clear_tau2_chunk_outputs(group, domain, chunk_index)
+                if _tau2_chunk_has_retryable_provider_failure(group, domain, chunk_index, task_ids):
+                    _clear_tau2_chunk_outputs(group, domain, chunk_index, task_ids)
                 else:
                     return str(status_path.parent)
         except (OSError, ValueError, TypeError):
@@ -663,14 +723,15 @@ def _rollout_group_dynamic_chunks(
                     domain, task_ids, chunk_index = queue.get_nowait()
                 except Empty:
                     return done
+                chunk_name = _tau2_chunk_name(domain, chunk_index, task_ids)
                 print(
                     f"[{time.strftime('%F %T')}] lane {port} running "
-                    f"{domain}_chunk_{chunk_index:04d} ({len(task_ids)} tasks)",
+                    f"{chunk_name} ({len(task_ids)} tasks)",
                     flush=True,
                 )
                 try:
                     result = _run_domain_chunk(group, prompt, domain, task_ids, chunk_index, port, profile)
-                    if _tau2_chunk_has_retryable_provider_failure(group, domain, chunk_index):
+                    if _tau2_chunk_has_retryable_provider_failure(group, domain, chunk_index, task_ids):
                         key = (domain, chunk_index)
                         retry_counts[key] += 1
                         attempt = retry_counts[key]
@@ -678,12 +739,12 @@ def _rollout_group_dynamic_chunks(
                             delay = _queue_retry_delay(attempt)
                             print(
                                 f"[{time.strftime('%F %T')}] lane {port} completed "
-                                f"{domain}_chunk_{chunk_index:04d} with retryable provider/API "
+                                f"{chunk_name} with retryable provider/API "
                                 f"failures; requeue attempt {attempt}/{max_queue_retries} "
                                 f"after {delay:.1f}s",
                                 flush=True,
                             )
-                            _clear_tau2_chunk_outputs(group, domain, chunk_index)
+                            _clear_tau2_chunk_outputs(group, domain, chunk_index, task_ids)
                             time.sleep(delay)
                             queue.put((domain, task_ids, chunk_index))
                         else:
@@ -699,22 +760,22 @@ def _rollout_group_dynamic_chunks(
                     key = (domain, chunk_index)
                     retry_counts[key] += 1
                     attempt = retry_counts[key]
-                    failure_text = _tau2_chunk_failure_text(group, domain, chunk_index, exc)
+                    failure_text = _tau2_chunk_failure_text(group, domain, chunk_index, exc, task_ids)
                     if is_retryable_remote_error_text(failure_text) and attempt <= max_queue_retries:
                         delay = _queue_retry_delay(attempt)
                         print(
                             f"[{time.strftime('%F %T')}] lane {port} retryable provider/API failure in "
-                            f"{domain}_chunk_{chunk_index:04d}; requeue attempt "
+                            f"{chunk_name}; requeue attempt "
                             f"{attempt}/{max_queue_retries} after {delay:.1f}s",
                             flush=True,
                         )
-                        _clear_tau2_chunk_outputs(group, domain, chunk_index)
+                        _clear_tau2_chunk_outputs(group, domain, chunk_index, task_ids)
                         time.sleep(delay)
                         queue.put((domain, task_ids, chunk_index))
                     else:
                         print(
                             f"[{time.strftime('%F %T')}] lane {port} non-requeueable failure in "
-                            f"{domain}_chunk_{chunk_index:04d}: {exc!r}",
+                            f"{chunk_name}: {exc!r}",
                             flush=True,
                         )
                         raise
@@ -1058,6 +1119,98 @@ def optimize_stage2(
     return path
 
 
+def optimize_stage3(
+    stage1_results: str,
+    stage2_results: str,
+    stage1_version: str,
+    stage2_version: str,
+    stage3_version: str,
+    record_dir: str,
+    provider: str = "longcat",
+    optimizer_version: str = "v2",
+    profile: Tau2PipelineProfile = PIPELINE_PROFILES["longcat_agent4"],
+    validation_tasks: int = 12,
+    candidates: int = 3,
+    max_tokens: int = 12000,
+) -> str:
+    """Refine Stage2 by repairing Stage2 regressions against Stage1.
+
+    This is deliberately an additive Stage2-afterpass, not a replacement for
+    the historical Base->Stage1->Stage2 chain. The baseline prompt for
+    candidate generation and dev validation is Stage2.
+    """
+
+    record = Path(record_dir)
+    contrastive_path = record / "stage3_protocol_patch.json"
+    if contrastive_path.exists():
+        try:
+            saved = json.loads(contrastive_path.read_text(encoding="utf-8"))
+            prompt_path = Path(str(saved.get("prompt_path") or ""))
+            if (
+                saved.get("version") == stage3_version
+                and saved.get("optimizer_version") == optimizer_version
+                and prompt_path.is_file()
+            ):
+                print(f"[{time.strftime('%F %T')}] reusing Stage3 prompt {prompt_path}", flush=True)
+                return str(prompt_path)
+        except (OSError, ValueError, TypeError):
+            pass
+    store = Tau2PromptStore(tau2_root=TAU2_ROOT)
+    traces = Tau2TrajectorySource(results_path_fn=lambda exp: exp)
+    metrics = Tau2MetricProvider(results_path_fn=lambda exp: exp)
+    dev_ids = _validation_task_ids(stage2_results, validation_tasks)
+    updater = ContrastiveUpdater(
+        store,
+        traces,
+        metrics,
+        optimizer=ContrastiveOptimizer(llm=make_llm_client(provider), meta_prompt_version=optimizer_version),
+        runner=_Tau2ValidationRunner(record.name, profile),
+    )
+    objective = (
+        "Stage3 post-Stage2 refinement for tau2: preserve Stage2 gains over Base and Stage1, "
+        "repair only recurring Stage2 regressions visible in paired Stage1-vs-Stage2 traces, "
+        "and keep the protocol patch minimal, auditable, and domain-general. Do not reintroduce "
+        "Stage1 behavior unless fixed-dev validation shows it improves or preserves reward."
+    )
+    result = updater.update(
+        stage1_version,
+        stage2_version,
+        stage1_results,
+        stage2_results,
+        stage3_version,
+        dev_task_ids=dev_ids,
+        n_candidates=candidates,
+        max_tokens=max_tokens,
+        diagnose_max_tokens=max_tokens,
+        objective=objective,
+        proposal_format="patch",
+    )
+    path = store.save(
+        stage3_version,
+        result.revised_prompt,
+        {
+            "result": result.to_dict(),
+            "validation_task_ids": dev_ids,
+            "stage1_results": stage1_results,
+            "stage2_results": stage2_results,
+            "optimizer_version": optimizer_version,
+            "stage_role": "post_stage2_refinement",
+        },
+    )
+    record.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        contrastive_path,
+        {
+            "version": stage3_version,
+            "prompt_path": path,
+            "result": result.to_dict(),
+            "optimizer_version": optimizer_version,
+            "stage_role": "post_stage2_refinement",
+        },
+    )
+    return path
+
+
 def rejudge_group(group: str, provider: str = "longcat") -> str:
     source = experiment_dir(group)
     output = str(Path(source, f"rejudged_{provider}").resolve())
@@ -1096,6 +1249,9 @@ def chain_after_base(
     stage1_candidates: int = 3,
     stage2_candidates: int = 3,
     optimizer_max_tokens: int = 12000,
+    stage3_group: str | None = None,
+    stage3_version: str | None = None,
+    stage3_candidates: int = 3,
 ) -> None:
     if provider == "longcat":
         os.environ["TERRABOX_LONGCAT_THINKING"] = "disabled"
@@ -1115,7 +1271,62 @@ def chain_after_base(
         optimizer_version, profile, validation_tasks, stage2_candidates, optimizer_max_tokens,
     )
     rollout_group(stage2_group, stage2_version, "stage2", profile)
-    print(f"[{time.strftime('%F %T')}] tau2 Base -> Stage1 -> Stage2 chain complete", flush=True)
+    if stage3_group and stage3_version:
+        optimize_stage3(
+            stage1_results,
+            experiment_dir(stage2_group),
+            stage1_version,
+            stage2_version,
+            stage3_version,
+            experiment_dir(stage3_group),
+            provider,
+            optimizer_version,
+            profile,
+            validation_tasks,
+            stage3_candidates,
+            optimizer_max_tokens,
+        )
+        rollout_group(stage3_group, stage3_version, "stage3", profile)
+        print(f"[{time.strftime('%F %T')}] tau2 Base -> Stage1 -> Stage2 -> Stage3 chain complete", flush=True)
+    else:
+        print(f"[{time.strftime('%F %T')}] tau2 Base -> Stage1 -> Stage2 chain complete", flush=True)
+
+
+def chain_stage3_after_stage2(
+    stage1_group: str,
+    stage2_group: str,
+    stage3_group: str,
+    stage1_version: str,
+    stage2_version: str,
+    stage3_version: str,
+    provider: str = "longcat",
+    profile: Tau2PipelineProfile = PIPELINE_PROFILES["legacy4"],
+    optimizer_version: str = "v2",
+    validation_tasks: int = 12,
+    stage3_candidates: int = 3,
+    optimizer_max_tokens: int = 12000,
+) -> None:
+    if provider == "longcat":
+        os.environ["TERRABOX_LONGCAT_THINKING"] = "disabled"
+    wait_for_group(stage2_group, domains=profile.domains)
+    stage1_results = experiment_dir(stage1_group)
+    stage2_results = experiment_dir(stage2_group)
+    optimize_stage3(
+        stage1_results,
+        stage2_results,
+        stage1_version,
+        stage2_version,
+        stage3_version,
+        experiment_dir(stage3_group),
+        provider,
+        optimizer_version,
+        profile,
+        validation_tasks,
+        stage3_candidates,
+        optimizer_max_tokens,
+    )
+    rollout_group(stage3_group, stage3_version, "stage3", profile)
+    print(f"[{time.strftime('%F %T')}] tau2 Stage3 refinement complete", flush=True)
 
 
 def main() -> None:
@@ -1134,14 +1345,48 @@ def main() -> None:
         command.add_argument("--validation-tasks", type=int, default=12)
         command.add_argument("--stage1-candidates", type=int, default=3)
         command.add_argument("--stage2-candidates", type=int, default=3)
+        command.add_argument("--stage3-group")
+        command.add_argument("--stage3-version")
+        command.add_argument("--stage3-candidates", type=int, default=3)
         command.add_argument("--optimizer-max-tokens", type=int, default=12000)
 
     chain = sub.add_parser("chain-after-base")
     add_chain_args(chain)
     full = sub.add_parser("full-chain")
     add_chain_args(full)
+
+    stage3 = sub.add_parser("stage3-after-stage2")
+    stage3.add_argument("--stage1-group", required=True)
+    stage3.add_argument("--stage2-group", required=True)
+    stage3.add_argument("--stage3-group", required=True)
+    stage3.add_argument("--stage1-version", required=True)
+    stage3.add_argument("--stage2-version", required=True)
+    stage3.add_argument("--stage3-version", required=True)
+    stage3.add_argument("--provider", default="longcat", choices=["longcat", "deepseek"])
+    stage3.add_argument("--profile", default="legacy4", choices=sorted(PIPELINE_PROFILES))
+    stage3.add_argument("--optimizer-version", default="v2", choices=["v1", "v2"])
+    stage3.add_argument("--validation-tasks", type=int, default=12)
+    stage3.add_argument("--stage3-candidates", type=int, default=3)
+    stage3.add_argument("--optimizer-max-tokens", type=int, default=12000)
+
     args = parser.parse_args()
     profile = PIPELINE_PROFILES[args.profile]
+    if args.command == "stage3-after-stage2":
+        chain_stage3_after_stage2(
+            args.stage1_group,
+            args.stage2_group,
+            args.stage3_group,
+            args.stage1_version,
+            args.stage2_version,
+            args.stage3_version,
+            args.provider,
+            profile,
+            args.optimizer_version,
+            args.validation_tasks,
+            args.stage3_candidates,
+            args.optimizer_max_tokens,
+        )
+        return
     if args.command == "full-chain":
         rollout_group(args.base_group, "base", "base", profile)
     chain_after_base(
@@ -1154,6 +1399,9 @@ def main() -> None:
         profile,
         args.optimizer_version, args.validation_tasks, args.stage1_candidates, args.stage2_candidates,
         args.optimizer_max_tokens,
+        args.stage3_group,
+        args.stage3_version,
+        args.stage3_candidates,
     )
 
 

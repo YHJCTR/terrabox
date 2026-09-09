@@ -123,8 +123,9 @@ class LiteMemRLSourceService:
 
     backend = "lite"
 
-    def __init__(self, store_dir: str | Path):
+    def __init__(self, store_dir: str | Path, *, strict_nolabel: bool = False):
         self.store_dir = Path(store_dir)
+        self.strict_nolabel = strict_nolabel
         self.store_dir.mkdir(parents=True, exist_ok=True)
         self.index_path = self.store_dir / "memory_index.jsonl"
         self.records: list[dict[str, Any]] = []
@@ -145,12 +146,14 @@ class LiteMemRLSourceService:
         existing = {r.get("id") for r in self.records}
         added = 0
         for record in records:
-            memory_id = f"{record.task_id}:{len(self.records)}"
+            memory_id = (
+                f"memrl-{len(self.records) + 1:06d}"
+                if self.strict_nolabel else f"{record.task_id}:{len(self.records)}"
+            )
             if memory_id in existing:
                 continue
             row = {
                 "id": memory_id,
-                "task_id": record.task_id,
                 "task_description": record.task_description,
                 "trajectory": record.trajectory,
                 "success": record.success,
@@ -162,6 +165,8 @@ class LiteMemRLSourceService:
                 },
                 "created_at": time.time(),
             }
+            if not self.strict_nolabel:
+                row["task_id"] = record.task_id
             self.records.append(row)
             existing.add(memory_id)
             added += 1
@@ -262,6 +267,7 @@ class LiteMemRLSourceService:
     def manifest(self, *, added: int = 0) -> dict[str, Any]:
         return {
             "backend": self.backend,
+            "strict_nolabel": self.strict_nolabel,
             "store_dir": str(self.store_dir),
             "memory_index": str(self.index_path),
             "count": len(self.records),
@@ -276,8 +282,14 @@ class ExternalMemRLSourceService(LiteMemRLSourceService):
 
     backend = "external_memrl"
 
-    def __init__(self, store_dir: str | Path, *, memrl_root: str = DEFAULT_MEMRL_ROOT):
-        super().__init__(store_dir)
+    def __init__(
+        self,
+        store_dir: str | Path,
+        *,
+        memrl_root: str = DEFAULT_MEMRL_ROOT,
+        strict_nolabel: bool = False,
+    ):
+        super().__init__(store_dir, strict_nolabel=strict_nolabel)
         self.memrl_root = str(memrl_root)
         self._service = self._create_external_service()
 
@@ -308,6 +320,7 @@ class ExternalMemRLSourceService(LiteMemRLSourceService):
         embed_key = os.environ.get("MEMRL_EMBED_API_KEY", api_key)
         embed_base = os.environ.get("MEMRL_EMBED_BASE_URL", base_url)
         embed_model = os.environ.get("MEMRL_EMBED_MODEL", "text-embedding-3-large")
+        embed_dim = int(os.environ.get("MEMRL_EMBED_DIM", "3072"))
         mos_config = {
             "chat_model": {
                 "backend": "openai",
@@ -344,6 +357,7 @@ class ExternalMemRLSourceService(LiteMemRLSourceService):
         }
         mos_path = mos_dir / "mos_config.json"
         mos_path.write_text(json.dumps(mos_config, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.environ.setdefault("MEMRL_VECTOR_DIMENSION", str(embed_dim))
         llm = OpenAILLM(api_key=api_key, base_url=base_url, model=model, default_temperature=0.0)
         embedder = OpenAIEmbedder(api_key=embed_key, base_url=embed_base, model=embed_model)
         return MemoryService(
@@ -425,7 +439,7 @@ class ExternalMemRLSourceService(LiteMemRLSourceService):
         try:
             external_meta = self._service.save_checkpoint_snapshot(
                 str(self.store_dir / "external_snapshot"),
-                ckpt_id=str(ckpt_id),
+            ckpt_id=str(ckpt_id),
             )
             meta["external_snapshot"] = external_meta
         except Exception as exc:  # pragma: no cover - depends on external env
@@ -439,6 +453,7 @@ def create_memrl_source_service(
     store_dir: str | Path,
     backend: str = "auto",
     memrl_root: str = DEFAULT_MEMRL_ROOT,
+    strict_nolabel: bool = False,
 ) -> LiteMemRLSourceService:
     """Create the requested MemRL source backend.
 
@@ -447,10 +462,16 @@ def create_memrl_source_service(
     """
     backend = backend.lower().strip()
     if backend == "lite":
-        return LiteMemRLSourceService(store_dir)
+        return LiteMemRLSourceService(store_dir, strict_nolabel=strict_nolabel)
     if backend in {"external", "external_memrl"}:
-        return ExternalMemRLSourceService(store_dir, memrl_root=memrl_root)
+        return ExternalMemRLSourceService(
+            store_dir,
+            memrl_root=memrl_root,
+            strict_nolabel=strict_nolabel,
+        )
     if backend == "auto":
+        if strict_nolabel:
+            raise ValueError("strict_nolabel MemRL runs must choose lite or external_memrl explicitly; auto fallback is disabled")
         try:
             return ExternalMemRLSourceService(store_dir, memrl_root=memrl_root)
         except Exception:

@@ -102,6 +102,86 @@ def test_real_trajectory_records_keep_success_and_failure_metadata(tmp_path):
     assert records[1].metadata["failure_type"] == "exception_empty_conversation"
 
 
+def test_strict_trajectory_records_omit_labels_metrics_and_task_ids(tmp_path):
+    from terrabox.evolution.memrl_full.source_adapter import (
+        load_trajectories_as_memrl_records,
+        write_memrl_records_jsonl,
+    )
+    from terrabox.evolution.memrl_full.source_memory_service import create_memrl_source_service
+
+    path = tmp_path / "trajectories_full.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {
+                "task_id": "openearth_train_7",
+                "source": "openearth",
+                "task_type": "secret_type",
+                "question": "Measure distance near Grand Central Station from /data/images/a.jpg.",
+                "expected_tools": ["gold.secret"],
+                "tool_sequence": ["geo_perception.remotesam"],
+                "metrics": {"f1": 0.0},
+                "real_success": False,
+                "status": "completed",
+                "final_answer_full": "The answer is 42 meters.",
+                "conversation_history": [{"role": "assistant", "content": "used /tmp/x.png near Grand Central Station"}],
+            },
+            {
+                "task_id": "openearth_train_8",
+                "source": "openearth",
+                "question": "Broken provider call.",
+                "status": "exception",
+                "error": "provider timeout",
+                "conversation_history": [{"role": "assistant", "content": "retry"}],
+            },
+        ],
+    )
+
+    records = load_trajectories_as_memrl_records(path, strict_nolabel=True)
+    out = tmp_path / "records.jsonl"
+    write_memrl_records_jsonl(records, out, strict_nolabel=True)
+    serialized = out.read_text(encoding="utf-8")
+
+    assert len(records) == 1
+    assert records[0].success is True
+    assert records[0].reward == 0.85
+    assert "EXPECTED TOOLS" not in records[0].trajectory
+    assert "FINAL ANSWER" not in records[0].trajectory
+    assert "f1" not in records[0].trajectory.lower()
+    assert "task_id" not in serialized
+    assert "task_type" not in serialized
+    assert "expected_tools" not in serialized
+    assert "metrics" not in serialized
+    assert "openearth_train_7" not in serialized
+    assert "/data/images/a.jpg" not in serialized
+
+    service = create_memrl_source_service(
+        store_dir=tmp_path / "store",
+        backend="lite",
+        strict_nolabel=True,
+    )
+    manifest = service.add_records(records)
+    index_text = (tmp_path / "store" / "memory_index.jsonl").read_text(encoding="utf-8")
+    assert manifest["strict_nolabel"] is True
+    assert "task_id" not in index_text
+    assert "expected_tools" not in index_text
+
+
+def test_strict_memrl_disables_auto_fallback_and_f1_filter(tmp_path):
+    import pytest
+
+    from terrabox.evolution.memrl_full.source_adapter import load_trajectories_as_memrl_records
+    from terrabox.evolution.memrl_full.source_memory_service import create_memrl_source_service
+
+    data = tmp_path / "rows.jsonl"
+    _write_jsonl(data, [])
+
+    with pytest.raises(ValueError, match="metrics/F1"):
+        load_trajectories_as_memrl_records(data, strict_nolabel=True, min_f1=0.8)
+    with pytest.raises(ValueError, match="auto fallback"):
+        create_memrl_source_service(store_dir=tmp_path / "store", backend="auto", strict_nolabel=True)
+
+
 def test_lite_source_service_populates_index_and_prompt_injector_reads_it(tmp_path):
     from terrabox.evolution.memrl_full.source_adapter import load_sft_as_memrl_records
     from terrabox.evolution.memrl_full.source_memory_service import create_memrl_source_service

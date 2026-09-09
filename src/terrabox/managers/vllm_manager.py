@@ -100,7 +100,8 @@ class VLLMServiceManager(BaseServiceManager):
             "--port", str(cls.PORT),
             "--tensor-parallel-size", str(cls.TENSOR_PARALLEL_SIZE),
             "--max-model-len", str(cls.MAX_MODEL_LEN),
-            "--limit-mm-per-prompt", "image=8",
+            # vLLM now parses this option as JSON rather than key=value.
+            "--limit-mm-per-prompt", '{"image":8}',
             "--gpu-memory-utilization", str(cls.GPU_MEMORY_UTILIZATION),
             "--enforce-eager",
             "--timeout-keep-alive", "3600",

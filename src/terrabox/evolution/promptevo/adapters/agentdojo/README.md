@@ -107,6 +107,13 @@ that isolated layer and formal preflight passes. The adapter writes a structured
 `preflight.json`/blocked `pipeline_status.json` instead of starting GPUs when
 dependencies are missing.
 
+Do not copy this isolated layer between servers as if it were a stable artifact.
+It may contain binary wheels compiled for the source machine; after migration,
+run the preflight first. If the error mentions glibc or a binary import from
+`tmp/agentdojo_site_packages/`, move that directory aside and rebuild only the
+missing AgentDojo dependencies into a fresh layer before running smoke or formal
+rollouts.
+
 ## Commands prepared for the formal chain
 
 Use timestamped names following the shared adapter convention. These commands
@@ -148,6 +155,14 @@ PYTHONPATH=src /data/yhj/miniconda3/envs/unsloth/bin/python \
   --stage2-version promptevo_agentdojo_stage2_qwen3_8b_YYYYMMDD_HHMMSS \
   --provider longcat
 ```
+
+历史正式口径里的“三阶段”指 Base / Stage1 / Stage2。新增 Stage3 是可选的
+post-Stage2 refinement，不替代 Stage2：它以 Stage2 prompt 为当前基线，比较
+Stage1 与 Stage2 的同任务轨迹，只提出小幅 protocol patch 来修复 Stage2 引入的回归，
+并继续使用同一固定真实 dev slice 验证；候选没有通过接受门时保留 Stage2。
+可通过 `pipeline.py stage3-after-stage2` 单独接在已完成的 Stage2 后，也可在
+`chain-after-base` 中显式传入 `--stage3-group` 与 `--stage3-version` 自动接上。
+AgentDojo Stage3 仍使用 utility/security 接受门，不允许用明显安全回归换取 utility 改善。
 
 New generic chains default to `--optimizer-version v2`; select v1 explicitly
 only to reproduce a historical chain. Use distinct `metav2` group/version names
@@ -201,7 +216,8 @@ experiments/<group>/
 ```
 
 ProtocolPatch v2 Stage1 saves `optimization/stage1_protocol_patch.json`; Stage2
-saves `optimization/stage2_protocol_patch.json`. `metricViewer` discovers the top-level group and
+saves `optimization/stage2_protocol_patch.json`; optional Stage3 saves
+`optimization/stage3_protocol_patch.json`. `metricViewer` discovers the top-level group and
 recursively reads its authoritative AgentDojo JSON traces. Legacy upstream
 `/data1/yuhongjie2/agentdojo/runs/` directories remain visible under the
 `upstream/` prefix when they exist.
@@ -231,13 +247,17 @@ recursively reads its authoritative AgentDojo JSON traces. Legacy upstream
   is put at the back of the queue; `TERRABOX_AGENTDOJO_QUEUE_RETRIES` (default
   12) caps this so real benchmark or adapter bugs still surface. Even with one
   API worker, a single AgentDojo sample can issue rapid multi-turn model calls;
-  external API calls are therefore paced with a cross-process file lock. Tune
-  `TERRABOX_AGENTDOJO_API_MIN_INTERVAL_SECONDS` (LongCat default 10.0s) and
-  `TERRABOX_AGENTDOJO_API_RATE_LOCK`. The default lock is shared
-  `tmp/service_locks/remote_llm_longcat.lock`, so concurrent LongCat
-  experiments serialize API requests; the old `TERRABOX_AGENTDOJO_LONGCAT_*`
-  names remain aliases. Restart the watcher or rollout parent after changing
-  pacing env vars, because running Python parents keep their old environment.
+  external API calls therefore go through Terrabox's shared
+  `pace_remote_llm_request` limiter. Set `TERRABOX_REMOTE_LLM_WORKLOAD=agentdojo`
+  and tune `TERRABOX_REMOTE_LLM_MIN_INTERVAL_SECONDS` / provider-specific aliases
+  for pacing. The default lock is shared
+  `tmp/service_locks/remote_llm_longcat.lock`, with JSON workload state beside it,
+  so tau2, AgentDojo, and future ExperienceEvo LongCat jobs share one global
+  limit and rotate fairly by workload instead of using independent adapter locks.
+  The old `TERRABOX_AGENTDOJO_API_*` and `TERRABOX_AGENTDOJO_LONGCAT_*` names
+  remain compatibility aliases. Restart the watcher or rollout parent after
+  changing pacing/workload env vars, because running Python parents keep their
+  old environment.
 - Meta-prompt v2 is still domain-neutral: it uses repeated behavior patterns,
   metric directions, and paired trace evidence, but must not inject suite names,
   tool names, task IDs, or fixed workflows into the optimized static prompt.

@@ -91,15 +91,24 @@ def _metrics_f1(row: dict[str, Any]) -> float:
 def _contains_infra(row: dict[str, Any]) -> bool:
     if row.get("has_tool_oom"):
         return True
+    if row.get("system_limitation_acknowledged"):
+        return True
     text = json.dumps(
         {
             "status": row.get("status"),
             "error": row.get("error"),
-            "final": row.get("final_answer_full") or row.get("final_answer_preview"),
-            "history": row.get("conversation_history") or [],
+            "error_type": row.get("error_type"),
+            "failure_reason": row.get("failure_reason"),
         },
         ensure_ascii=False,
     ).lower()
+    # A timeout in an earlier tool observation is not sufficient evidence of a
+    # terminal infrastructure failure: many LongCat rollouts recover and finish.
+    # Treat only explicit top-level non-completed infrastructure failures as
+    # filtered, leaving ambiguous in-loop timeouts as ordinary low-confidence
+    # trajectories instead of converting them into high-risk negatives.
+    if str(row.get("status") or "") == "completed":
+        return False
     return any(marker in text for marker in _INFRA_MARKERS)
 
 
@@ -117,6 +126,27 @@ def _reward(row: dict[str, Any]) -> float:
     return max(0.0, min(1.0, reward))
 
 
+def _strict_reward(row: dict[str, Any]) -> float:
+    """Score only execution evidence visible to the rollout actor.
+
+    This deliberately does not inspect ``metrics``, gold calls, task labels, or
+    an answer judge. Infrastructure failures are excluded by the caller rather
+    than converted into a negative case.
+    """
+    if bool(row.get("has_tool_error")):
+        return 0.15
+    completed = str(row.get("status") or "") == "completed"
+    final = str(row.get("final_answer_full") or row.get("final_answer_preview") or "").strip()
+    tools = _compact_sequence(row)
+    if completed and final and tools:
+        return 0.85
+    if completed and final:
+        return 0.70
+    if completed and tools:
+        return 0.55
+    return 0.30
+
+
 def _outcome(row: dict[str, Any], reward: float) -> str:
     if reward >= 0.8:
         return "success"
@@ -127,10 +157,26 @@ def _outcome(row: dict[str, Any], reward: float) -> str:
     return "failure"
 
 
-def _sanitize(text: object, limit: int = 320) -> str:
+def _sanitize(text: object, limit: int = 320, *, strict_nolabel: bool = False) -> str:
     value = str(text or "")
+    value = re.sub(r"\[[^\]]*(?:image|file)s?\s*:\s*[^\]]+\]", "<artifact_reference>", value, flags=re.I)
     value = re.sub(r"/(?:[^\s\"']+)", "<artifact_reference>", value)
-    value = re.sub(r"\b(?:oea|openearth)_(?:train|test)_\d+\b", "<task_id>", value, flags=re.I)
+    value = re.sub(r"\b(?:oea|openearth)_(?:train|test)_\d+\b", "<task_reference>", value, flags=re.I)
+    value = re.sub(r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b", "<artifact_reference>", value, flags=re.I)
+    if strict_nolabel:
+        # OEA geographic questions commonly encode a train-only place as a
+        # title-cased span. Keep the task operation while removing that fact.
+        value = re.sub(
+            r"\b(?:[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’-]*)(?:\s+[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’-]*)+\b",
+            "<named_area>",
+            value,
+        )
+        value = re.sub(
+            r"\b(?:in|near|around|at|within|from)\s+[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’-]*\b",
+            lambda match: match.group(0).rsplit(" ", 1)[0] + " <named_area>",
+            value,
+        )
+        value = re.sub(r"\b(?:lat|lon|latitude|longitude)\s*[:=]?\s*[-+]?\d+(?:\.\d+)?", "<named_area>", value, flags=re.I)
     value = re.sub(r"\s+", " ", value).strip()
     if len(value) > limit:
         return value[: limit - 3].rstrip() + "..."
@@ -143,9 +189,10 @@ def _keywords(
     limit: int = 20,
     *,
     ignore_task_type: bool = False,
+    strict_nolabel: bool = False,
 ) -> list[str]:
     counter: Counter[str] = Counter()
-    counter.update(tokenize(row.get("question") or ""))
+    counter.update(tokenize(_sanitize(row.get("question"), 360, strict_nolabel=strict_nolabel)))
     if not ignore_task_type:
         counter.update(tokenize(_task_type(row)))
     counter.update(tokenize(" ".join(tools)))
@@ -153,7 +200,7 @@ def _keywords(
 
 
 def _state(row: dict[str, Any], *, ignore_task_type: bool = False) -> str:
-    question = _sanitize(row.get("question"), 360)
+    question = _sanitize(row.get("question"), 360, strict_nolabel=ignore_task_type)
     if ignore_task_type:
         return f"request={question}"
     return f"task_type={_task_type(row)}; request={question}"
@@ -183,17 +230,24 @@ def build_casebank(
     embedding_backend: str = "none",
     embedding_batch_size: int = 24,
     ignore_task_type: bool = False,
+    strict_nolabel: bool = False,
 ) -> CaseBank:
+    if strict_nolabel:
+        ignore_task_type = True
     rows = _load_rows(results_dir)
     cases: list[MemoryCase] = []
     seen_task_ids: set[str] = set()
+    infra_filtered = 0
     for row in rows:
         task_id = _row_id(row)
         if task_id in seen_task_ids:
             continue
         seen_task_ids.add(task_id)
+        if strict_nolabel and _contains_infra(row):
+            infra_filtered += 1
+            continue
         tools = _compact_sequence(row)
-        reward = _reward(row)
+        reward = _strict_reward(row) if strict_nolabel else _reward(row)
         cases.append(
             MemoryCase(
                 id=f"case-{len(cases) + 1:05d}",
@@ -204,9 +258,14 @@ def build_casebank(
                 reward=reward,
                 outcome=_outcome(row, reward),
                 lesson=_lesson(row, tools, reward),
-                keywords=_keywords(row, tools, ignore_task_type=ignore_task_type),
+                keywords=_keywords(
+                    row,
+                    tools,
+                    ignore_task_type=ignore_task_type,
+                    strict_nolabel=strict_nolabel,
+                ),
                 tools=tools,
-                final_answer_excerpt=_final_excerpt(row),
+                final_answer_excerpt="" if strict_nolabel else _final_excerpt(row),
                 tool_error=bool(row.get("has_tool_error")),
             )
         )
@@ -219,24 +278,41 @@ def build_casebank(
     bank.cases = cases
     bank.manifest = {
         "method": "memento_casebank",
-        "adapter": "Memento-style Terrabox CaseBank",
+        "adapter": "Memento-style CaseBank (adapted)",
         "official_source": "/data1/yuhongjie2/external_repos/Memento",
-        "source_results": str(Path(results_dir).resolve()),
+        "reproduction_scope": "adapted",
+        "adaptation_boundary": (
+            "Uses Memento-style non-parametric positive/negative case retrieval and compressed guidance. "
+            "The official planner-executor MCP runtime and online case-selection policy are not compatible with "
+            "the Terrabox LangGraph rollout interface and are not reproduced here."
+        ),
         "uses_gold": False,
-        "uses_dataset_task_type": not ignore_task_type,
-        "ignore_task_type": ignore_task_type,
+        "strict_nolabel": strict_nolabel,
         "n_rows": len(rows),
         "n_cases": len(cases),
+        "n_infra_filtered": infra_filtered,
         "embedding_backend": embedding_backend,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "notes": (
             "Stores rollout-derived (state, action, reward) cases; prompt injection uses compressed case summaries, not full trajectories."
-            + (" Dataset task_type is omitted from case text, keywords, and runtime retrieval." if ignore_task_type else "")
+            + (" Strict records omit benchmark identifiers, task labels, final answers, source paths, and named areas; reward uses rollout-visible execution evidence only." if strict_nolabel else "")
+            + (" Dataset labels are omitted from case text, keywords, and runtime retrieval." if ignore_task_type and not strict_nolabel else "")
         ),
     }
+    if not strict_nolabel:
+        bank.manifest["source_results"] = str(Path(results_dir).resolve())
+        bank.manifest["uses_dataset_task_type"] = not ignore_task_type
+        bank.manifest["ignore_task_type"] = ignore_task_type
+    else:
+        bank.manifest["source_rollout_provenance"] = "LongCat OEA train2000 base rollout"
     bank.save()
     if embedding_backend == "qwen":
-        index_info = CaseBankEmbeddingIndex.build(output_dir, cases, batch_size=embedding_batch_size)
+        index_info = CaseBankEmbeddingIndex.build(
+            output_dir,
+            cases,
+            batch_size=embedding_batch_size,
+            strict_nolabel=strict_nolabel,
+        )
         bank.manifest["embedding_index"] = index_info
         bank.manifest["retrieval"] = "semantic_qwen_plus_reward"
         bank.save()
@@ -254,6 +330,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--ignore-task-type",
         action="store_true",
         help="Omit benchmark task_type labels from case state, keywords, and manifest-visible retrieval text.",
+    )
+    parser.add_argument(
+        "--strict-nolabel",
+        action="store_true",
+        help="Build a rollout-only store that excludes labels, IDs, answers, infrastructure failures, and task-specific references.",
     )
     parser.add_argument(
         "--embedding-backend",
@@ -274,6 +355,7 @@ def main() -> None:
         embedding_backend=args.embedding_backend,
         embedding_batch_size=args.embedding_batch_size,
         ignore_task_type=args.ignore_task_type,
+        strict_nolabel=args.strict_nolabel,
     )
     print(json.dumps(bank.manifest, ensure_ascii=False, indent=2))
 

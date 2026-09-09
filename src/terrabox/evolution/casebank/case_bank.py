@@ -93,6 +93,14 @@ class MemoryCase:
     final_answer_excerpt: str = ""
     tool_error: bool = False
 
+    def to_record(self, *, strict_nolabel: bool = False) -> dict[str, Any]:
+        """Serialize a case without benchmark-only fields in strict mode."""
+        record = asdict(self)
+        if strict_nolabel:
+            for key in ("task_id", "task_type", "final_answer_excerpt"):
+                record.pop(key, None)
+        return record
+
     def prompt_summary(self, max_tools: int = 10) -> str:
         flow = " -> ".join(self.action[:max_tools]) if self.action else "no tool call"
         return (
@@ -156,9 +164,10 @@ class CaseBank:
 
     def save(self) -> None:
         self.store_dir.mkdir(parents=True, exist_ok=True)
+        strict_nolabel = bool(self.manifest.get("strict_nolabel", False))
         with self.path.open("w", encoding="utf-8") as f:
             for case in self.cases:
-                f.write(json.dumps(asdict(case), ensure_ascii=False) + "\n")
+                f.write(json.dumps(case.to_record(strict_nolabel=strict_nolabel), ensure_ascii=False) + "\n")
         self.manifest_path.write_text(json.dumps(self.manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def retrieve(
