@@ -125,6 +125,6 @@ without modifying that checkout.
   `--prompt-version` and to `chain-after-base --base-prompt-version`. Without
   this, Stage1/Stage2 optimization will intentionally keep historical official
   `base` behavior and the ablation recovery result will be invalid.
-- Keep `AGENTS.md`, `CLAUDE.md`, this adapter README, the shared adapter README,
-  and the current Chinese experiment record synchronized when changing scope,
+- Keep this `AGENTS.md`, this adapter README, the shared adapter README, and the
+  current Chinese experiment record synchronized when changing scope,
   metrics, provider, GPU layout, or output paths.

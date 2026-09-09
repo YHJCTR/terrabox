@@ -1,8 +1,7 @@
 # Evolution 实验模块 — Codex/Agent 上下文(模块级,自动加载于本目录树)
 
-本目录是独立实验模块。在此干活时,除项目根 `CLAUDE.md` 外,本文件也会自动生效。**详细跑法 / GPU 配置 / 查看指标在各子模块 README**(只有 `CLAUDE.md`/`AGENTS.md` 自动加载,README 需主动看)。
+本目录是独立实验模块。本文件会在本目录树内自动生效。**详细跑法 / GPU 配置 / 查看指标在各子模块 README**(README 需主动查看)。
 
-> 本文件与 `CLAUDE.md` 内容保持一致,仅子文档引用指向各自格式(`*/AGENTS.md`)。改其一务必同步另一份。
 > 本目录新增或修改方案、TODO、实验记录、README 等 Markdown 文档时默认用中文；命令、变量名、API 名、论文/方法英文名和引用原文可保留英文。
 > 人类阅读入口优先看 `文档索引.md`;旧长文和过期英文草稿集中放在 `文档归档/`。
 
@@ -64,7 +63,7 @@
 - `runner.py prepare-data --online` 生成 1900/100 train/val parquet/jsonl;`write-online-configs` 生成 veRL 工具/agent-loop 配置;`train-grpo --online` 默认只写 `run_grpo_command.sh`,只有显式 `--launch` 才启动训练。启动前必须确认训练卡和工具/感知 lane,不能在其它实验占用 GPU0--2 时把 GPU3 单卡工程检查写成完整 OEA online 结果。
 
 ## promptevo 外部 adapter
-- 外部项目适配放在 `promptevo/adapters/`,详细入口见 `promptevo/CLAUDE.md` 与
+- 外部项目适配放在 `promptevo/adapters/`,详细入口见各适配器的
   `promptevo/adapters/README.md`。API-Bank 是当前轻量外部场景:默认优化静态 API-call
   任务说明,用 exact/API-name/argument/error-bucket 指标做稳定接受门;`execute_api_calls=True`
   仅作 API-Bank evaluator-style 执行诊断,会受网络、随机/状态 API 和可选依赖影响。
@@ -129,7 +128,7 @@
 - 其它**独立口径**(各有用途,勿混):`scripts/score_rollout_metrics.py`(OpenEarthAgent-style 独立统计)、`ReAct/metrics.py`(`runner stats` 用,set/multiset + 错误桶)。
 - 指标口径:per-category F1 = **按工具类别**(perception/operation/logic/gis),不是任务类别;Table4=e2e、Table3=teacher-forced 单步。新增/修改指标逻辑应改**公共库**,薄包装自动受益。
 
-> 改本模块代码后:同步更新对应子模块 README 与本文件(项目根 `CLAUDE.md`/`AGENTS.md` 只放项目级事实)。
+> 改本模块代码后:同步更新对应子模块 README 与本文件(项目根 `AGENTS.md` 只放项目级事实)。
 
 ## ExpeL 真实 OEA 适配
 - `expel` 的旧入口仍是离线工具序列预测；新增 `expel_live`/`expel_official` 是独立模式，不覆盖旧 store 或旧结果。

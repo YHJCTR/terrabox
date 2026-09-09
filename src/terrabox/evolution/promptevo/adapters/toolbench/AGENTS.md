@@ -50,6 +50,11 @@ checkout at `/data1/yuhongjie2/ToolBench`.
 - For DFS/DFSDT outputs without `train_messages`, metrics may consume the whole
   nested tree, but PromptEvo diagnosis must select one representative path and
   must not concatenate sibling branches. Static selection is not rollout validation;
-  an unvalidated Stage2 candidate must be rejected before formal rollout.
+  an unvalidated Stage2 candidate must be rejected before formal rollout. The
+  adapter now validates Stage2 candidates on a fixed, group-balanced dev slice
+  under the new experiment's `validation/` directory before launching the full
+  765-task Stage2 rollout; validation selects two `query_id` values per
+  StableToolBench group and never falls back to row-index matching. Validation
+  output must not be mixed into formal metrics.
 - For paper-style final reporting, use StableToolBench's official
   `toolbench/tooleval` conversion and pass-rate scripts on generated answers.
