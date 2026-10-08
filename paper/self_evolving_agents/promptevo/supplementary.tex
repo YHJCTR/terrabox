@@ -1,0 +1,83 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.82in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern,microtype}
+\usepackage{amsmath,amssymb,booktabs,array,enumitem,hyperref}
+\usepackage{xcolor}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
+\newcommand{\method}{\textsc{PromptEvo}}
+\setlist{leftmargin=*,nosep}
+\title{Supplementary Material for \\ \method: Contrastive Self-Evolution of Static Behavior Protocols for LLM Agents}
+\author{Anonymous Authors}
+\date{}
+\begin{document}
+\maketitle
+
+\section{Scope and Evidence Status}
+This supplement documents the current contrastive-update and typed-patch implementation. It is not evidence that prompt optimization improves any environment. The historical Stage 1/Stage 2 values in the main paper may predate the typed-patch compiler or the frozen-development acceptance protocol; they are retained as mixed/negative diagnostics, not relabeled as validation of the current method.
+
+The audited paths are \texttt{src/terrabox/evolution/promptevo/loop.py}, \texttt{contrastive\_optimizer.py}, \texttt{protocol\_patch.py}, and the corresponding schemas/interfaces. The core loop is interface-agnostic: environment adapters provide prompt storage, traces, task-level metrics, and an optional rollout runner. This separation is useful for reproducibility but also means that benchmark-specific metrics and runner semantics must be versioned outside the optimizer.
+
+\section{Contrastive Update Contract}
+Given prompt versions $P_A,P_B$ and experiments $E_A,E_B$, the updater first intersects the available task IDs and computes paired aggregate metrics on that intersection. It samples paired traces, asks the optimizer to produce diff-grounded diagnoses, proposes a candidate pool, and then either runs each selected candidate on caller-supplied development task IDs or returns an explicitly unaccepted static candidate. The core contract is:
+\begin{enumerate}
+\item diagnoses must have access to the literal old-to-new prompt diff and same-task trajectory evidence;
+\item candidate generation is separate from acceptance;
+\item without both a \texttt{RolloutRunner} and nonempty \texttt{dev\_task\_ids}, the returned result has \texttt{accepted=false}; the core does not itself establish split freezing or test disjointness; and
+\item only an accepted candidate is saved as a new prompt version by the updater.
+\end{enumerate}
+
+This contract applies to \texttt{ContrastiveUpdater.update()}, not to every repository entry point. The separate \texttt{run.py accept} CLI reads a proposal JSON and writes either a legacy revised prompt or a typed compiler output to a named prompt file; it does not inspect a development decision, a candidate ledger, or a locked-test split. This is useful for manual experimentation, but it means persistence is not acceptance. A final release must bind the exact deployed-file fingerprint to a completed dev decision, and must label any CLI-persisted file without that binding as an unaccepted candidate.
+
+The current acceptance code selects the highest scalar development score among candidate rollouts and then checks a success-rate tolerance. This is a usable implementation hook, but it is weaker than the full protected-metric acceptance rule specified in the paper. A submission experiment must enforce every declared protected metric at the runner/evaluation layer, not merely describe the stronger rule in prose. This is an important implementation-to-paper gap to close before claiming safety or non-regression.
+
+\section{Typed Protocol-Patch Schema}
+Typed mode is an explicit alternative to the legacy whole-prompt rewrite path. A patch has a unique \texttt{patch\_id}, a kind, trigger, rule, optional scope, priority in $[0,100]$, evidence list, and risk level. The permitted kinds are \texttt{tool\_selection}, \texttt{argument\_validation}, \texttt{error\_recovery}, and \texttt{termination\_and\_repetition}. The compiler does not execute actions; it appends general static rules to a base prompt. In the audited parser, \texttt{evidence} defaults to an empty list, and supplied entries are only normalized to strings. It does not require a nonempty list or verify that an entry resolves to a trace, attribution, or diagnosis batch. The optimizer is prompted with attribution evidence, but this does not turn a declared patch field into a checked provenance link.
+
+\begin{table}[t]
+\centering
+\caption{Compiler checks visible in the current code and their limits.}
+\small
+\begin{tabular}{p{3.4cm}p{3.9cm}p{3.9cm}}
+\toprule
+Check & Current behavior & Limitation \\
+\midrule
+Schema/range & Requires core fields, allowed kind/risk, and priority range. & Does not prove rule semantics. \\
+Evidence field & Normalizes a supplied string/list to nonempty strings. & Empty evidence is valid; entries are not resolved to traces or attributions. \\
+Task-specific strings & Rejects task-ID forms, local paths, and recognized benchmark task patterns. & Cannot detect paraphrases, encoded identifiers, or all hidden cues. \\
+Conflict/duplicate & Rejects conflicting rules for the same kind/scope/trigger; ignores exact duplicates. & Textually distinct rules can still conflict in meaning. \\
+Risk & Warns and withholds \texttt{high} risk patches from default compilation. & Low/medium risk labels are optimizer-provided and require review. \\
+Placeholder preservation & Checks that base placeholders remain after compilation. & Does not prove correct downstream adapter interpretation. \\
+Trailing anchor & Preserves a recognized final dynamic-context anchor. & Anchor recognition is lexical and interface dependent. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Compilation groups active patches by kind, orders them by descending priority then patch ID, inserts a ``Protocol rules added by the prompt compiler'' block, and preserves a trailing dynamic-context anchor when detected. Duplicate rules and high-risk patches are excluded from the compiled additions. A valid compilation is therefore a syntactic and policy-surface check, not a formal guarantee of security, generality, or utility.
+
+\section{Attribution and Candidate Records}
+The diagnosis stage is intended to constrain explanations to real edits. Candidate metadata should retain: base/current prompt fingerprints; the exact unified diff; paired task IDs and split hash; metric directions; sampled trace identifiers; raw diagnosis batches; all proposed patches or full rewrites; compiler report; patch-level declared evidence; evidence-resolution status; candidate rank; development rollout ID; per-task development metrics; thresholds; acceptance decision; and rejection reason. Public releases may redact raw tool observations, but the redacted record must let a reviewer reconstruct why a candidate was compiled, withheld, rejected, or tested. For a final typed-patch study, every patch carried to development must have nonempty evidence that resolves to retained, redacted trace or attribution records; this is an experiment-release gate to implement around the current compiler.
+
+An attribution that quotes a real prompt clause is still an association, not a causal estimate. Tool outages, evaluator failures, context limits, input changes, and stochastic actor variation can produce paired metric movement unrelated to text. The diagnosis record should therefore preserve \texttt{unexplained} and non-prompt-fixable cases. It is methodologically incorrect to force each regression into a patch proposal.
+
+\section{Acceptance and Evaluation Protocol}
+Let $g$ be a primary metric and $h_r$ protected metrics. Before candidate rollouts, declare the direction and tolerance of each metric. A defensible gate accepts $P'$ only when primary and all protected conditions pass against the same base on frozen development tasks. The final test split is used once for the selected frozen fingerprint. The candidate pool size is part of the statistical object: reporting only the best proposal hides a multiple-comparisons effect.
+
+The required experiment ledger has four layers:
+\begin{enumerate}
+\item \textbf{Construction}: task IDs used for paired diagnosis and all version/manifest hashes.
+\item \textbf{Proposal}: every candidate, static selection score, patch text, compiler output, and risk decision.
+\item \textbf{Development}: identical runner configuration, per-task metrics, protected-metric checks, and accept/reject reason.
+\item \textbf{Test}: one locked evaluation for each accepted frozen fingerprint, including failures in the denominator and paired uncertainty intervals.
+\end{enumerate}
+
+A no-update schedule control is necessary. It repeats the same trace collection, diagnosis budget, candidate accounting, and evaluation scheduling without changing the deployed static prompt. If this control moves similarly to an evolved prompt, the change cannot be attributed to the static protocol. For security environments, clean utility, attacked utility, attack success/security, evaluator failures, and any balanced score must remain separate columns; a single aggregate can conceal a safety regression.
+
+\section{Cross-Environment Claim Boundary}
+An unchanged static protocol can be evaluated on another interface only when source construction/development tasks and target test tasks are disjoint, the prompt fingerprint is frozen before target evaluation, and the target adapter changes only how existing dynamic context is exposed. Adding a target-specific example, tool sequence, or rule creates a new prompt and is not zero-shot transfer. The final manuscript should report interface differences in tools, modalities, output contracts, and adversarial exposure. A negative transfer result is useful evidence about the scope of a static protocol.
+
+\section{Submission Audit Checklist}
+Before submission, verify that the paper's acceptance equation exactly matches the executed gate; that the runner and the metric provider use the same task IDs; that retry, timeout, cache, worker, provider, and evaluator policies are constant across versions; and that the protocol compiler version is recorded. Verify that the fingerprint loaded for test is linked to an accepted dev-ledger row rather than merely to the CLI \texttt{accept} output. For typed patches, verify nonempty patch evidence and a ledger-resolvable reference to retained attribution or trace batches before development rollout. Release a manually audited sample of both accepted and rejected patches, including apparently beneficial cases. Do not call a patch ``trace-backed'' or ``safe'' merely because it compiled, and do not call a candidate ``improved'' merely because the optimizer ranked it above another candidate without frozen-dev rollout evidence.
+
+\end{document}

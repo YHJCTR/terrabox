@@ -1,0 +1,98 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.82in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern,microtype}
+\usepackage{amsmath,amssymb,booktabs,array,enumitem,hyperref}
+\usepackage{xcolor}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
+\newcommand{\method}{\textsc{ExperienceEvo}}
+\setlist{leftmargin=*,nosep}
+\title{Supplementary Material for \\ \method: Product-State Transition Self-Evolution for Tool-Augmented Geospatial Agents}
+\author{Anonymous Authors}
+\date{}
+\begin{document}
+\maketitle
+
+\section{Scope and Evidence Status}
+This supplement is an implementation audit companion to the main manuscript. It documents the behavior that can be checked directly in the current repository and the artifacts that a final empirical paper must release. It does not add performance claims. In particular, the historical values in the main paper remain single-configuration diagnostics. They do not establish a causal retrieval effect, cross-model generalization, or a final benchmark ranking.
+
+The audited code paths are \texttt{src/terrabox/evolution/experience\_evo/v4/runtime.py}, \texttt{experience\_evo/v2/models.py}, and \texttt{experience\_evo/v2/builder.py}, together with the inherited retrieval implementation in \texttt{experience\_evo/v3/runtime.py}. The v4 runtime consumes a store compatible with the v2/v3 transition-family schema, but its inherited retrieval path can return deterministic \texttt{v3\_fallback\_*} families for narrow task-shape rules before ordinary store results. A nonempty fallback list is returned immediately, before the ordinary learned candidates are sorted, so fallback is a priority branch rather than a merged candidate class. Consequently, a paper artifact must version both the runtime and the store builder, record fallback provenance and suppression of learned candidates separately, and treat an unchanged runtime paired with a newly extracted state vocabulary as a scientifically different condition.
+
+\section{Transition-Family Data Contract}
+The source schema represents a rollout step as a \texttt{TransitionEvent}. Its fields include a task identifier and source for offline provenance, a task type and intent signature, the tool slug, input/target/output product-state tokens, summarized arguments and observations, and a \texttt{LocalEvidence} record. The runtime prompt must never receive the task identifier, raw historical path, gold answer, or an event-level trace. Those fields are retained only for offline audit.
+
+\begin{table}[t]
+\centering
+\caption{Core transition-family fields and their permitted use. ``Offline only'' means the field may appear in the store source or audit log but must not be injected into a new rollout.}
+\small
+\begin{tabular}{p{3.2cm}p{3.4cm}p{4.6cm}}
+\toprule
+Object & Fields & Permitted role \\
+\midrule
+Transition event & task ID, source, step index, summaries & Offline provenance and debugging only. \\
+Product experience & goal, preconditions, output checks, downstream rule, recovery, $Q,N,R$ & Runtime planning evidence after anonymization. \\
+Tool policy & tool, required roles, binding rules, output contract, checks, recovery, $Q,N,R$ & Runtime alternative action evidence; tool remains subject to current availability. \\
+Family envelope & input/target product states, task type, intent, status & State-compatible retrieval and store-version audit. \\
+Local evidence & binding, output validity, target completion, consumption, terminal usability, reward/risk, infrastructure flag & Offline credit assignment; infrastructure events are excluded from running estimates. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Each \texttt{ProductExperience} stores a product-level contract, whereas each \texttt{ToolPolicy} stores one implementation of that contract. This distinction matters when multiple tools can produce the same downstream-usable product. It prevents a successful historical tool sequence from becoming a mandatory program. The builder also retains source event identifiers in the offline policy object; any public release should either redact those IDs or ensure they cannot be joined to held-out task identities.
+
+\section{Offline Builder Semantics}
+The builder groups events by task type, intent signature, typed input state, and typed target state. Within a group, it computes a family-level and a tool-level running estimate. For events $e_i$ not marked as infrastructure failures, the implementation uses a diminishing step size,
+\begin{equation}
+Q_i = Q_{i-1} + \frac{\alpha_0}{\sqrt{i}}(r_i-Q_{i-1}),\qquad
+R_i = R_{i-1} + \frac{\alpha^R_0}{\sqrt{i}}(\ell_i-R_{i-1}),
+\end{equation}
+where $r_i$ is local reward and $\ell_i$ is locally observed risk. The implementation clips both values to $[0,1]$. This is a smoothing heuristic, not an off-policy value estimator and not evidence that a selected tool caused final task success.
+
+When language-model distillation is enabled, the builder prompt explicitly requests short reusable constraints and forbids task identifiers, place names, file paths, literal layer names, gold tools, and final answers. Parameter summaries are converted to typed placeholders such as \texttt{<output\_artifact\_reference>} or \texttt{<output\_layer\_name>}. These guardrails reduce direct leakage but do not prove that all semantic benchmark cues are removed. A final release therefore needs an automated scan plus manual inspection of sampled family text.
+
+\section{Runtime State and Guidance Semantics}
+The runtime begins from an explicit \texttt{current\_product\_state} when provided, or conservatively infers initial image/data-file presence. It retrieves families using the user query, task type, live symbolic state, available tools, and current input modalities. The concrete artifact reference is deliberately separate from the symbolic token: a token describes a usable type, while the guidance instructs the agent to bind a downstream call to a compatible reference produced in the present rollout. Except for the narrow hard checks described below, this is guidance that requires trace audit rather than universal enforcement.
+
+The following operational sequence summarizes the audited runtime behavior:
+\begin{enumerate}
+\item infer or receive the current live state and available tool set;
+\item enumerate state-compatible learned families from the read-only store and inherited runtime fallback families separately; if the latter is nonempty, record that current code returns it before learned-store ranking;
+\item verify product requirements and prioritize families that address missing slots;
+\item inject natural-language planning evidence stating that it is neither a gold trajectory nor a forced script;
+\item after an observation, repeat retrieval through \texttt{step\_hint} unless the dedicated ablation flag disables it; and
+\item record the recommendation, inferred state, readiness note, and subsequent tool selection in an audit trace.
+\end{enumerate}
+
+The ``likely ready'' condition is intentionally soft. It asks the agent to prefer a concise answer only when currently observed evidence appears sufficient, and it explicitly preserves the requirement to create a requested map, plot, file, or annotation. The source sets \texttt{answer\_ready\_guard\_enabled=False}, \texttt{premature\_final\_guard\_enabled=False}, and \texttt{allow\_synthetic\_final\_answer=False}. Thus, v4 does not terminate a rollout merely because a family was retrieved and does not manufacture a final answer in code.
+
+\section{Hard Checks, Soft Checks, and Ablations}
+The implementation retains a narrow \texttt{hard\_guard\_enabled} path. The main paper defines its intended scope as current-run image-reference validation and a calculator one-safe-expression schema. This safeguard is not a memory retrieval mechanism. It can improve outcomes by itself, which is why the final experiment must isolate it.
+
+\begin{table}[t]
+\centering
+\caption{Implemented v4 switches and the scientific contrast they support. These switches are implementation facts, not completed ablations.}
+\small
+\begin{tabular}{p{4.2cm}p{6.8cm}}
+\toprule
+Environment setting & Intended removal \\
+\midrule
+\texttt{TERRABOX\_EXPEVO\_V4\_DISABLE\_STEP\_HINT=1} & Per-step retrieval after new observations. \\
+\texttt{TERRABOX\_EXPEVO\_V4\_DISABLE\_QUSE=1} or \texttt{...\_DISABLE\_TOOL\_RANKING=1} & Tool-policy utility ranking while retaining transition/tool text. \\
+\texttt{TERRABOX\_EXPEVO\_V4\_DISABLE\_VERIFIER=1} or \texttt{...\_DISABLE\_VERIFICATION=1} & Deterministic missing-evidence checkpoints. \\
+\texttt{TERRABOX\_EXPEVO\_V4\_LLM\_CHECKER=1} & Optional bounded checker; disabled by default and must report provider/call budget. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The minimum causal comparison is not merely ``v4 on/off.'' It requires: (i) an unchanged base agent, (ii) a generic-guard-only condition containing the two narrow schema/path checks, (iii) a no-store soft-guidance condition, (iv) a fallback-only condition, (v) a learned-store-only condition with fallback disabled, and (vi) full v4. All conditions must share task IDs, model/provider revision, tool registry, retry policy, cache policy, artifact directory rule, and resource configuration. Component ablations can explain an observed full-v4 difference only after this baseline decomposition is in place. If fallback cannot be disabled, the learned-store-only comparison is unavailable and the paper must not attribute full-v4 behavior to rollout-derived retrieval.
+
+\section{Required Reproducibility Bundle}
+For every reported run, publish or retain an immutable manifest with: split and task-list hashes; actor model/provider revision; decoding and maximum turns; base prompt hash; tool registry and schema hashes; tool-service versions; store source-rollout hash; builder/extractor and state-vocabulary versions; retrieval and verifier settings; cache/retry/transient-failure policy; evaluator identity; worker/resource configuration; and all ablation environment variables. The store must be read-only during evaluation.
+
+The task-level audit table should contain a redacted task ID, outcome fields, tool sequence, per-step product states, learned candidate family IDs, returned family IDs, family provenance (``train rollout'' or ``v3 runtime fallback''), a fallback-priority flag, ranked policies, actual selected tool, current-reference binding validity, product-contract checks, final requested-product status, and an infrastructure-error label. The current generic \texttt{evolution\_trace} records recommendation-level data but not retrieved family IDs or provenance, so it cannot retrospectively provide this analysis for historical runs. This table enables six non-causal descriptive analyses: learned-family availability, fallback coverage, fallback suppression of learned retrieval, recommendation adherence, valid current-run binding conditional on adherence, and traceable product chains among successful artifacts. It must never be filtered to successful cases before reporting the denominator.
+
+\section{Known Boundaries}
+The state tracker is a typed, monotone abstraction rather than a complete semantic model of a geospatial workspace. A token may remain present after an unrelated later call; overwritten layers therefore need observation-order-aware concrete references. The local reward/risk values also depend on event extraction and labeling. They should not be interpreted as calibrated probabilities or global credit assignment. Runtime fallback families additionally create a confound: an outcome can improve because of a deterministic v3 heuristic even when learned retrieval is disabled or unchanged. The final paper must therefore report learned and fallback provenance separately, and preserve separate metrics for ordinary answers, tool agreement, and requested artifact completion.
+
+\end{document}

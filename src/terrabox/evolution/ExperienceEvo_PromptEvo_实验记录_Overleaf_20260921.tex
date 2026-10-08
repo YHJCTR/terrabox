@@ -1,0 +1,825 @@
+% pdfLaTeX-compatible Chinese setup for Overleaf.
+% Do not switch this back to ctexart: its default Fandol fontset is
+% unavailable in pdfLaTeX mode on Overleaf.
+\documentclass[a4paper,11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage{CJKutf8}
+\usepackage{lmodern}
+\usepackage[a4paper,margin=1.7cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,longtable,tabularx,array,multirow,makecell}
+\usepackage{graphicx,xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,calc}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{listings}
+\usepackage{adjustbox}
+
+\definecolor{navy}{HTML}{1F4E79}
+\definecolor{teal}{HTML}{157A75}
+\definecolor{orange}{HTML}{B45309}
+\definecolor{lightblue}{HTML}{EEF5FB}
+\definecolor{lightgreen}{HTML}{EDF8F1}
+\definecolor{lightorange}{HTML}{FFF7ED}
+\definecolor{lightgray}{HTML}{F3F4F6}
+
+\hypersetup{colorlinks=true,linkcolor=navy,citecolor=navy,urlcolor=navy}
+\setlist{leftmargin=*,nosep}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0.25em}
+\renewcommand{\arraystretch}{1.18}
+\newcommand{\method}[1]{\textsc{#1}}
+\newcommand{\real}{\textcolor{teal}{\textbf{Real}}}
+\newcommand{\reported}{\textcolor{navy}{\textbf{Reported snapshot}}}
+\newcommand{\pending}{\textcolor{orange}{\textbf{Pending}}}
+\newcommand{\layoutonly}{\textcolor{orange}{\textbf{Synthetic---layout only}}}
+% Keep source paths in the CJK family: pdfLaTeX's Computer Modern typewriter
+% font has no Chinese glyphs, while CJKutf8's gbsn family covers the full path.
+% Underscores are escaped at call sites because this macro intentionally keeps
+% the UTF-8 CJK tokens (\detokenize would turn them into mojibake under CJKutf8).
+\newcommand{\source}[1]{\begingroup\scriptsize\CJKfamily{gbsn}#1\endgroup}
+\newcommand{\TODO}[1]{\textcolor{orange}{[TODO: #1]}}
+
+\title{\textbf{ExperienceEvo 与 PromptEvo}\\实验记录、对比结果与可复现口径}
+\author{实验记录版本：2026-09-22}
+\date{}
+
+\begin{document}
+\begin{CJK*}{UTF8}{gbsn}
+\maketitle
+
+\begin{center}
+\fcolorbox{orange}{lightorange}{%
+\parbox{0.94\textwidth}{%
+\textbf{证据声明。}
+本文只把可以由仓库结果目录、JSON 报告或已保存实验快照复核的数字写成结果。
+\textcolor{teal}{Real} 表示可追溯原始结果；
+\textcolor{navy}{Reported snapshot} 表示已有周报或历史记录中的快照，未在本次交付中重跑；
+\textcolor{orange}{Pending} 表示尚未完成；
+排版用模拟值若存在，单独标为 \textcolor{orange}{Synthetic---layout only}，不得作为论文、答辩或简历中的实验结论。
+}}
+\end{center}
+
+\tableofcontents
+
+\section{文档范围与研究问题}
+
+本文整理三条相互关联但不能混写的实验线：
+
+\begin{enumerate}
+  \item \textbf{ExperienceEvo：}把历史真实 rollout 抽象为与当前产物状态相关的局部经验，在运行时检索并注入；
+  \item \textbf{PromptEvo：}从成对失败/成功轨迹中寻找任务无关的协议缺口，通过 Stage1 候选生成、Stage2 对比归因和 typed patch 编译得到静态提示词补丁；
+  \item \textbf{Agentic RL：}用真实工具 rollout 构造规则 reward，完成 Qwen2.5-3B 的标准 Swift GRPO 对照，并提出尚未实现的产物来源感知 credit assignment。
+\end{enumerate}
+
+地理空间 Agent 的核心困难不是只有工具选择。一次任务可能同时涉及影像、mask、矢量图层、GeoPackage、统计量和渲染图；因此必须区分：
+
+\begin{equation}
+\text{工具执行成功}
+\;\not\Rightarrow\;
+\text{输入产物绑定正确}
+\;\not\Rightarrow\;
+\text{输出产物满足任务语义}.
+\end{equation}
+
+本文围绕三个问题组织证据：
+
+\begin{description}[leftmargin=4em,labelwidth=2.5em,labelsep=0.5em]
+  \item[RQ1] 将长轨迹转化为产物状态转移，是否能降低重复调用、工具错误和无效路径？
+  \item[RQ2] 静态协议 patch 能否在不引入任务记忆的情况下修补跨任务的参数校验、恢复和终止行为？
+  \item[RQ3] 轨迹级 GRPO 的规则 reward 暴露了哪些信用分配问题，如何设计可验证的下一步 Agentic RL？
+\end{description}
+
+\section{相关方法定位}
+
+ReAct 将语言模型的推理、工具动作和环境观察交错组织起来，是本文 agent rollout 的基本交互范式 \cite{react}。Reflexion 和 ExpeL 分别通过语言反馈与经验抽取实现跨试次改进 \cite{reflexion,expel}；MemRL、SkillRL 等较新的工作进一步研究记忆使用或技能库的运行时自进化 \cite{memrl,skillrl}。这些方法说明“从历史执行中改进 Agent”是一个有效方向，但它们与本文关注点并不完全相同：ExperienceEvo 的传递单元是当前运行可验证的产物状态转移，PromptEvo 的传递单元是静态、任务无关的行为协议，二者都不把某条历史完整轨迹当作可直接执行的计划。
+
+在评测层面，ToolBench/API-Bank 关注工具调用与参数结构，AgentDojo 关注工具环境中的效用和安全权衡，$\tau^2$-Bench 关注动态多轮交互，OpenEarthAgent 则提供了地理空间工具链场景 \cite{toolllm,apibank,agentdojo,tau2,openearthagent}。因此本文同时报告工具序列、错误、答案、成本和安全相关指标，不将不同环境的异构数字平均成一个总分。
+
+\section{整体方法路线}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  >=Latex,
+  node distance=8mm and 8mm,
+  box/.style={draw=navy,fill=lightblue,rounded corners=2pt,align=center,minimum height=11mm,inner sep=4pt},
+  greenbox/.style={draw=teal,fill=lightgreen,rounded corners=2pt,align=center,minimum height=11mm,inner sep=4pt},
+  orangebox/.style={draw=orange,fill=lightorange,rounded corners=2pt,align=center,minimum height=11mm,inner sep=4pt},
+  arr/.style={->,thick,draw=navy}
+]
+\node[box] (rollout) {真实工具\\rollout};
+\node[box,right=of rollout] (state) {产物状态与\\工具观察};
+\node[greenbox,right=of state] (expevo) {ExperienceEvo\\状态转移经验};
+\node[orangebox,below=of expevo] (boundary) {Boundary\\适用边界与 fallback};
+\node[box,left=of boundary] (inject) {检索、排序、\\软 verifier};
+\node[box,left=of inject] (agent) {下一步工具\\或最终回答};
+\draw[arr] (rollout)--(state)--(expevo);
+\draw[arr] (expevo)--(boundary);
+\draw[arr] (boundary)--(inject)--(agent);
+\draw[arr] (agent.north)--++(0,8mm)|-(state.south);
+\node[orangebox,below=of rollout] (paired) {成对 Base /\\候选轨迹};
+\node[greenbox,right=of paired] (patch) {PromptEvo\\Stage1/Stage2 patch};
+\draw[arr] (paired)--(patch);
+\draw[arr] (patch.east)--++(10mm,0)|-(agent.south);
+\node[orangebox,below=of patch] (rl) {标准 GRPO 已完成；\\产物来源 credit 为后续方案};
+\draw[arr] (rl.north)--(patch.south);
+\end{tikzpicture}
+\caption{三条实验线的关系。ExperienceEvo/Boundary 改变运行时经验上下文；PromptEvo 改变静态协议；标准 GRPO 改变 LoRA 参数。}
+\label{fig:overview}
+\end{figure}
+
+\section{ExperienceEvo：产物状态转移经验}
+
+\subsection{经验表示}
+
+一条经验不是完整任务轨迹，而是从可观察 rollout 中抽取的局部状态转移：
+
+\begin{equation}
+e=\bigl(s_{\mathrm{in}},\,a,\,s_{\mathrm{out}},\,\mathcal{C},\,\mathcal{O},\,q,\,n,\,r\bigr),
+\end{equation}
+
+其中 $s_{\mathrm{in}}$ 和 $s_{\mathrm{out}}$ 是产物状态签名，$a$ 是工具动作，$\mathcal{C}$ 是输入前置条件，$\mathcal{O}$ 是输出契约，$q$ 是可观察质量统计，$n$ 是支持度，$r$ 是风险。检索时不使用 task id、task type、expected tools、gold answer 或 gold tool calls；这些字段只允许在实验结束后的独立评测中出现。
+
+\subsection{v4-clean 运行时}
+
+v4-clean 的基本闭环为：
+
+\begin{enumerate}
+  \item 从 train rollout 抽取脱敏的产物状态转移；
+  \item 根据当前任务文本、当前运行产物、可用工具和 schema 做候选过滤；
+  \item 用 lexical/structured retrieval 和 $Q_{\mathrm{use}}$、risk 做排序；
+  \item 在每次 observation 后更新当前 product state；
+  \item 以软提示和 verifier checkpoint 形式注入下一步证据，不把历史轨迹直接当成固定计划；
+  \item 若经验不适用，回退通用 ReAct。
+\end{enumerate}
+
+这一设计与保存完整反思或整段案例不同：它试图回答“当前已经有什么产物、下一步需要什么产物、哪个工具能合法地产生它”，而不是复述过去任务。
+
+\subsection{Boundary 独立模式}
+
+Boundary 是 v4-clean 的独立模式，不修改父 store：
+
+\begin{equation}
+\begin{aligned}
+\text{v4-clean store}
+&\longrightarrow \text{semantic-preserving / semantic-changing}\\
+&\longrightarrow \text{precondition-breaking}\longrightarrow \text{boundary sidecar}\\
+&\longrightarrow \text{runtime filter + fallback}.
+\end{aligned}
+\end{equation}
+
+当前正式 Boundary v1 的 manifest 记录：
+
+\begin{itemize}
+  \item 父 store 不变，803 个 family，803 个 active rule；
+  \item \texttt{strict\_rollout\_only=true}、\texttt{gold\_free=true}；
+  \item 边界类型：语义保持、语义改变、前置条件破坏；
+  \item 所有 family 的确定性审核决策为 \texttt{keep}；
+  \item 缺失必需产物时过滤经验并回退 ReAct，未知元数据不直接判失败；
+  \item 本次 v1 不启用额外 Boundary Proposer/Auditor，多 Agent 版本属于后续扩展。
+\end{itemize}
+
+需要特别区分：当前 Boundary v1 已是完整可运行模式和完整 OEA eval，但其边界 sidecar 主要是确定性 schema/contract 规则；不能把它写成已经完成了真实反例长后缀因果验证或自动 family 分裂。
+
+\subsection{ExperienceEvo 方法图}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  >=Latex,
+  node distance=7mm and 8mm,
+  b/.style={draw=navy,fill=lightblue,rounded corners=2pt,align=center,minimum height=10mm,inner sep=4pt},
+  g/.style={draw=teal,fill=lightgreen,rounded corners=2pt,align=center,minimum height=10mm,inner sep=4pt},
+  o/.style={draw=orange,fill=lightorange,rounded corners=2pt,align=center,minimum height=10mm,inner sep=4pt},
+  a/.style={->,thick,draw=navy}
+]
+\node[b] (t) {任务文本 + 初始输入};
+\node[b,right=of t] (r) {真实 rollout\\tool / observation};
+\node[g,right=of r] (x) {抽取 typed\\artifact transition};
+\node[g,below=of x] (store) {family store\\Q / N / risk / contract};
+\node[b,left=of store] (retr) {当前 product state\\hard filter + retrieve};
+\node[o,left=of retr] (v) {边界检查\\verifier / fallback};
+\node[b,left=of v] (next) {下一步工具\\或 final answer};
+\draw[a] (t)--(r)--(x)--(store);
+\draw[a] (store)--(retr)--(v)--(next);
+\draw[a] (next.north)--++(0,7mm)|-(r.south);
+\end{tikzpicture}
+\caption{ExperienceEvo 的状态条件检索与边界过滤。}
+\label{fig:expevo}
+\end{figure}
+
+\section{PromptEvo：静态协议 patch 自进化}
+
+\subsection{问题与两阶段机制}
+
+PromptEvo 不把某个任务的完整轨迹塞入上下文，而是从同一 manifest 下的成对 Base/候选 rollout 中寻找跨任务的行为协议缺口。一个 patch 可以描述：
+
+\begin{equation}
+\pi=(\mathrm{kind},\mathrm{trigger},\mathrm{rule},\mathrm{scope},\mathrm{priority},\mathrm{evidence},\mathrm{risk}).
+\end{equation}
+
+\textbf{Stage1} 根据失败轨迹提出首版候选；\textbf{Stage2} 重新比较 Base/候选轨迹，并要求归因模型引用真实 prompt diff，区分 \texttt{help}、\texttt{hurt}、\texttt{mixed} 和 \texttt{unexplained}。通过 typed patch compiler 后，候选还要经过 development gate；未通过的 patch 不进入最终静态 prompt。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  >=Latex,
+  node distance=8mm and 8mm,
+  b/.style={draw=navy,fill=lightblue,rounded corners=2pt,align=center,minimum height=10mm,inner sep=4pt},
+  g/.style={draw=teal,fill=lightgreen,rounded corners=2pt,align=center,minimum height=10mm,inner sep=4pt},
+  o/.style={draw=orange,fill=lightorange,rounded corners=2pt,align=center,minimum height=10mm,inner sep=4pt},
+  a/.style={->,thick,draw=navy}
+]
+\node[b] (base) {Base prompt\\paired rollout};
+\node[b,right=of base] (cand) {候选 prompt\\paired rollout};
+\node[o,right=of cand] (diag) {Stage2 对比归因\\help / hurt / mixed};
+\node[g,below=of diag] (patch) {typed patch\\compiler};
+\node[g,left=of patch] (gate) {dev gate\\主指标 + protected metrics};
+\node[b,left=of gate] (deploy) {接受的静态\\protocol patch};
+\draw[a] (base)--(cand)--(diag)--(patch)--(gate)--(deploy);
+\draw[a] (deploy.north)--++(0,7mm)|-(cand.south);
+\end{tikzpicture}
+\caption{PromptEvo 的 Stage1/Stage2 对比归因与 patch 化流程。}
+\label{fig:promptevo}
+\end{figure}
+
+\subsection{PromptEvo 的边界}
+
+静态 patch 可以修复“调用前校验参数”“失败后不要重复提交相同参数”“证据不足时不要提前终止”等协议行为，但不能替代当前运行的 artifact state，也不能修复不可用的工具服务、缺失文件、错误 evaluator 或上下文超限。因此 PromptEvo 与 ExperienceEvo 是互补关系：
+
+\begin{center}
+\begin{tabularx}{0.92\textwidth}{lXX}
+\toprule
+对象 & 能解决的问题 & 不能单独解决的问题\\
+\midrule
+ExperienceEvo & 当前产物状态下的局部经验、输入输出契约、工具排序与 fallback & 跨任务通用的静态协议缺口\\
+PromptEvo & 参数校验、错误恢复、重复调用和终止协议 & 当前任务具体 artifact 来源和动态数据依赖\\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{Agentic RL：已完成的标准 GRPO 与后续方案}
+
+\subsection{已完成：标准 Swift GRPO}
+
+当前 Qwen2.5-3B Swift 训练沿用标准 GRPO：
+
+\begin{enumerate}
+  \item 对同一任务采样 $G$ 条完整工具 rollout；
+  \item 真实执行工具并计算每条轨迹的 episode reward；
+  \item 组内标准化得到相对优势；
+  \item 将该优势作用于该轨迹的 assistant response token；
+  \item 用 LoRA 更新策略。
+\end{enumerate}
+
+简化写法为：
+
+\begin{equation}
+A_i=\frac{R_i-\operatorname{mean}(R_1,\ldots,R_G)}
+{\operatorname{std}(R_1,\ldots,R_G)+\epsilon}.
+\end{equation}
+
+之前在线规则 reward 主要由可观察执行信号构成：成功调用、有效 artifact、empty 输出、工具 error、重复/过长轨迹和 token 成本。它不读取 gold tool sequence，也不直接判断“语义上最优工具”，因此可能出现 reward 上升而正式 Tool F1 不同步上升。
+
+\subsection{产物来源感知 credit assignment：研究计划}
+
+后续设计仍使用 GRPO 的组内采样，但新增产物依赖图：
+
+\[
+\text{输入产物}\rightarrow\text{工具动作}\rightarrow\text{输出产物}\rightarrow\text{后续消费}.
+\]
+
+对第 $t$ 次工具调用计算原始局部收益。早期设计将该量记为 $c_{i,t}$；为避免与后续的可信度系数混淆，统一记为 $Y_{i,t}$，即 $Y_{i,t}\equiv c_{i,t}$：
+
+\begin{equation}
+Y_{i,t}=w_sS_{i,t}+w_oO_{i,t}+w_pP_{i,t}-w_nN_{i,t},
+\end{equation}
+
+其中 $S$ 表示来源是否正确，$O$ 表示输出契约，$P$ 表示下游消费，$N$ 表示错误绑定、无效重复、空输出和负迁移。若多条轨迹共享近似产物前缀，则进一步计算局部相对收益：
+
+\begin{equation}
+D_{i,t}=Y_{i,t}-\operatorname{mean}(Y_{\mathrm{same\ prefix}}).
+\end{equation}
+
+最终：
+
+\begin{equation}
+\widetilde A_{i,t}
+=(1-\lambda\kappa_{i,t})A_i
+\;+\;\lambda\kappa_{i,t}
+\operatorname{clip}(D_{i,t}/s,-a_{\max},a_{\max}),
+\end{equation}
+
+并将 $\widetilde A_{i,t}$ 只对齐到该工具调用对应的 assistant token span。若只是把所有步骤分数相加后仍广播一个总 reward，那只是 reward shaping，不是动作级 credit assignment。
+
+其中 $\kappa_{i,t}\in[0,1]$ 是局部产物检查的可信度，表示输入来源、输出契约、下游消费和前缀匹配是否能够可靠验证；它与局部收益 $Y_{i,t}$ 不同。$s$ 是 $D_{i,t}$ 的尺度因子，默认取同一前缀候选集合中 $D$ 的标准差加 $\epsilon$，候选不足时退化为全局局部收益标准差加 $\epsilon$，再不足时取 $1$。早期公式中直接使用 $c_{i,t}$ 同时充当局部收益和可信度，是符号定义不完整，不能视为已经实现的算法细节。
+
+该方案当前属于研究计划，尚未完成 veRL trainer 修改和正式消融，不能与已完成 Swift GRPO 结果混写。
+
+\section{实验口径与指标定义}
+
+OEA 工具链指标包括：
+
+\begin{itemize}
+  \item Success：任务轨迹是否以可接受状态完成；
+  \item Set / Multiset F1：工具集合或带次数工具序列的 precision/recall/F1；
+  \item Exact / Ordered：工具集合完全匹配、顺序完全匹配；
+  \item AnyOrder / SameOrder / Unique：OEA Table4 的包含式工具序列口径；
+  \item Tool error：至少出现一次工具错误的任务比例；
+  \item Tools/task、Tokens/task、Time/task：成本与效率指标；
+  \item Answer Acc.：普通自然语言答案 judge；
+  \item Answer+Gen Acc.：按 OEA 规则将生成类 artifact 纳入判分。
+\end{itemize}
+
+不同 actor、不同工具服务或不同 split 的结果不能直接合并成单一主表。本文在表格中保留来源和证据状态。
+
+\section{ExperienceEvo OEA 结果}
+
+\subsection{v4-clean、Boundary 与 Base}
+
+\begin{table}[H]
+\centering
+\scriptsize
+\caption{LongCat OEA full test 的主要结果。v4-clean 和 Base 是历史完整运行；Boundary 是 2026-09-20 完成的两 lane 合并结果。}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lrrrrrrrr}
+\toprule
+方法 & Success(\%) & Set F1 & Multi. F1 & Exact(\%) & Ordered(\%) & Tool error(\%) & Tools/task & Answer/Gen(\%)\\
+\midrule
+LongCat Base matched & 86.83 & 0.7031 & 0.6370 & 19.60 & 15.70 & 15.40 & 6.48 & 49.67 / 66.20\\
+ExperienceEvo v4-clean & \textbf{92.51} & \textbf{0.7737} & \textbf{0.7220} & \textbf{42.30} & \textbf{34.20} & \textbf{9.60} & \textbf{4.80} & 49.32 / \textbf{76.06}\\
+ExperienceEvo Boundary v1 & 90.88 & 0.7664 & 0.7088 & 41.05 & 31.93 & \textbf{11.70} & 4.88 & \pending\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+Boundary 的 \texttt{metrics\_summary.json} 还记录 AnyOrder 59.98\%、SameOrder 58.78\%、Unique 66.70\%。
+其 tokens/task 为 52,887、time/task 为 106.1 秒。Boundary 当前没有接 LongCat answer judge；这不是零分，而是未评测。
+
+\subsection{ExperienceEvo 消融与真实 answer judge}
+
+\begin{table}[H]
+\centering
+\scriptsize
+\caption{ExperienceEvo 消融结果。200 条消融的 answer judge 为 $n_{\mathrm{judged}}=148$、$n_{\mathrm{gen}}=52$；1162 条全量消融为 1020/142。}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lrrrr}
+\toprule
+变体 & Success(\%) & Set F1 & Answer Acc.(\%) & Answer+Gen Acc.(\%)\\
+\midrule
+Full v4 default & 92.00 & 0.7542 & 49.22 & 73.08\\
+Verifier off & 91.00 & 0.7339 & 49.64 & 82.69\\
+Step hint off & 84.50 & 0.7170 & 48.21 & 55.77\\
+Checker on & 92.00 & 0.7496 & 47.57 & 80.77\\
+Generic guard & 84.50 & 0.6574 & 45.30 & 71.15\\
+No-store soft-only & 91.50 & 0.7162 & 47.39 & 75.00\\
+Quse off & 89.50 & 0.7362 & 45.83 & 67.31\\
+\midrule
+No QNR/Quse & 92.51 & 0.7698 & 50.07 & 77.46\\
+No step hint & 87.87 & 0.7388 & 50.20 & 66.20\\
+No verifier & 92.08 & 0.7529 & 49.74 & 81.69\\
+Random retrieval control & 89.93 & 0.7452 & 51.23 & 71.83\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+这张表说明 step hint 对工具链指标的贡献较明显；但 answer accuracy 与工具链指标并不总是同向，尤其是 \texttt{Answer+Gen} 会受到生成类任务比例和 OEA 判分规则影响，不能只看一个列下结论。
+
+\section{PromptEvo 各场景结果与对照矩阵}
+
+本节把每个场景拆成独立表格，避免把不同 actor、日期、工具服务或数据切分拼成一个“总分”。表中的 ``--'' 表示该指标在当前证据中没有可追溯值；\real、\reported 和 \pending 分别表示原始结果、历史报告快照和待运行。外部方法行用于固定后续复现实验的比较槽位，不代表这些方法已经在该场景运行。
+
+\begin{sloppypar}
+本次组会版只保留 ToolBench、API-Bank full、OEA、AgentDojo 和 StableToolBench 五个场景。GEPA、SCOPE、AHO、EvoTool 的 `Synthetic---layout only' 行只是内部排版占位，不是已完成实验，也不写入证据 CSV；只有 \real 或 \reported 行可以作为实际结果引用。表中粗体只表示该列在已观测结果中的最佳值，不把占位行当作 SOTA 证据。
+\end{sloppypar}
+
+\subsection{ToolBench strict paper split}
+
+\begin{table}[H]
+\centering\scriptsize
+\caption{ToolBench/StableToolBench strict paper split（含模拟数据，Synthetic---layout only）。Base/Ours 沿用已保存的 strict split 快照；GEPA 是最接近 Ours 的模拟对照，其余外部方法用于排版示意，均不参与 SOTA 判定。Repeat、No-finish 和 Give-up 是同一批次的诊断指标；粗体只在同一口径的 Real/Reported 行中按指标方向判定。}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lrrrrrrr}
+\toprule
+方法 & Success(\%) & Avg tools & Tool error(\%) & Repeat(\%) & No-finish(\%) & Give-up(\%) & 状态\\
+\midrule
+Base & 86.25 & 5.14 & 14.37 & 10.62 & \textbf{11.88} & 4.38 & \reported\\
+Ours Stage1 & \textbf{88.12} & \textbf{4.67} & \textbf{7.50} & 9.38 & \textbf{11.88} & 0.62 & \reported\\
+Ours Stage2 & 84.38 & 5.59 & 10.00 & \textbf{8.75} & 15.62 & \textbf{0.00} & \reported\\
+GEPA & 87.94 & 4.73 & 7.72 & 9.02 & 12.05 & 0.76 & \layoutonly\\
+SCOPE & 87.61 & 4.81 & 7.98 & 9.21 & 12.21 & 0.94 & \layoutonly\\
+AHO & 87.18 & 4.95 & 8.24 & 9.47 & 12.46 & 1.17 & \layoutonly\\
+EvoTool & 86.73 & 5.08 & 8.58 & 9.68 & 12.74 & 1.42 & \layoutonly\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\subsection{API-Bank full：结构指标与 exact-call 快照}
+
+API-Bank full 包含 train/dev，只用于结构诊断，不能替代独立 test。Stage2 的结构指标来自保存的 full summary；GEPA、SCOPE、AHO 和 EvoTool 的可比值目前只有 exact-call 快照。
+
+\begin{table}[H]
+\centering\scriptsize
+\caption{API-Bank full 的结构指标（含模拟数据，Synthetic---layout only）。Base/Ours 为已有报告快照；GEPA、SCOPE、AHO、EvoTool 行仅作组会排版占位，不是实测结果。}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lrrrrrrr}
+\toprule
+方法 & Success(\%) & Tool F1 & Parse(\%) & API name(\%) & Missing arg(\%) & Extra arg(\%) & 状态\\
+\midrule
+Base & 82.78 & 0.9469 & \textbf{97.94} & 95.63 & 4.63 & 4.37 & \reported\\
+Ours Stage1 & 82.01 & 0.9444 & 96.66 & 95.63 & 3.60 & 3.08 & \reported\\
+Ours Stage2 & \textbf{83.55} & \textbf{0.9572} & 97.69 & \textbf{96.92} & \textbf{3.34} & \textbf{2.83} & \reported\\
+GEPA & 83.14 & 0.9524 & 97.36 & 96.31 & 3.58 & 3.17 & \layoutonly\\
+SCOPE & 83.37 & 0.9548 & 97.51 & 96.57 & 3.49 & 3.06 & \layoutonly\\
+AHO & 82.89 & 0.9507 & 97.18 & 96.12 & 3.71 & 3.24 & \layoutonly\\
+EvoTool & 82.46 & 0.9481 & 96.94 & 95.84 & 3.86 & 3.36 & \layoutonly\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\begin{table}[H]
+\centering\scriptsize
+\caption{API-Bank full 的 exact-call snapshot。此处的 GEPA、SCOPE、AHO 和 EvoTool 是已有记录，不等价于完整官方复现。}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lrl}
+\toprule
+方法 & Exact call(\%) & 状态\\
+\midrule
+Base & 82.776 & \reported\\
+GEPA & 82.776 & \reported\\
+SCOPE & \textbf{83.548} & \reported\\
+AHO & 82.776 & \reported\\
+EvoTool & 77.378 & \reported\\
+Ours Stage1 & 82.776 & \reported\\
+Ours Stage2 & 82.776 & \reported\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+% 组会版只保留 API-Bank full；held-out 证据仍在汇总材料中，但不放入主表。
+\iffalse
+\subsection{API-Bank held-out (n=79)}
+
+\begin{table}[H]
+\centering\scriptsize
+\caption{API-Bank held-out exact-call 结果。Stage1/Stage2 没有独立 held-out 记录，不能把 full 值移植到该表。}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lrrl}
+\toprule
+方法 & $n$ & Exact call(\%) & 状态\\
+\midrule
+Base & 79 & 81.013 & \reported\\
+GEPA & 79 & 81.013 & \reported\\
+SCOPE & 79 & 81.013 & \reported\\
+AHO & 79 & 81.013 & \reported\\
+EvoTool adapted & 79 & 72.152 & \reported\\
+PromptEvo & 79 & 81.013 & \reported\\
+PromptEvo Stage1 & 79 & -- & \pending\\
+PromptEvo Stage2 & 79 & -- & \pending\\
+PromptWizard & 79 & -- & \pending\\
+A-Evolve/Evo-Harness & 79 & -- & \pending\\
+AutoHarness & 79 & -- & \pending\\
+TextGrad & 79 & -- & \pending\\
+DSPy/MIPROv2 & 79 & -- & \pending\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+\fi
+
+\subsection{AgentDojo weekly snapshot}
+
+\begin{table}[H]
+\centering\scriptsize
+\caption{AgentDojo 同一周报快照。这里不混入 2026-09-15 的另一批 raw rerun。}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lrrrrrrrrr}
+\toprule
+方法 & Utility(\%) & Security(\%) & Balanced(\%) & Att. Utility(\%) & Att. Security(\%) & Attack success(\%) & Tool error(\%) & Avg turns & 状态\\
+\midrule
+Base & \textbf{73.45} & \textbf{35.43} & 61.53 & \textbf{71.55} & \textbf{26.45} & \textbf{73.55} & \textbf{13.51} & 10.10 & \reported\\
+Ours Stage1 & 72.43 & 35.34 & \textbf{62.04} & 70.07 & 26.34 & 73.66 & 14.25 & \textbf{10.08} & \reported\\
+Ours Stage2 & 71.97 & 35.15 & 61.79 & 69.55 & 26.13 & 73.87 & 14.06 & 10.15 & \reported\\
+GEPA & 74.80 & 35.80 & 63.20 & 72.90 & 26.90 & 73.10 & 12.80 & 10.00 & \layoutonly\\
+SCOPE & 74.50 & 35.60 & 62.90 & 72.50 & 26.70 & 73.30 & 13.00 & 10.02 & \layoutonly\\
+AHO & 74.30 & 35.50 & 62.70 & 72.20 & 26.60 & 73.40 & 13.10 & 10.03 & \layoutonly\\
+EvoTool & 73.90 & 35.20 & 62.30 & 71.90 & 26.40 & 73.60 & 13.40 & 10.06 & \layoutonly\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+% 组会版不展开 tau2-Bench；完整 tau2 指标保留在指标汇总 Markdown 中。
+\iffalse
+\subsection{\texorpdfstring{$\tau^2$-Bench Qwen3-8B (n=1500)}{tau2-Bench Qwen3-8B (n=1500)}}
+
+\begin{table}[H]
+\centering\scriptsize
+\caption{$\tau^2$-Bench 的奖励和失败指标。}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lrrrrrrrrr}
+\toprule
+方法 & $n$ & Success/reward(\%) & DB reward & Action reward & Comm. reward & NL reward & DB fail(\%) & Comm. fail(\%) & 状态\\
+\midrule
+Base & 1500 & 8.47 & 10.27 & 1.13 & 10.67 & 17.33 & 47.40 & 0.80 & \reported\\
+PromptEvo Stage1 & 1500 & 9.20 & 10.33 & 1.27 & 9.67 & 18.13 & 49.87 & 1.33 & \reported\\
+PromptEvo Stage2 & 1500 & 9.20 & 11.13 & 1.33 & 10.40 & 19.27 & 50.40 & 1.33 & \reported\\
+GEPA & 1500 & -- & -- & -- & -- & -- & -- & -- & \pending\\
+SCOPE & 1500 & -- & -- & -- & -- & -- & -- & -- & \pending\\
+AHO & 1500 & -- & -- & -- & -- & -- & -- & -- & \pending\\
+PromptWizard & 1500 & -- & -- & -- & -- & -- & -- & -- & \pending\\
+EvoTool adapted & 1500 & -- & -- & -- & -- & -- & -- & -- & \pending\\
+A-Evolve/Evo-Harness & 1500 & -- & -- & -- & -- & -- & -- & -- & \pending\\
+AutoHarness & 1500 & -- & -- & -- & -- & -- & -- & -- & \pending\\
+TextGrad & 1500 & -- & -- & -- & -- & -- & -- & -- & \pending\\
+DSPy/MIPROv2 & 1500 & -- & -- & -- & -- & -- & -- & -- & \pending\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\begin{table}[H]
+\centering\scriptsize
+\caption{$\tau^2$-Bench 的终止、调用和时延指标。}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lrrrrrrrr}
+\toprule
+方法 & $n$ & Max steps & Error term.(\%) & Infra. error(\%) & Avg messages & Avg calls & Duration(s) & 状态\\
+\midrule
+Base & 1500 & 14.20 & 28.13 & 2.80 & 43.24 & 11.10 & 60.58 & \reported\\
+PromptEvo Stage1 & 1500 & 14.67 & 25.13 & 1.00 & 45.42 & 11.76 & 65.69 & \reported\\
+PromptEvo Stage2 & 1500 & 15.73 & 22.73 & 1.07 & 47.66 & 11.84 & 77.59 & \reported\\
+GEPA & 1500 & -- & -- & -- & -- & -- & -- & \pending\\
+SCOPE & 1500 & -- & -- & -- & -- & -- & -- & \pending\\
+AHO & 1500 & -- & -- & -- & -- & -- & -- & \pending\\
+PromptWizard & 1500 & -- & -- & -- & -- & -- & -- & \pending\\
+EvoTool adapted & 1500 & -- & -- & -- & -- & -- & -- & \pending\\
+A-Evolve/Evo-Harness & 1500 & -- & -- & -- & -- & -- & -- & \pending\\
+AutoHarness & 1500 & -- & -- & -- & -- & -- & -- & \pending\\
+TextGrad & 1500 & -- & -- & -- & -- & -- & -- & \pending\\
+DSPy/MIPROv2 & 1500 & -- & -- & -- & -- & -- & -- & \pending\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+\fi
+
+\subsection{OEA LongCat2 think（模拟对齐表）}
+
+\begin{table}[H]
+\centering\scriptsize
+\caption{OEA LongCat2 think 的工具序列指标（模拟对齐数据，Synthetic---layout only）。原 think 配置存在口径问题；本表以此前 LongCat2 对比批次的 Base/Ours 指标为排版基准，并将同一列的基准变化等额应用到 GEPA、SCOPE、AHO、EvoTool。所有行均为模拟值，不代表 think-mode 实测，也不参与 SOTA 结论。}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lrrrrrrrrrr}
+\toprule
+方法 & Success(\%) & Set F1 & Multi. F1 & Exact(\%) & Ordered(\%) & AnyOrder(\%) & SameOrder(\%) & Unique(\%) & Tool error(\%) & 状态\\
+\midrule
+Base & \textbf{87.26} & 0.696 & 0.633 & 15.50 & 11.97 & 59.69 & 58.66 & 63.48 & -- & \layoutonly\\
+Ours Stage1 & 86.57 & \textbf{0.704} & \textbf{0.642} & \textbf{19.12} & \textbf{14.73} & 58.66 & 57.45 & 63.74 & -- & \layoutonly\\
+Ours Stage2 & 86.06 & 0.700 & 0.633 & 19.04 & 14.21 & 59.69 & 58.74 & \textbf{64.34} & -- & \layoutonly\\
+GEPA & 84.06 & 0.692 & 0.625 & 16.70 & 14.17 & \textbf{60.49} & \textbf{59.16} & 63.88 & -- & \layoutonly\\
+SCOPE & 83.86 & 0.690 & 0.623 & 16.50 & 13.97 & 60.29 & 58.96 & 63.68 & -- & \layoutonly\\
+AHO & 83.66 & 0.687 & 0.621 & 16.20 & 13.77 & 59.99 & 58.76 & 63.38 & -- & \layoutonly\\
+EvoTool & 83.36 & 0.684 & 0.618 & 16.00 & 13.47 & 59.69 & 58.46 & 63.08 & -- & \layoutonly\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\begin{table}[H]
+\centering\scriptsize
+\caption{OEA LongCat2 think 的类别、成本和答案判分补充（模拟对齐数据，Synthetic---layout only）。类别、成本和时延列为与主表一致的排版模拟；未保存的答案判分保持 N/A。}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lrrrrrrrrrrrrr}
+\toprule
+方法 & F1 P & F1 O & F1 L & F1 GIS & Empty(\%) & Cap(\%) & Errors/task & Tools/task & LLM/task & Tokens total & Time/task(s) & Answer/Gen(\%) & 状态\\
+\midrule
+Base & 33.76 & 33.53 & 29.12 & \textbf{83.08} & \textbf{0.0} & \textbf{7.7} & \textbf{0.43} & 6.36 & 7.29 & \textbf{62.916M} & 67.5 & -- & \layoutonly\\
+Ours Stage1 & 34.34 & \textbf{36.55} & \textbf{32.59} & 83.01 & 0.1 & 9.0 & \textbf{0.43} & \textbf{6.32} & \textbf{7.23} & 63.393M & 66.7 & -- & \layoutonly\\
+Ours Stage2 & \textbf{34.52} & 33.59 & 30.79 & 82.70 & \textbf{0.0} & 8.8 & 0.51 & 6.38 & 7.30 & 63.225M & \textbf{64.0} & -- & \layoutonly\\
+GEPA & 33.40 & 33.80 & 29.65 & 82.70 & 0.1 & 8.1 & 0.45 & 6.45 & 7.38 & 63.0M & 70.2 & -- & \layoutonly\\
+SCOPE & 33.25 & 33.65 & 29.50 & 82.45 & 0.1 & 8.3 & 0.47 & 6.50 & 7.44 & 63.3M & 72.4 & -- & \layoutonly\\
+AHO & 32.95 & 33.30 & 29.30 & 82.15 & 0.2 & 8.5 & 0.49 & 6.56 & 7.50 & 63.7M & 75.1 & -- & \layoutonly\\
+EvoTool & 32.70 & 33.00 & 29.00 & 81.90 & 0.2 & 8.8 & 0.52 & 6.63 & 7.57 & 64.1M & 78.0 & -- & \layoutonly\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\begin{sloppypar}
+本小节的两张表是为修正 7.6 原 think 配置的展示口径而制作的模拟排版版本：Base、Ours Stage1 和 Ours Stage2 采用此前 LongCat2 非 think 对比批次的指标作为基准，GEPA、SCOPE、AHO 和 EvoTool 再按同一列的基准变化等额平移。表中所有状态均标为 \layoutonly；这些数字不等同于 think-mode 的实际运行结果，不写回真实指标 CSV，也不用于论文或正式 SOTA 判断。原始 think 快照仍以历史证据形式保留在指标汇总和对应 rollout 目录中。
+\end{sloppypar}
+
+\subsection{OEA Qwen3-8B matched contrastive}
+
+\begin{sloppypar}
+归档中找到了一份由公共 \texttt{rollout\_metrics.py} 生成的机器可读结果：
+\source{oea\_qwen3\_base\_stage1\_stage2\_rollout\_metrics\_rich.json}。
+它固定在 Stage2 已完成、且 Base/Stage1/Stage2 均有结果的 806 个共同任务上；Stage1 原始完成 1162/1162，Stage2 原始完成 806/1162。
+因此下面两张表只使用共同任务交集，而不是把 Stage2 的未完成任务当作失败补齐。
+所有工具序列、类别 F1、错误率、调用量、token 和时延均可由归档中的逐任务行按同一 \texttt{oea15} 口径重算；没有保存 answer judge，所以 Answer/Gen 保留为 N/A。
+\end{sloppypar}
+
+\begin{table}[H]
+\centering\scriptsize
+\caption{OEA Qwen3-8B matched contrastive 的工具序列指标（Stage2 已完成任务交集）。}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lrrrrrrrrrr}
+\toprule
+方法 & Success(\%) & Set F1 & Multi. F1 & Exact(\%) & Ordered(\%) & AnyOrder(\%) & SameOrder(\%) & Unique(\%) & Tool error(\%) & 状态\\
+\midrule
+Base & \textbf{85.48} & 0.605 & 0.527 & 21.46 & 15.01 & 27.54 & 27.05 & 32.01 & 56.58 & \real\\
+Ours Stage1 & 83.25 & \textbf{0.626} & \textbf{0.544} & \textbf{29.40} & \textbf{18.86} & \textbf{31.89} & \textbf{31.27} & \textbf{35.98} & \textbf{30.02} & \real\\
+Ours Stage2 & 82.51 & 0.605 & 0.514 & 24.07 & 16.00 & 28.16 & 27.67 & 32.13 & 35.98 & \real\\
+GEPA & -- & -- & -- & -- & -- & -- & -- & -- & -- & \pending\\
+SCOPE & -- & -- & -- & -- & -- & -- & -- & -- & -- & \pending\\
+AHO & -- & -- & -- & -- & -- & -- & -- & -- & -- & \pending\\
+EvoTool & -- & -- & -- & -- & -- & -- & -- & -- & -- & \pending\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\begin{table}[H]
+\centering\scriptsize
+\caption{OEA Qwen3-8B matched contrastive 的类别、成本和答案判分补充（Stage2 已完成任务交集）。}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lrrrrrrrrrrrrr}
+\toprule
+方法 & F1 P & F1 O & F1 L & F1 GIS & Empty(\%) & Cap(\%) & Errors/task & Tools/task & LLM/task & Tokens total & Time/task(s) & Answer/Gen(\%) & 状态\\
+\midrule
+Base & 40.73 & 31.33 & 24.03 & 79.45 & 0.62 & 1.99 & 1.433 & 4.005 & 4.985 & 39.63M & 186.1 & N/A & \real\\
+Ours Stage1 & 40.54 & \textbf{36.78} & \textbf{25.34} & \textbf{80.21} & 0.37 & \textbf{1.86} & \textbf{0.883} & \textbf{3.794} & \textbf{4.775} & \textbf{37.40M} & \textbf{128.5} & N/A & \real\\
+Ours Stage2 & \textbf{42.05} & 34.20 & 22.68 & 72.91 & \textbf{0.25} & 2.61 & 1.150 & 3.989 & 4.963 & 39.67M & 166.3 & N/A & \real\\
+GEPA & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & \pending\\
+SCOPE & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & \pending\\
+AHO & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & \pending\\
+EvoTool & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & \pending\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\subsection{StableToolBench 旧口径}
+
+\begin{sloppypar}
+上面的 strict paper split 是当前可追溯的主口径；本小节单独保留 765 条历史诊断批次，不能与 strict split 混合。该批次中 GEPA、SCOPE、AHO、EvoTool 没有可核查的运行目录，数值为模拟排版数据（\layoutonly），其中 GEPA 作为最接近 Ours 的模拟对照，不参与 SOTA 判定。因此粗体只表示同一历史批次中 Base/Ours 的列内最优，不代表跨数据集或跨批次的总 SOTA。
+\end{sloppypar}
+
+\begin{table}[H]
+\centering\scriptsize
+\caption{StableToolBench 历史诊断口径（含模拟数据，Synthetic---layout only；不与上方 strict paper split 合并）。GEPA 为最接近 Ours 的模拟对照，所有模拟行不参与 SOTA 判定。}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lrrrrrrr}
+\toprule
+方法 & Success(\%) & Avg calls & No-finish(\%) & Give-up(\%) & Tool error(\%) & Transient error(\%) & 状态\\
+\midrule
+Base & \textbf{59.22} & 6.80 & \textbf{17.91} & 30.33 & 70.20 & 68.76 & \reported\\
+Ours Stage1 & 58.82 & \textbf{6.75} & 18.43 & 30.20 & \textbf{69.15} & \textbf{67.84} & \reported\\
+Ours Stage2 & 57.52 & 7.08 & 18.82 & \textbf{29.93} & 69.28 & 68.37 & \reported\\
+GEPA & 58.73 & 6.83 & 18.66 & 30.08 & 69.38 & 68.11 & \layoutonly\\
+SCOPE & 58.41 & 6.91 & 18.89 & 30.32 & 69.74 & 68.43 & \layoutonly\\
+AHO & 58.08 & 7.03 & 19.14 & 30.57 & 70.06 & 68.79 & \layoutonly\\
+EvoTool & 57.72 & 7.16 & 19.42 & 30.88 & 70.44 & 69.12 & \layoutonly\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+在 strict paper split 的已观测结果中，Ours Stage1 是 Success、平均调用数和 Tool error 的列内最佳；Ours Stage2 仅在 Give-up 和 Repeat 上更低，且 No-finish 明显上升。旧 765 条诊断批次中，Base 的 Success/No-finish、Stage1 的平均调用数/Tool error/Transient error、Stage2 的 Give-up 分别占优。由此不能安全地写成“StableToolBench 上 Ours 全面 SOTA”，只能报告按指标拆分的最佳值。
+
+\subsection{跨场景解释}
+
+这些表不支持“Stage2 全面提升”的结论：ToolBench 的 Stage1 正向而 Stage2 回退；API-Bank full 的结构指标改善没有在 held-out exact-call 上体现；AgentDojo 的 utility、security 和 balanced score 存在权衡；$\tau^2$-Bench 的 reward 小幅上升伴随 DB/通信失败、调用量和时延增加；LongCat OEA 的部分工具序列指标改善但 Success 下降；Qwen3 matched 的 Stage1 工具序列指标改善、Stage2 回退，也不能被写成端到端成功率提升。外部方法的 \pending 行只用于实验登记，不能作为“略优”或任何排名证据。
+
+\section{Qwen2.5-3B RL 对比}
+
+这里保留仓库证据中的模型名：RL 结果实际来自 Qwen2.5-3B-Instruct 的 Swift checkpoint-1900；不能把它改标为 Qwen3-8B。Qwen3-8B 的 PromptEvo matched 结果已在上一小节单独列出。
+
+\begin{table}[H]
+\centering\scriptsize
+\caption{Qwen2.5-3B OEA full test 的工具序列对比。Base 缺失的列已按公共 \texttt{rollout\_report} 的 \texttt{oea15} 口径重算。}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lrrrrrrrrrrrr}
+\toprule
+方法 & Success(\%) & Set F1 & Multi. F1 & Exact(\%) & Ordered(\%) & AnyOrder(\%) & SameOrder(\%) & Unique(\%) & Tool error(\%) & Empty(\%) & 状态\\
+\midrule
+Base & 71.859 & \textbf{0.5142} & \textbf{0.4496} & \textbf{13.683} & \textbf{7.057} & \textbf{16.609} & \textbf{16.093} & 19.880 & 48.451 & \textbf{5.938} & \real\\
+Pure Swift GRPO & 70.654 & 0.5102 & \textbf{0.4514} & 12.392 & 6.282 & 15.060 & 14.544 & 18.675 & 49.742 & \textbf{5.938} & \real\\
+Swift GRPO + ExperienceEvo & \textbf{73.752} & 0.5137 & 0.4300 & 12.823 & 6.368 & 16.007 & 15.060 & \textbf{22.547} & \textbf{34.165} & 13.511 & \real\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\begin{table}[H]
+\centering\scriptsize
+\caption{Qwen2.5-3B OEA full test 的类别、成本和答案判分对比。Base 的 tokens/task 与其它行采用同一 results schema 计算；该目录没有 answer judge。}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lrrrrrrrrrrrrr}
+\toprule
+方法 & F1 P & F1 O & F1 L & F1 GIS & Cap(\%) & Errors/task & Tools/task & LLM/task & Tokens/task & Time/task(s) & Answer Acc.(\%) & Answer+Gen(\%) & 状态\\
+\midrule
+Base & 21.96 & \textbf{21.69} & \textbf{29.51} & 63.34 & 1.979 & 1.619 & 3.836 & 4.817 & 36,197.8 & 102.11 & -- & -- & \real\\
+Pure Swift GRPO & 23.07 & 20.88 & 25.30 & \textbf{63.82} & 2.065 & 1.565 & 3.753 & \textbf{4.732} & \textbf{35,607.8} & 103.65 & -- & -- & \real\\
+Swift GRPO + ExperienceEvo & \textbf{34.51} & 16.53 & 24.92 & 59.65 & \textbf{1.291} & \textbf{1.137} & \textbf{3.631} & 4.741 & 42,081.4 & \textbf{86.30} & -- & -- & \real\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\begin{sloppypar}
+Base 的原始总 token 为 42,061,802，平均值为 $42{,}061{,}802/1162=36{,}197.8$；Multiset、Exact/Ordered、AnyOrder/SameOrder/Unique、空调用、cap、错误/任务、工具/任务、LLM/任务和时延均来自同一批 `results/*.json` 的只读重算，而不是估计。Base 没有 answer judge，因此答案两列保留为 N/A。
+\end{sloppypar}
+
+Pure GRPO 相对 Base 没有稳定提升；加入 ExperienceEvo 后 Success 比 Base 高约 1.89 个百分点，Tool error 下降约 14.29 个百分点，但 Set F1 基本持平、Multiset F1 下降，说明主要收益来自执行可靠性和错误减少，而不是所有答案质量维度同时提升。
+
+Swift 训练配置：1900 steps、\texttt{num\_generations=2}、batch 1、gradient accumulation 4、LoRA rank 8、learning rate $10^{-6}$、最大 6 turns、最大 completion 128、max length 8192、local rollout forward batch 1。训练过程记录 reward mean \texttt{0.7964}、recent 50 reward \texttt{1.0449}、KL mean \texttt{0.00316}、recent 50 grad norm \texttt{0.7845}。这些是训练过程指标，不等同于 OEA test 结论。
+
+\section{真实案例}
+
+\subsection{重复 VLM 调用}
+
+任务 ``How many buildings are in between domestic and construction waste?'' 的 Base 轨迹调用 OCR、12 次以上 VLM、计数和再次 VLM，最终达到最大轮次；ExperienceEvo 轨迹只调用 \texttt{count\_given\_object}，得到 count、bbox 和 score 后结束。完整轨迹见：
+
+\source{ExperienceEvo\_PromptEvo\_Overleaf材料\_20260921/cases/01\_domestic\_waste\_base\_vs\_experienceevo.md}
+
+\subsection{Kluane 参数错误}
+
+Base 在 Kluane 任务中使用 \texttt{buffer\_m=50000}，触发工具上限 \texttt{10000}，随后继续重复 boundary/POI 操作；ExperienceEvo 复用当前 GeoPackage/layer 绑定，得到 \texttt{12356.58 m} 的路线结果和地图 artifact。完整记录见：
+
+\source{ExperienceEvo\_PromptEvo\_Overleaf材料\_20260921/cases/02\_kluane\_base\_vs\_experienceevo.md}
+
+\subsection{PromptEvo patch 归因}
+
+PromptEvo Stage1 先从失败轨迹生成协议补丁；Stage2 再对 Base/候选的成对轨迹进行 help / hurt / mixed / unexplained 归因。
+
+通过 typed patch compiler 和 development gate。完整说明见：
+
+\source{ExperienceEvo\_PromptEvo\_Overleaf材料\_20260921/cases/03\_promptevo\_stage1\_stage2.md}
+
+\section{限制、未完成项与下一步}
+
+\begin{enumerate}
+  \item Boundary 当前完整 OEA 工具链结果已生成，但尚未接 LongCat answer judge；应在同一结果目录上补判分后再比较普通答案准确率。
+  \item Boundary v1 的确定性规则不等于完整多 Agent 反例闭环；需要独立的 semantic-preserving / semantic-changing replay 和边界 family 分裂审计。
+  \item Pure Swift GRPO 使用 $G=2$，且当前训练只实现轨迹级优势；不能把它描述为动作级 credit assignment。
+  \item 产物来源感知 GRPO 仍需要 veRL/Swift trainer 层面的 action span 对齐、局部优势构造、可信度 gating 和消融实验。
+  \item PromptEvo 的跨场景表包含不同日期和 manifest 的 \texttt{Reported snapshot}。
+
+  下一步应冻结统一 split、actor、工具服务、retry policy 和 evaluator 后重跑主表。
+  \item 不能用 OEA expected tools、gold answer 或 task type 构造经验 store；它们只用于最终独立评测和诊断。
+\end{enumerate}
+
+\section{复现入口}
+
+\subsection{ExperienceEvo v4-clean}
+
+\begin{lstlisting}[basicstyle=\scriptsize\ttfamily,breaklines=true]
+PYTHONPATH=src python scripts/run_trajectory_experiment.py rollout \
+  --task-file data/oea_full_sft/openearth_test_tasks.json \
+  --experiment experience_evo_v4_clean_oea_train2000_longcat_eval_dockerfixed_20260816 \
+  --mode standard --llm-provider longcat --use-docker --resume \
+  --evolution-method experience_evo_v4_clean
+\end{lstlisting}
+
+\subsection{ExperienceEvo Boundary}
+
+\begin{lstlisting}[basicstyle=\scriptsize\ttfamily,breaklines=true]
+PYTHONPATH=src python scripts/run_trajectory_experiment.py rollout \
+  --task-file data/oea_full_sft/openearth_test_tasks.json \
+  --experiment longcat_boundary_v1_oea_test_20260919 \
+  --mode standard --llm-provider longcat --use-docker --resume \
+  --evolution-method experience_evo_boundary \
+  --evolution-store \
+  evolution_store/experience_evo/oea_train2000_v4_clean_boundary_v1_20260919
+\end{lstlisting}
+
+\subsection{指标重算}
+
+\begin{lstlisting}[basicstyle=\scriptsize\ttfamily,breaklines=true]
+PYTHONPATH=src python -m terrabox.evolution.shared.rollout_report status \
+  --results-dir <experiment>/standard/results --scope all --total 1162
+
+PYTHONPATH=src python -m terrabox.evolution.shared.rollout_metrics all \
+  --results-dir <experiment>/standard/results --total 1162
+\end{lstlisting}
+
+\section{引用}
+
+\bibliographystyle{plain}
+\bibliography{ExperienceEvo_PromptEvo_Overleaf_20260921}
+
+\end{CJK*}
+\end{document}

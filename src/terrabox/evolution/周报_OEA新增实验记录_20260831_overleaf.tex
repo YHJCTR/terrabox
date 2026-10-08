@@ -1,0 +1,150 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{makecell}
+\usepackage{adjustbox}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+
+\title{Weekly Update: New OEA Experiments Since the Previous LaTeX Snapshot}
+\author{}
+\date{2026-08-31}
+
+\begin{document}
+\maketitle
+
+\noindent\textbf{Scope.} This note summarizes OEA experiments that were newly completed or filled in after the previous paper-table / LaTeX snapshot from 2026-08-24. It also records experiments that are still pending or have not yet been launched. The separate binary risk-classification project is outside the scope of this report.
+
+\section{Current Run Status}
+
+This session does not track PromptEvo. Within the current OEA / Memento / MemRL / ExpeL scope, there is no new formal OEA evaluation process running. The Memento-style CaseBank strict rollout-only OEA evaluation has completed all 1,162 test tasks and the LongCat answer judge. MemRL strict and ExpeL strict remain in adaptation / smoke-test stages; neither has started a formal full OEA run.
+
+\begin{table}[h]
+\centering
+\caption{Current OEA-related experiment status.}
+\scriptsize
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lll}
+\toprule
+\textbf{Experiment / Task} & \textbf{Status} & \textbf{Notes} \\
+\midrule
+Memento-style CaseBank strict rollout-only OEA eval & Completed; not running & All 1,162 OEA test tasks are saved; LongCat answer judge is complete. \\
+MemRL strict no-label OEA full eval & Formal full run not started & Strict adaptation and lite smoke are complete; the external MemRL full run has not been launched. \\
+ExpeL strict no-label OEA full eval & Formal full run not started & The official-mechanism audit direction is outlined; strict builder / smoke / full eval remain unfinished. \\
+Late-August Ours variants / full ablation answer judge & Not run or no summary found & Rollout / report tool metrics exist; apart from strict Memento, no LongCat answer-judge summaries are available. \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\section{Pending Experiments}
+
+\begin{table}[h]
+\centering
+\caption{Follow-up experiment queue.}
+\scriptsize
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{clll}
+\toprule
+\textbf{Priority} & \textbf{Experiment} & \textbf{Current Status} & \textbf{Next Step} \\
+\midrule
+P0 & MemRL external strict no-label smoke & External backend smoke not run & Run 5 tasks, then 20 tasks; check Qwen 2560-dimensional embeddings, retrieved IDs, Q-value updates, snapshot/load, and strict leak scan. \\
+P0 & MemRL external strict no-label OEA full & Not launched & Decide whether to run the full evaluation after external smoke passes; split the formal run into \texttt{gpu} and \texttt{nogpu} lanes to avoid LongCat idling on GPU-tool waits. \\
+P1 & ExpeL strict no-label builder / smoke & Unfinished & Build an adapted strict version following the official ExpeL gather $\rightarrow$ critique/reflection $\rightarrow$ insight $\rightarrow$ eval mechanism; remove F1, task type, expected tools, and gold dependencies. \\
+P1 & ExpeL strict no-label OEA full & Not launched & Run the full evaluation only after strict smoke passes. \\
+P1 & Ours variant / ablation LongCat answer judge & Not run or no summary found & If weekly-report or paper answer metrics are needed, run judge; keep the answer column as ``--'' for now, not zero. \\
+P2 & Strict Memento retrieval-hit audit & Final audit table not built & Add retrieval-hit rate, case usage, and similarity distribution to show the result is not lexical fallback or label leakage. \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\section{Core Comparison: Baseline, Ours, and Strict Memento}
+
+\begin{table*}[h]
+\centering
+\caption{Baseline, Ours, and strict Memento-style CaseBank on OEA.}
+\scriptsize
+\setlength{\tabcolsep}{2.2pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lcccccccccc}
+\toprule
+\textbf{Run} &
+\textbf{n} &
+\makecell{\textbf{Success}\\\textbf{(\%)}} &
+\textbf{Set F1} &
+\makecell{\textbf{Multi.}\\\textbf{F1}} &
+\makecell{\textbf{Exact /}\\\textbf{Ordered}} &
+\makecell{\textbf{OEA Any /}\\\textbf{Same / Unique}} &
+\makecell{\textbf{Category F1}\\\textbf{P/O/L/GIS}} &
+\makecell{\textbf{Tool}\\\textbf{err.}} &
+\makecell{\textbf{Tools}\\\textbf{/ task}} &
+\makecell{\textbf{Answer / Gen.}\\\textbf{Acc.}} \\
+\midrule
+LongCat Base matched & 1161/1162 & 86.9 & 0.703 & 0.637 & 19.6 / 15.7 & 59.0 / 58.4 / 63.7 & 34.47 / 35.68 / 30.00 / 82.46 & 15.4 & 6.48 & \textbf{49.67} / 66.20 \\
+Ours & 1162 & \textbf{92.5} & \textbf{0.774} & \textbf{0.722} & \textbf{42.3 / 34.2} & \textbf{59.6 / 59.0 / 67.9} & \textbf{44.67 / 58.50 / 40.29 / 90.11} & \textbf{9.6} & \textbf{4.80} & 49.32 / \textbf{76.06} \\
+Memento-style CaseBank strict rollout-only & 1162 & 87.0 & 0.705 & 0.647 & 21.3 / 17.1 & 58.7 / 58.0 / 63.2 & 34.21 / 36.83 / 29.52 / 84.76 & 11.8 & 6.23 & 48.92 / 72.54 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table*}
+
+\noindent\textbf{Takeaway.} Strict Memento outperforms the matched Base run on generated-artifact-inclusive accuracy, but it remains clearly weaker than Ours overall. The main gaps are in set / multiset tool F1, exact / ordered match, success rate, category-level F1, and tool efficiency.
+
+\section{New Full-Set OEA Diagnostics Since the LaTeX Snapshot}
+
+\begin{table*}[h]
+\centering
+\caption{Late-August full-set OEA diagnostics after the prior LaTeX snapshot.}
+\scriptsize
+\setlength{\tabcolsep}{2.1pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lccccccccc}
+\toprule
+\textbf{Run} &
+\textbf{n} &
+\makecell{\textbf{Success}\\\textbf{(\%)}} &
+\textbf{Set F1} &
+\makecell{\textbf{Multi.}\\\textbf{F1}} &
+\makecell{\textbf{Exact /}\\\textbf{Ordered}} &
+\makecell{\textbf{Tool}\\\textbf{err.}} &
+\makecell{\textbf{Tools}\\\textbf{/ task}} &
+\makecell{\textbf{Tokens}\\\textbf{/ task}} &
+\makecell{\textbf{Answer / Gen.}\\\textbf{Acc.}} \\
+\midrule
+Ours & 1162 & \textbf{92.5} & \textbf{0.774} & \textbf{0.722} & \textbf{42.3} / 34.2 & 9.6 & \textbf{4.80} & 53,835 & \textbf{49.32 / 76.06} \\
+Ours + final-answer verifier & 1162 & 90.3 & 0.753 & 0.693 & 39.1 / 30.8 & 10.0 & 5.31 & 64,084 & -- \\
+Ours $-$ Quse/QNR & 1162 & \textbf{92.5} & 0.770 & 0.717 & 42.0 / \textbf{34.6} & 9.2 & 4.83 & \textbf{52,094} & -- \\
+Ours $-$ step hint & 1162 & 87.9 & 0.739 & 0.675 & 31.6 / 24.8 & 10.2 & 5.85 & 55,955 & -- \\
+Ours $-$ verifier & 1162 & 92.1 & 0.753 & 0.701 & 35.0 / 28.5 & \textbf{8.9} & 5.24 & 60,547 & -- \\
+Random retrieval control full & 1162 & 89.9 & 0.745 & 0.694 & 38.5 / 31.2 & 9.0 & 5.06 & 58,275 & -- \\
+Memento-style CaseBank strict rollout-only & 1162 & 87.0 & 0.705 & 0.647 & 21.3 / 17.1 & 11.8 & 6.23 & 54,189 & 48.92 / 72.54 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\vspace{2pt}
+\footnotesize
+\textit{Notes.} All rows use the OEA test split with 1,162 tasks. The Ours row is included as the full-method reference for interpreting ablations. ``--'' means that the LongCat answer-judge summary has not been run or found; it does not mean that the score is zero. These rows are full-set diagnostics, not multi-seed frozen-manifest causal claims.
+\end{table*}
+
+\section{Weekly-Report Takeaways}
+
+\begin{itemize}
+    \item This week completed a strict no-label OEA reproduction of Memento-style CaseBank. The case bank uses only observable information from LongCat base rollouts and excludes task IDs, task types, expected tools, gold labels, metrics / F1, final answers, and exact task-fact leakage. All 1,162 OEA test tasks and the LongCat answer judge are complete.
+    \item Strict Memento reaches set F1 0.705, multiset F1 0.647, success 87.0\%, ordinary answer accuracy 48.92\%, and generated-artifact-inclusive accuracy 72.54\%. Its generated-artifact metric is cleaner than the older Memento result, but it is still weaker than Ours.
+    \item Ours remains the current main OEA result: set F1 0.774, multiset F1 0.722, success 92.5\%, and Answer+Gen accuracy 76.06\%. It also uses fewer tool calls and has a lower tool-error rate.
+    \item Five full-set diagnostic experiments were added in late August: Ours plus final-answer verifier, no Quse/QNR, no step hint, no verifier, and random retrieval control. The largest degradation comes from removing the step hint, and random retrieval is weaker than matched retrieval, indicating that both retrieval quality and step-level artifact-state hints contribute to performance.
+    \item The remaining unfinished items are MemRL external strict smoke / full, ExpeL strict smoke / full, and LongCat answer judging for the late-August ablations. These should continue under the strict no-label protocol; older results that include labels or expected tools should not be substituted.
+\end{itemize}
+
+\end{document}

@@ -1,0 +1,346 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.76in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern,microtype}
+\usepackage{amsmath,amssymb,booktabs,multirow,array}
+\usepackage{xcolor,graphicx,enumitem,hyperref}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,calc}
+\definecolor{navy}{HTML}{1F4E79}
+\definecolor{teal}{HTML}{198C8C}
+\definecolor{orange}{HTML}{D97706}
+\definecolor{lightblue}{HTML}{EAF3FA}
+\definecolor{lightgreen}{HTML}{EAF7F4}
+\definecolor{lightorange}{HTML}{FFF3E5}
+\hypersetup{colorlinks=true,citecolor=navy,linkcolor=navy,urlcolor=navy}
+\newcommand{\method}{\textsc{PromptEvo}}
+\newcommand{\todo}[1]{\textcolor{orange}{[\textbf{TBD:} #1]}}
+\setlist{leftmargin=*,nosep}
+\title{\method: Contrastive Self-Evolution of Static Behavior Protocols for LLM Agents}
+\author{Anonymous Authors\\Anonymous Institution}
+\date{}
+\begin{document}
+\maketitle
+
+\begin{abstract}
+The static system prompt is a widely used but poorly controlled policy surface for language-model agents. Changing it can alter tool selection, argument grounding, recovery, termination, and security behavior at once; a prompt that improves one aggregate metric can silently damage a protected behavior on the same tasks. We introduce \method{}, a contrastive framework for evolving a \emph{static} agent behavior protocol from paired rollout evidence. It attributes observed improvements, regressions, and mixed effects only to an actual prompt diff, proposes conservative changes, and separates candidate ranking from acceptance. In a typed-patch mode, every update declares a trigger, scope, evidence list, priority, and risk level and is restricted to tool selection, argument validation, error recovery, or termination/repetition. The current compiler type-checks that list but does not require it to be nonempty or resolve it to a trace; trace-resolvable evidence is therefore a release requirement, not a compiler guarantee. A deterministic compiler rejects malformed and selected literal task-specific or structural conflicts, preserves detected placeholders and dynamic-context anchors, and withholds high-risk patches from the compiled prompt. The current updater cannot accept a candidate without a rollout runner and supplied development IDs; the stronger frozen, multi-metric acceptance protocol is an explicit experimental requirement. We report current multi-environment diagnostics transparently: effects are mixed and no broad improvement claim is warranted. The paper's contribution is a falsifiable protocol for prompt-level agent improvement, including the negative evidence and acceptance controls needed to distinguish a useful static policy update from benchmark-specific prompt drift.
+\end{abstract}
+
+\section{Introduction}
+System prompts are a practical control surface for LLM agents. A few lines can encourage an agent to inspect an observation before calling a tool, to preserve a value exactly, to attempt recovery after an error, or to stop once an output contract is satisfied. This accessibility has made prompt optimization attractive: Automatic Prompt Engineer, OPRO, and ProTeGi show that language models can propose and search for effective instructions \cite{ape,opro,protegi}; recent work such as SPRIG targets system prompt optimization directly \cite{sprig}. Yet an agent system makes the problem materially harder than optimizing a short classification prompt.
+
+An agent's outcome depends on a trajectory, external tools, hidden environment state, resource limits, and several noninterchangeable objectives. A stronger ``act decisively'' instruction may increase action completion but also encourage unsupported argument invention. A broad recovery rule may reduce error termination while raising repeated calls and cost. In a security-sensitive interface, a utility-focused change can interact with prompt injection. These tradeoffs are often invisible if an optimizer sees only a global score, unpaired failures, or a hand-picked sample of traces.
+
+\method{} treats a system prompt as a static \emph{behavior protocol} with a constrained evolution process. Given rollouts of two prompt versions on the same task IDs, it computes paired metric changes and supplies the optimizer with the actual textual diff and corresponding trajectories. Diagnoses must tie an observed behavioral change to a real changed clause, distinguish help from harm or mixed effects, and mark environment/tool failures as non-prompt-fixable. The optimizer then produces a candidate that preserves demonstrated gains and makes the smallest repair consistent with the evidence. Candidate text can be a legacy full-prompt rewrite, but our preferred typed-patch mode limits edits to four observable behavioral families and compiles them under deterministic safety constraints.
+
+The key methodological claim is modest: text-level selection is not validation. A language model may produce a plausible diagnosis and a well-formed patch, but neither proves that the changed prompt improves an agent. The \texttt{ContrastiveUpdater} API returns \texttt{accepted=false} unless it is given both a rollout runner and nonempty development IDs. A separate CLI \texttt{accept} command can persist a compiler-valid proposal as a named prompt file for manual rollout; it is a storage convenience, not an empirical acceptance decision. The release runner must therefore reject or label every persisted prompt that lacks a frozen-development ledger. The caller, not the current core updater, must enforce that development IDs are frozen, disjoint from the final test, and evaluated under a compatible manifest and multi-metric gate. This rule matters because early experiments in three environments show non-universal behavior: modest gains in some submetrics coexist with no change or regressions in success, security, and cost.
+
+Our contributions are:
+\begin{enumerate}
+\item a paired, diff-grounded formulation of prompt-level credit assignment for tool-using agents;
+\item a typed static protocol-patch language and compiler with deterministic structural, literal-leakage, conflict, placeholder, anchor, and risk checks;
+\item a rollout-based acceptance gate that keeps static candidate generation distinct from empirical evaluation; and
+\item a transparent multi-environment evaluation protocol and a report of current mixed diagnostics, including explicit nonclaims.
+\end{enumerate}
+
+\section{Related Work}
+\paragraph{Prompt optimization.} APE formulates prompts as natural-language programs that can be generated and evaluated \cite{ape}; OPRO uses LLMs as optimizers through iterative instruction proposals \cite{opro}; ProTeGi applies textual ``gradients'' and beam search \cite{protegi}; and Promptbreeder evolves task and mutation prompts jointly \cite{promptbreeder}. DSPy treats LM programs as compilable modules with optimization procedures \cite{dspy}. AutoPDL searches over prompting patterns, instructions, and demonstrations as structured agent programs \cite{autopdl}. SPRIG optimizes system prompts through edit-based search \cite{sprig}, while GEPA uses reflective trajectory feedback and Pareto selection for prompt evolution \cite{gepa}. \method{} shares the idea of searching language instructions, but differs in the evidence unit and acceptance criterion: it uses paired agent rollouts plus the exact source diff to constrain attribution, restricts the typed mode to a static behavior-policy surface rather than demonstrations or configuration search, and does not accept an update without a real development rollout.
+
+\paragraph{Self-improving agents.} ReAct establishes a reasoning-and-acting trajectory format \cite{react}; Reflexion stores verbal feedback from outcomes \cite{reflexion}; ExpeL extracts reusable experiential knowledge \cite{expel}; and memory or skill methods retain experiences for later behavior \cite{memrl,autoskill}. These approaches modify runtime context or reusable programs. \method{} makes no claim to replace them. Its output is one static system prompt for an unchanged interface. It is designed to test whether a behavior protocol can be evolved without task-level memories, replayed trajectories, or model-weight updates.
+
+\paragraph{Tool-agent evaluation and safety.} ToolBench and API-Bank provide tool-use evaluation settings \cite{toolllm,apibank}; tau-bench and $\tau^2$-Bench emphasize multi-turn tool-agent-user interaction and dynamic environments \cite{taubench,tau2}; AgentDojo evaluates utility and security under prompt injection in tool outputs \cite{agentdojo}. These benchmarks demonstrate why prompt optimization must preserve multiple objectives. A static rule that appears helpful in a geospatial execution environment may fail in a transactional setting or weaken resistance to untrusted tool content.
+
+\begin{table*}[t]
+\centering
+\caption{How \method{} differs from nearby prompt and experience approaches. ``Acceptance'' refers to the criterion for declaring an update ready for evaluation/deployment.}
+\label{tab:positioning}
+\small
+\begin{tabular}{p{2.6cm}ccccp{5.1cm}}
+\toprule
+Method family & Paired traces & Diff-grounded attribution & Static output & Deterministic patch contract & Acceptance distinction \\
+\midrule
+APE / OPRO \cite{ape,opro} & optional & no & prompt & no & score-based search. \\
+ProTeGi \cite{protegi} & batch examples & textual feedback & prompt & no & optimizer-selected candidate. \\
+AutoPDL \cite{autopdl} & evaluation-driven & program/configuration search & agent program & no & Searches patterns, instructions, and demonstrations. \\
+SPRIG \cite{sprig} & evaluation-driven & edit search & system prompt & edit search & empirical optimization. \\
+Reflection / experience \cite{reflexion,expel} & trial dependent & indirect & runtime memory & no & memory/experience update. \\
+\method{} & required for diagnosis & yes, actual clauses only & one static protocol & yes, optional typed mode & runner plus supplied dev IDs; frozen multi-metric gate is required by protocol. \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\section{Problem Setting}
+Let $P$ be a static system prompt, $\mathcal{I}$ an agent interface containing tool schemas and dynamic context, and $\mathcal{D}=\{x_i\}$ a task set. A rollout produces $\tau_i(P)=(a_{1:T},o_{1:T},y)$ and a vector of metrics $m_i(P)\in\mathbb{R}^d$. Metrics may have opposite directions and may measure task success, tool correctness, value fidelity, cost, safety, or a benchmark-specific contract. Prompt evolution seeks $P'$ that improves a predeclared development objective without violating protected dimensions.
+
+The desired object is \emph{static}: $P'$ must be the same for all unseen tasks under the same interface. The experimental protocol forbids task IDs, paths, benchmark names, fixed answers, entities taken from traces, and task-specific workflows. The typed compiler detects only selected literal forms of these violations; dynamic context, tool descriptions, and user input must therefore also be audited outside compilation. This restriction separates behavior-policy evolution from retrieval or in-context memorization.
+
+For two versions $P_A$ and $P_B$, define the paired task set
+\begin{equation}
+\mathcal{D}_{AB}=\{i: \tau_i(P_A)\text{ and }\tau_i(P_B)\text{ are both available under a compatible manifest}\}.
+\end{equation}
+For every metric dimension $r$, the optimizer observes paired deltas $\Delta_{i,r}=m_{i,r}(P_B)-m_{i,r}(P_A)$ with its declared direction. Pairing removes variation caused by task mixture, but it does not make an attribution causal. The system must still distinguish prompt-fixable patterns from changed data, unavailable tools, evaluation errors, or stochastic model behavior.
+
+The protocol declares three classes of metric before optimization. A \emph{primary} metric determines the minimum acceptable utility of an update; \emph{protected} metrics impose non-regression constraints; and \emph{diagnostic} metrics help explain cost or failure modes without being optimized directly. For example, a geospatial interface may use task completion as primary, tool agreement and requested-artifact completion as protected, and calls/tokens/invalid arguments as diagnostics. An attack benchmark must keep utility and security as separate protected dimensions. This declaration prevents an optimizer from silently trading a hard requirement for an easy-to-improve auxiliary score.
+
+The interface is part of the scientific treatment. We define a manifest $M$ containing actor model and decoding settings, base prompt, dynamic-context template, tool schemas, environment image, maximum turns, retry policy, tool-service policy, evaluator version, and task split hashes. A pair of rollouts is eligible for contrast only when the relevant parts of $M$ agree. A prompt diff cannot explain a success difference if a tool implementation or evaluator changed at the same time.
+
+\section{Method}
+\subsection{Paired Evidence Construction}
+The loop loads prompt texts, task-level metrics, and traces for two versions, then intersects available task IDs before computing paired aggregate metrics. Manifest compatibility is an external precondition for using those records in a scientific comparison: the current core loop does not itself inspect tool-registry or actor manifests. The experimental runner must reject incompatible comparisons before calling the loop. It stratifies paired cases into improvement, regression, stable, and inconclusive groups across the primary and protected metrics. Sampling deliberately includes all three observable directions rather than presenting only failures. Multiple diagnosis batches reduce dependence on one trace selection; raw prompts, diffs, sampled IDs, metrics, and diagnostic outputs should be retained as candidate metadata.
+
+The diagnosis model receives (i) the new prompt, (ii) an exact code-generated old-to-new diff, (iii) metric directions and aggregate paired changes, and (iv) same-task trajectory pairs. For every asserted attribution, it must cite a changed phrase, describe the behavioral difference, list affected dimensions, and label the effect \texttt{help}, \texttt{hurt}, or \texttt{mixed}. It must list unexplained changes separately and must not attribute missing data, broken tools, runtime errors, or context limits to prompt wording. This is evidence-constrained hypothesis generation, not causal identification: a clause can correlate with a change because several edits occurred together.
+
+\subsection{Attribution Reliability and Case Selection}
+Paired evidence can still be unrepresentative. A small number of dramatic failures may dominate an optimizer's attention, while stable cases reveal a rule that is working as intended. We therefore sample within outcome strata and reserve a portion of paired records for audit rather than proposal. The diagnostic prompt is required to discuss both improvements and regressions. When a rule has mixed effects, the optimizer must identify a harmful subclause or missing condition rather than deleting a useful action/completion requirement wholesale. When no changed clause supports an explanation, the correct output is \texttt{unexplained}, not a fabricated story.
+
+Attribution quality can be audited without claiming formal causality. Report the fraction of generated attributions whose cited clause appears in the computed diff; the fraction labeled non-prompt-fixable; the number of attributions repeated across independent diagnostic batches; and human agreement on a stratified sample. A high clause-match rate only proves that the model quoted an actual edit. It does not prove that the edit caused the behavior. The purpose of this audit is to make unsupported explanations visible before they become prompt text.
+
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}[font=\small,node distance=8mm and 7mm,>=Latex,
+box/.style={draw=#1,fill=#2,rounded corners=2pt,minimum height=11mm,align=center,inner sep=4pt},
+arr/.style={->,thick,draw=navy},soft/.style={->,thick,dashed,draw=teal}]
+\node[box={navy}{lightblue}] (a) {Old prompt $P_A$\\paired rollout};
+\node[box={navy}{lightblue},right=of a] (b) {Current prompt $P_B$\\paired rollout};
+\node[box={orange}{lightorange},right=of b] (pair) {Intersected task IDs\\metrics and actual diff};
+\node[box={orange}{lightorange},below=of pair] (diag) {Multi-batch diagnosis\\help, hurt, mixed, unexplained};
+\node[box={teal}{lightgreen},left=of diag] (patch) {Conservative candidate\\rewrite or typed patches};
+\node[box={teal}{lightgreen},left=of patch] (compile) {Compiler contract\\general, anchored, nonconflicting};
+\node[box={navy}{lightblue},below=of patch] (dev) {Frozen dev rollout\\identical manifest};
+\node[box={navy}{lightblue},right=of dev] (gate) {Acceptance gate\\save or reject};
+\draw[arr] (a)--(b); \draw[arr] (b)--(pair); \draw[arr] (pair)--(diag); \draw[arr] (diag)--(patch); \draw[arr] (patch)--(compile); \draw[arr] (compile)--(dev); \draw[arr] (dev)--(gate);
+\draw[soft] (gate.east)--++(13mm,0)|-node[pos=.25,right]{accepted version only}(b.south);
+\node[draw=orange,dashed,fit=(a)(b)(pair)(diag),inner sep=5pt,label=above:{\footnotesize Evidence and hypothesis}] {};
+\node[draw=teal,dashed,fit=(patch)(compile),inner sep=5pt,label=below:{\footnotesize Bounded static update}] {};
+\end{tikzpicture}
+\caption{One \method{} update. Static analysis can rank candidates but cannot accept them. The current updater needs a rollout runner and supplied development IDs; the experiment layer must additionally enforce a fixed split, compatible manifest, and protected-metric gate.}
+\label{fig:loop}
+\end{figure*}
+
+\subsection{Conservative Candidate Proposal}
+The candidate proposer sees aggregated attributions, not raw benchmark labels as desired targets. It is instructed to preserve a rule when it helped, narrow only the harmful subclause when an effect is mixed, keep output formats/placeholders/dynamic anchors, and remain close to the current prompt when evidence is weak. A candidate must not solve failures by permitting unsupported values, empty responses, hidden uncertainty, or arbitrary tool calls. It must keep useful completion requirements while adding support conditions where needed.
+
+The legacy mode returns a full prompt and exact quoted old/new phrase changes. This is retained for comparability, but it has a large edit surface. Typed-patch mode instead represents a patch as
+\begin{equation}
+\pi=(\mathrm{id},\mathrm{kind},\mathrm{trigger},\mathrm{rule},\mathrm{scope},\mathrm{priority},\mathrm{evidence},\mathrm{risk}),
+\label{eq:patch}
+\end{equation}
+where \texttt{kind} is one of \texttt{tool\_selection}, \texttt{argument\_validation}, \texttt{error\_recovery}, or \texttt{termination\_and\_repetition}. These categories reflect static behaviors that can be inspected across interfaces. They are not a claim that every agent failure belongs to one of four types.
+
+The current parser normalizes \texttt{evidence} to a list of nonempty strings when supplied, but it permits an empty list and does not verify that an item names an extant trace, attribution, or diagnosis batch. The candidate proposer is prompted with paired attribution evidence, so an evidence field is a useful declaration of intended grounding; it is not, in the present implementation, proof of grounding. A final study must reject typed candidates with missing or unresolvable patch evidence and retain the resolution result in its candidate ledger.
+
+Candidate generation is purposely asymmetric. It is easier for a prompt optimizer to add a seemingly helpful rule than to establish that the rule is necessary. The proposer therefore inherits the current prompt by default, changes the smallest relevant clause, and avoids broad rewrites of formats, dynamic-context anchors, and placeholder semantics. A candidate that addresses an observed regression by allowing arbitrary value normalization, unsupported fields, concealed uncertainty, or skipped deliverables violates the proposal contract. These constraints make it possible to reject a superficially high-scoring candidate before it consumes an expensive rollout budget.
+
+\subsection{Patch Compilation Contract}
+Before a typed candidate can be rendered, the compiler enforces the following deterministic contract:
+\begin{enumerate}
+\item required fields must be present; kind, risk, priority, and bounded lengths must be valid;
+\item task IDs, filesystem paths, and recognized benchmark-specific identifiers are rejected;
+\item duplicate patch IDs and conflicting rules for the same kind, scope, and trigger are rejected; identical duplicates are ignored with a warning;
+\item high-risk patches are retained in metadata but omitted from the default compiled static prompt;
+\item every placeholder in the base prompt remains after compilation; and
+\item a recognized trailing dynamic-context anchor remains the final nonempty line.
+\end{enumerate}
+The compiler groups active patches by kind and orders them by descending priority. It adds no task/tool-specific content on its own. The contract is intentionally syntactic and conservative: passing it does not prove semantic generality, nor does it detect every indirect benchmark leak. A human audit of accepted patches remains necessary.
+
+The compiler also defines a reproducible composition semantics. It begins from the supplied base prompt, inserts only active nonduplicate patches in kind/priority order, and preserves a recognized trailing anchor. This avoids a common source of accidental regressions in whole-prompt rewriting: moving a tool schema or live context before a newly added rule changes recency and may alter behavior without appearing in a semantic prompt review. The experiment protocol must fingerprint the original prompt and compiled output and verify byte-for-byte recompilation under the recorded implementation version; the compiler alone does not persist those artifacts.
+
+\begin{table}[t]
+\centering
+\caption{Examples of valid general behavior patches. They are illustrative protocol forms, not benchmark-specific prompt text.}
+\label{tab:patches}
+\small
+\begin{tabular}{p{1.8cm}p{2.1cm}p{3.5cm}}
+\toprule
+Kind & Trigger & General rule \\
+\midrule
+Tool selection & Several tools could act & Select a tool whose documented input fields are supported by the latest observation. \\
+Argument validation & Before a call & Check required arguments against the current context; do not invent an unavailable reference. \\
+Error recovery & A call fails & Inspect the latest error, change the failed binding or strategy, and do not repeat identical arguments. \\
+Termination/repetition & Before finalizing & Finalize only when the requested output is supported by current evidence and no explicit required artifact is missing. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Rollout-Based Acceptance}
+Let $g(P;\mathcal{D}_{dev})$ be a predeclared primary score and let $h_r$ be protected metrics with maximum allowed degradation $\epsilon_r$. Candidate ranking may use a scalarized diagnostic score, but acceptance is
+\begin{equation}
+\mathrm{Accept}(P')=\mathbb{I}\left[g(P')\geq g(P_B)-\epsilon_g\ \wedge\ \forall r\in\mathcal{R}_{protect},\ h_r(P')\geq h_r(P_B)-\epsilon_r\right].
+\label{eq:accept}
+\end{equation}
+Directions are inverted for lower-is-better metrics. Equation~\ref{eq:accept} is the \emph{submission protocol}, not a claim about the current generic updater. The checked-in \texttt{ContrastiveUpdater} uses \texttt{success\_rate} plus a configurable primary tolerance as its actual acceptance condition; its $\texttt{success\_rate}+0.5\,\texttt{tool\_f1}$ scalar is used only to rank rollout candidates, and it does not yet enforce the protected-metric conjunction in Equation~\ref{eq:accept}. A release runner must implement and log that conjunction before the method is described as multi-objective accepted. The development tasks, actor model, tool manifest, provider settings, max turns, retry policy, and evaluators must be identical across compared candidates. The \texttt{ContrastiveUpdater} returns an unaccepted static candidate when no runner or dev IDs are supplied; this permits review of a proposal but prevents that API result from being presented as a validated evolution step. The standalone CLI persistence command is outside this gate, so a release ledger must independently verify that the deployed prompt fingerprint came from a completed frozen-development decision rather than a manually persisted proposal.
+
+Repeated optimization introduces development overfitting. Each cycle must use a fixed budget: either reserve an additional validation split, perform a nested selection procedure, or treat subsequent candidates as exploratory and hold all headline claims until a fresh test split. The final held-out test is run once per accepted, frozen prompt fingerprint.
+
+Acceptance should be interpreted as a deployment filter, not as a statistical significance test. In a small development set, a prompt can pass the thresholds by chance; in a noisy agent environment, a strict non-regression threshold may reject a useful edit. Report both the unrounded per-task outcomes and uncertainty intervals. For prompt iteration studies, publish the full candidate ledger: candidates proposed, candidates rejected by the compiler, candidates rejected by the dev gate, and candidates carried to test. Showing only the best evolved prompt creates an unquantified multiple-comparisons problem.
+
+\section{Implementation and Audit Surface}
+\method{} is interface-agnostic at the core: it consumes prompt strings, paired task records, a rollout runner, and an injected LLM client. It does not call Terrabox tools directly. Environment adapters are responsible for producing normalized per-task metrics and traces. The typed compiler is deterministic and independent of the LLM. This split makes several audits possible: compare proposal mode with full-rewrite mode; count compiler rejections; inspect withheld high-risk patches; compare all original and compiled placeholders; and reproduce every accepted prompt from a base prompt plus patch metadata.
+
+For each candidate, retain a manifest containing base/current prompt fingerprints, unified diff, paired task IDs, diagnostic batch seed, raw diagnosis, proposed patches or full text, compiler report, declared patch evidence, evidence-resolution status, development IDs, rollout configuration, per-task dev metrics, acceptance thresholds, final decision, and the provenance of the persisted deployment file. A result is invalid if a prompt version, task split, interface manifest, required evidence reference, or path from the final file back to an accepted dev decision cannot be reconstructed. Accepted static prompts must not encode trace examples, task entities, historical output paths, or benchmark-specific tool sequences.
+
+The typed mode and legacy rewrite mode are separate experimental conditions. A legacy whole-prompt candidate is not retroactively described as compiled or type-safe, and a typed patch cannot bypass the compiler through an auxiliary free-form text field. This separation is important because a full prompt rewrite might produce a higher metric by changing output formatting, moving dynamic context, or adding benchmark-specific latent content that the typed mode forbids. The scientific comparison is therefore not ``structured output versus unstructured output,'' but a test of whether an auditable static-policy language changes the utility-regression tradeoff.
+
+\section{Experimental Design}
+\subsection{Research Questions}
+\begin{description}[style=nextline]
+\item[RQ1: Utility] Does an accepted static protocol improve the primary held-out task metric over the unchanged base prompt?
+\item[RQ2: Regression control] Does Stage 2 preserve a Stage 1 gain while reducing paired regressions on predeclared protected metrics?
+\item[RQ3: Generalization] Does the same static protocol transfer to a different interface without task-specific additions?
+\item[RQ4: Safety] Does typed compilation reject non-general or unsafe proposals and reduce harmful static edits relative to full rewrites?
+\item[RQ5: Cost] What happens to turns, tool calls, tokens, latency, tool errors, and maximum-step termination?
+\end{description}
+
+\subsection{Environments, Splits, and Baselines}
+Evaluate each environment separately: a geospatial OpenEarthAgent-style tool interface \cite{openearthagent}, transactional multi-turn tasks from tau-bench or $\tau^2$-Bench \cite{taubench,tau2}, and AgentDojo security tasks \cite{agentdojo}. Never pool their heterogeneous metrics into one headline score. For each benchmark, partition disjoint prompt-construction, development-acceptance, and held-out test task IDs before looking at candidates. Security evaluation must include both clean and attacked conditions.
+
+Compare (i) the unchanged base static prompt; (ii) a no-update control evaluated on the same schedule; (iii) full-prompt Stage 1; (iv) full-prompt contrastive Stage 2; (v) typed-patch Stage 1; and (vi) typed-patch contrastive Stage 2. If a prior optimizer is integrated, label it official, adapted, or reimplemented and disclose tool/rollout differences. All comparisons use a prompt fingerprint, frozen model revision, context configuration, tool schema snapshot, and error/retry policy.
+
+\begin{table*}[t]
+\centering
+\caption{Final reporting template. A row is eligible for the main paper only after a real development acceptance decision and a disjoint locked test run.}
+\label{tab:main}
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llcccccccc}
+\toprule
+Environment & Version & Test $n$ & Success & Protected metric & Calls/task & Tokens/task & Time/task & Dev accepted? & Fidelity \\
+\midrule
+Geospatial & Base / no update & TBD & TBD & tool F1: TBD & TBD & TBD & TBD & n/a & system baseline \\
+Geospatial & Stage 1 / Stage 2 & TBD & TBD & tool F1: TBD & TBD & TBD & TBD & TBD & proposed \\
+Transactional & Base / Stage 2 & TBD & TBD & reward: TBD & TBD & TBD & TBD & TBD & proposed \\
+Security & Base / Stage 2 & TBD & TBD & utility/security: TBD & TBD & TBD & TBD & TBD & proposed \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\subsection{Metrics, Statistics, and Safety Audits}
+For every environment, report the primary task metric and all protected dimensions, not only a selected score. Report per-task paired bootstrap confidence intervals, missing task count, evaluator errors, transient retries, maximum-step rate, tool errors, calls, tokens, and latency. In AgentDojo, report clean utility, attacked utility, security, attack success, and any balanced score separately. The security actor and evaluator configuration must be frozen before candidate selection.
+
+The patch audit reports the number of proposed patches, malformed rejections, task/path/benchmark-specific rejections, conflicts, duplicate warnings, high-risk patches withheld, placeholder/anchor preservation failures, accepted candidates, and held-out regressions. Independently review a stratified sample of rejected and accepted patches, including patches from apparently improved tasks. Automated regular expressions are a guardrail, not a complete leakage detector.
+
+Report acceptance conditional on candidate count. For a candidate pool of size $K$, list the rank assigned by static selection, whether the compiler passed, every dev metric, the exact failure condition for each rejection, and the selected prompt fingerprint. This prevents post-hoc substitution of a more favorable candidate. For the final test, compute paired uncertainty intervals only over tasks that were not used in diagnostics or dev acceptance. Missing rollouts must remain in the denominator or be reported in a separate, predeclared failure policy.
+
+\section{Current Diagnostics and Explicit Nonclaims}
+\label{sec:diagnostics}
+Existing broad-stage runs are useful negative and exploratory evidence, but they should not be mislabeled as results for the present typed-patch acceptance mechanism unless their exact prompt version, runner, dev gate, and manifest match it. The following values document the currently available historical experiments.
+
+On a 1,500-task four-domain $\tau^2$-Bench experiment with a Qwen3 8B agent, base success/tool F1 was 8.47\%; Stage 1 and Stage 2 both reached 9.20\%. The small aggregate change came with more calls (11.10 to 11.76 to 11.84) and longer duration (60.6s to 65.7s to 77.6s). Outcomes differed across domains: retail improved in Stage 1 while airline declined, and Stage 2 retained only part of the retail change. On 1,081 AgentDojo tasks, success was 7.40\%, 7.40\%, and 7.31\% for base, Stage 1, and Stage 2; the balanced score moved from 27.49\% to 27.90\% and back to 27.49\%, while attacked security remained approximately unchanged. On 1,162 OpenEarthAgent LongCat think-mode tasks, success decreased from 86.1\% to 83.7\% and 83.3\%, even though some strict tool-agreement measures increased slightly and total tokens increased.
+
+These results refute a universal ``prompt evolution improves agents'' narrative. They motivate the method's protected metrics, pairing, typed edits, and real acceptance rule. They do \emph{not} show that typed patches improve these benchmarks, that Stage 2 generally repairs Stage 1, or that a static prompt transfers safely across interfaces. The needed experiment is a fresh protocol-consistent study with frozen dev acceptance, disjoint tests, repeated seeds or controlled sampling, and a patch audit.
+
+The observed patterns also suggest concrete falsifiers. If a no-update control exhibits the same shifts, prompt changes should not receive credit. If an accepted candidate gains success only by increasing maximum-step termination, error suppression, or a benchmark-specific output format, it fails the protected-metric protocol. If the same patch cannot transfer even to a second split of the identical interface, the appropriate conclusion is that the rule captured local prompt/environment interactions, not a general agent behavior. Negative outcomes are therefore retained as first-class evidence rather than discarded during prompt search.
+
+\begin{table*}[t]
+\centering
+\caption{Historical diagnostics, not final claims. Stage definitions and prompts predate or may differ from the current typed-patch acceptance path; they are retained to prevent selective reporting.}
+\label{tab:diagnostics}
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrr}
+\toprule
+Environment & $n$ & Base success & Stage 1 & Stage 2 & Notable protected/cost observation & Interpretation \\
+\midrule
+$\tau^2$-Bench, Qwen3 8B & 1500 & 8.47\% & 9.20\% & 9.20\% & Calls 11.10 / 11.76 / 11.84; time 60.6 / 65.7 / 77.6s & Small gain, higher cost, domain heterogeneity. \\
+AgentDojo, Qwen3 8B & 1081 & 7.40\% & 7.40\% & 7.31\% & Balanced 27.49 / 27.90 / 27.49\% & No clear robust gain. \\
+OpenEarthAgent, LongCat think & 1162 & 86.1\% & 83.7\% & 83.3\% & Set F1 0.685 / 0.690 / 0.685 & Lower completion despite some trajectory gains. \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\section{Threats to Validity, Safety, and Limitations}
+Paired traces reduce task-mixture confounding but do not prove that a particular sentence caused a behavioral change. Several prompt clauses can co-vary, rollouts are stochastic, and trajectory summaries may omit relevant context. The optimizer itself may hallucinate an attribution; constraining it to an actual diff prevents invented edits but not incorrect causal stories. The compiler can reject obvious task IDs and paths but cannot recognize every indirect instance of task-specific knowledge. Full-prompt rewriting remains available for comparison and has a larger leakage and regression surface.
+
+Development acceptance is only as good as its split and thresholds. Repeated candidate searches can overfit the development set, and a no-regression constraint can reject valuable changes when measurements are noisy. Security should never be inferred from clean utility or from a generic refusal rule; AgentDojo-style attacks must be evaluated directly. Finally, static behavior protocols cannot repair missing data, broken services, malformed tool schemas, context-window limits, or invalid benchmark evaluators.
+
+There is an additional social risk in evolving static prompts from logs: a protocol can crystallize historical operator behavior or silently privilege a subset of task styles. This is not mitigated by generic wording alone. Release artifacts should contain the rules that generated a prompt, not raw sensitive task content; reviewers should be able to identify which protected objectives were considered; and users should be told that passing a dev rollout is not an authorization decision. In sensitive settings, the prompt must remain one layer in a defense-in-depth system with tool-level authorization and output validation.
+
+\section{Conclusion}
+\method{} frames prompt evolution for agents as controlled revision of a static behavior protocol. Its central safeguards are paired evidence, actual-diff attribution, constrained typed patches, deterministic compilation, and real-rollout acceptance. Current diagnostics show why those safeguards are needed rather than offering evidence of universal improvement. A credible final paper must report the accepted-prompt test results together with their rejected candidates, protected metrics, safety audit, uncertainty estimates, and cross-environment boundaries.
+
+\appendix
+\section{Update Algorithm}
+\noindent\textbf{Input:} $P_A$, $P_B$, paired rollout records, optional runner $R$, frozen development IDs $D_{dev}$.\\
+\textbf{Output:} candidate metadata and an accepted prompt only when validation is available.\\
+\begin{enumerate}
+\item Verify compatible manifests and intersect task IDs. Compute all metric deltas with declared directions.
+\item Stratify paired cases into improvements, regressions, stable cases, and invalid/infrastructure cases. Sample multiple diagnostic batches.
+\item Generate diff-grounded attributions. Retain only claims that quote a real changed clause; store unexplained changes separately.
+\item Propose either a conservative full prompt or a typed patch proposal. In typed mode, parse and compile with the deterministic contract.
+\item Optionally rank candidates by a diagnostic objective. Do not mark a candidate accepted at this stage.
+\item If $R$ or $D_{dev}$ is absent, save the candidate with \texttt{accepted=false} and the reason \texttt{rollout validation required}. A manually persisted CLI proposal remains a candidate and must carry this status until a release runner records its dev decision.
+\item Otherwise run each selected candidate on $D_{dev}$ under the frozen manifest. Apply Equation~\ref{eq:accept}; save prompt text and decision metadata only for candidates that pass.
+\item Evaluate a frozen accepted prompt once on the disjoint test set and publish all protected metrics and audit records.
+\end{enumerate}
+
+\section{Typed-Patch Schema and Compiler Guarantees}
+Each patch declares a stable identifier, one allowed kind, a trigger, a concise rule, scope, integer priority from 0 to 100, an evidence list, and a risk label of low, medium, or high. In the current implementation, the evidence list may be empty and its entries are neither required to name a trace nor resolved by the compiler. Consequently, a trace-backed patch is a submission-level data and audit property: the released ledger must show nonempty patch evidence and its resolution to retained attribution or trace batches. High-risk patches are not silently dropped: they remain visible in the validation report but are excluded from normal compilation. Duplicate rules are reported and ignored; conflicting rules under the same kind/scope/trigger are errors. Compilation preserves all syntactically recognized placeholders from the base prompt and keeps a recognized final dynamic context label as the last nonempty line. The compiler's guarantees are deterministic properties of text transformation, not behavioral or security guarantees.
+
+\subsection{Protocol Scope and Non-Goals}
+The patch language is intentionally narrow. A \texttt{tool\_selection} patch can express a general criterion for selecting an interface-supported action, but it cannot prescribe a named external tool or a benchmark sequence. An \texttt{argument\_validation} patch can demand grounding in the latest context, but it cannot insert a known argument value. An \texttt{error\_recovery} patch can require inspecting an error and changing a failed strategy, but it cannot encode an environment-specific hidden fallback. A \texttt{termination\_and\_repetition} patch can require evidence for finalization and prohibit identical failed retries, but it cannot replace the runtime's authorization or completion checks. These non-goals are essential: static prompt text should not become a covert implementation layer.
+
+The current compiler checks literal task/path/benchmark patterns and structural conflicts. It does not semantically understand every entity, synonym, encoded identifier, or policy contradiction. Consequently, accepted patches require a manual review that asks: would this rule make sense in an unseen task under the same interface; does it restate a safety property already enforced by code; does it add a hidden task-specific precondition; and does it alter the meaning or placement of dynamic context? The audit should record reviewer decisions and disagreements instead of presenting the compiler as a complete formal verifier.
+
+\section{Example Evidence-to-Patch Decision}
+An illustrative paired case may show that a new prompt improves completion because it asks the agent to inspect the last tool observation, but occasionally causes the agent to normalize a value that must be copied exactly. A valid diagnosis does not say ``the new prompt is bad.'' It identifies the observed completion gain, quotes the changed completion clause, identifies the value-fidelity regression, and either quotes the subclause that permits rewriting or marks the regression unexplained. A conservative typed repair can then be an \texttt{argument\_validation} or \texttt{termination\_and\_repetition} rule such as: use a context value exactly as provided unless the interface explicitly requires a transformation. It cannot contain the observed value, user entity, task identifier, or a tool-specific workaround.
+
+If compilation passes, the patch is still only a candidate. On frozen development tasks, it can be rejected because it lowers primary success, damages a protected metric, raises attack success, increases cost above a predeclared budget, or produces a non-transient runtime failure rate beyond policy. If it passes, a separate test can still reveal a regression; that result is published as a held-out regression, not retroactively removed from the candidate ledger. This example demonstrates the intended division of labor: the LLM proposes a constrained hypothesis, deterministic code verifies text invariants, and rollouts determine whether the hypothesis is operationally useful.
+
+\section{Acceptance Ledger Format}
+For every optimization cycle, release one row per candidate with: cycle identifier; parent prompt fingerprint; candidate rank; mode (legacy or typed); diff size; number and kinds of patches; compiler decision and warnings; evidence batch IDs; patch-level declared evidence; evidence-resolution status; development task count; primary and protected metric deltas; cost deltas; acceptance threshold; decision; and the resulting prompt fingerprint. The ledger must include candidates that were never rolled out because they failed compilation, candidates rejected for missing or unresolved evidence, candidates rejected on development, and candidates selected for test. This makes prompt search auditable as a sequence of decisions rather than a single best-looking final string.
+
+The ledger also enables analyses that a headline score cannot: whether high-risk proposals are common; whether the compiler disproportionately rejects a particular patch kind; whether more edits correlate with dev regressions; whether candidate ranking agrees with rollout acceptance; and whether Stage 2 changes tend to preserve or undo Stage 1 patches. These analyses should be descriptive. They can reveal a broken optimizer or unsafe search pressure, but they do not establish a universal law of prompt evolution.
+
+\section{Multi-Objective Threshold Design}
+Thresholds in Equation~\ref{eq:accept} must be chosen before candidate rollouts. The primary threshold may allow a small tolerance for rollout noise, while protected dimensions have task-specific floors or maximum drops. Define thresholds in native units: percentage points for completion/security, absolute reward units for transactional tasks, and relative or absolute budget limits for tokens/latency. Avoid an unreported weighted average that permits a major security loss to be offset by a tiny utility gain. When a benchmark provides a balanced score, report it as a diagnostic unless its component weighting is itself the declared target.
+
+For a multi-objective candidate set, the optimizer can retain a non-dominated frontier for inspection, but the deployment/held-out candidate should be selected by a predeclared rule. One practical rule is lexicographic: first reject any candidate that violates a safety floor; then require primary non-degradation; then choose the lowest-cost member among candidates whose protected metrics are within tolerance. Another rule uses a fixed utility-cost budget. The choice is an experimental design decision and must be applied to the base/no-update control as well. A Pareto plot is informative, but it does not remove the need to state why one prompt was tested.
+
+\section{Cross-Environment Transfer Protocol}
+Static generality is an empirical property, not a property of grammatical wording. To test it, construct the protocol on a source environment using only source construction/dev data, freeze its text and fingerprint, and apply it without editing to a target interface with disjoint tasks. The target evaluation may adapt only the dynamic-context adapter necessary to expose the unchanged interface; it may not add target-specific rules or examples. Report the semantic overlap and differences in tool schemas, task modality, output contract, and adversarial exposure. A negative transfer result is informative because it identifies a boundary of the static behavior policy.
+
+The strongest transfer claim requires a source-selected prompt, a target test never used during source optimization, and protected metrics native to the target environment. It is not enough to rerun a prompt in another split with the same hidden assumptions. For security targets, include both benign and adversarial tool observations; for transactional targets, include interaction success, state/database correctness, and communication measures; for geospatial targets, keep requested-artifact completion separate from tool agreement. These differences are why this paper does not aggregate the historical diagnostics into one score.
+
+\section{Reproducibility and Version Control}
+Every prompt version should have immutable content hashing and a parent pointer. Dynamic context must be versioned separately so a base-prompt change is not confused with an adapter change. Store raw rollout traces where permitted, normalized trace summaries used by the diagnosis model, metric extraction code/version, and exact compiled prompts. A redacted public release may omit sensitive tool observations, but it should retain enough structured evidence for a reviewer to reproduce the compiler decision and paired metric aggregation.
+
+Reproducibility also requires a model-service policy. Record provider/model identifiers, sampling parameters, timeout and retry settings, concurrent worker count, context limits, cache behavior, and whether any tool is mocked. An optimizer can appear to evolve a prompt when an unrecorded service retry or model version change caused the movement. The paper must therefore treat the full rollout manifest as part of the method, not as an implementation footnote.
+
+\section{Evaluation Failure Policy}
+An agent rollout may fail because of a malformed action, a transient provider response, a tool-service timeout, a benchmark harness exception, or an evaluator failure. These should not be silently treated alike. Before evaluation, define which failures are retried, the maximum retry budget, whether a retry restarts a full trajectory, and how exhausted failures enter the denominator. Candidate-specific retries are dangerous because they can give an evolved prompt more chances than the base prompt. The same failure policy applies to every prompt version in a paired comparison.
+
+For external LLM evaluators, retain raw evaluator responses, error labels, prompt version, cache key, and any manual adjudication. If the actor and evaluator share a provider or model family, report the dependency and add an independent or human subset when conclusions depend on answer quality. In security settings, do not count evaluator parse failures as secure outcomes. A failure policy cannot eliminate benchmark noise, but it prevents the prompt optimizer from learning from an inconsistent accounting rule.
+
+\section{Interpretation Rules for Mixed Outcomes}
+A successful paper must distinguish at least four outcomes. First, a candidate can improve the primary metric and satisfy all protected dimensions; it is an accepted version for held-out testing. Second, it can improve a diagnostic or trajectory metric while harming the primary metric; this is a tradeoff, not an improvement. Third, it can produce no reliable change; this is evidence that the tested static protocol did not move the interface under the observed budget. Fourth, it can worsen performance or security; this is a negative result and should be retained because it bounds the method's applicability. The historical results in Section~\ref{sec:diagnostics} contain examples of the latter three outcomes.
+
+The final discussion should avoid converting a collection of accepted prompts into a claim that static prompting is a generally sufficient agent-learning mechanism. Acceptance establishes only a local decision under one interface, objective declaration, and development split. Cross-environment transfer requires a separately frozen evaluation, including the possibility that no patch is safe to apply. This conservative interpretation is essential for systems that interact with tools or untrusted content.
+
+\section{Pre-Submission Checklist}
+Do not submit with ``TBD'' values in Table~\ref{tab:main}. Required artifacts are: task split hashes; all prompt fingerprints and diffs; actor/evaluator/tool manifests; accepted and rejected candidate metadata; development thresholds; paired confidence intervals; a no-update schedule control; typed-patch audits; independent security evaluation where claimed; and explicit official/adapted/reimplemented labels for every baseline. Preserve the historical diagnostics in Section~\ref{sec:diagnostics} unless replaced by a fully documented reproduction; they are important evidence against selective reporting.
+
+\begin{thebibliography}{99}
+\bibitem{ape} Yongchao Zhou et al. Large Language Models Are Human-Level Prompt Engineers. \emph{ICLR}, 2023.
+\bibitem{opro} Chengrun Yang et al. Large Language Models as Optimizers. \emph{ICLR}, 2024.
+\bibitem{protegi} Reid Pryzant et al. Automatic Prompt Optimization with ``Gradient Descent'' and Beam Search. \emph{EMNLP}, 2023.
+\bibitem{promptbreeder} Chrisantha Fernando et al. Promptbreeder: Self-Referential Self-Improvement Via Prompt Evolution. \emph{arXiv:2309.16797}, 2023.
+\bibitem{dspy} Omar Khattab et al. DSPy: Compiling Declarative Language Model Calls into Self-Improving Pipelines. \emph{ICLR}, 2024.
+\bibitem{autopdl} Claudio Spiess, Mandana Vaziri, Louis Mandel, and Martin Hirzel. AutoPDL: Automatic Prompt Optimization for LLM Agents. \emph{arXiv:2504.04365}, 2025.
+\bibitem{sprig} Lechen Zhang, Tolga Ergen, Lajanugen Logeswaran, Moontae Lee, and David Jurgens. SPRIG: Improving Large Language Model Performance by System Prompt Optimization. \emph{ICLR}, 2026. arXiv:2410.14826.
+\bibitem{gepa} Lakshya A. Agrawal et al. GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning. \emph{arXiv:2507.19457}, 2025.
+\bibitem{react} Shunyu Yao et al. ReAct: Synergizing Reasoning and Acting in Language Models. \emph{ICLR}, 2023.
+\bibitem{reflexion} Noah Shinn et al. Reflexion: Language Agents with Verbal Reinforcement Learning. \emph{NeurIPS}, 2023.
+\bibitem{expel} Shuyan Zhou et al. ExpeL: LLM Agents Are Experiential Learners. \emph{AAAI}, 2024.
+\bibitem{memrl} Shengtao Zhang et al. MemRL: Self-Evolving Agents via Runtime Reinforcement Learning on Episodic Memory. \emph{arXiv:2601.03192}, 2026.
+\bibitem{autoskill} Yutao Yang et al. AutoSkill: Experience-Driven Lifelong Learning via Skill Self-Evolution. \emph{arXiv:2603.01145}, 2026.
+\bibitem{toolllm} Yujia Qin et al. ToolLLM: Facilitating Large Language Models to Master 16000+ Real-world APIs. \emph{ICLR}, 2024.
+\bibitem{apibank} Minghao Li et al. API-Bank: A Comprehensive Benchmark for Tool-Augmented LLMs. \emph{EMNLP}, 2023.
+\bibitem{taubench} Shunyu Yao, Noah Shinn, Pedram Razavi, and Karthik Narasimhan. $\tau$-Bench: A Benchmark for Tool-Agent-User Interaction in Real-World Domains. \emph{arXiv:2406.12045}, 2024.
+\bibitem{tau2} Victor Barres et al. $\tau^2$-Bench: Evaluating Conversational Agents in a Dual-Control Environment. \emph{arXiv:2506.07982}, 2025.
+\bibitem{agentdojo} Edoardo Debenedetti et al. AgentDojo: A Dynamic Environment to Evaluate Prompt Injection Attacks and Defenses for LLM Agents. \emph{arXiv:2406.13352}, 2024.
+\bibitem{openearthagent} Akashah Shabbir et al. OpenEarthAgent: A Unified Framework for Tool-Augmented Geospatial Agents. \emph{arXiv:2602.17665}, 2026.
+\end{thebibliography}
+\end{document}

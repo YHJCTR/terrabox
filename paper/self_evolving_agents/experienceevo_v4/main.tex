@@ -1,0 +1,378 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.76in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern,microtype}
+\usepackage{amsmath,amssymb,booktabs,multirow,array}
+\usepackage{xcolor,graphicx,enumitem,hyperref}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,calc}
+\definecolor{navy}{HTML}{1F4E79}
+\definecolor{teal}{HTML}{198C8C}
+\definecolor{orange}{HTML}{D97706}
+\definecolor{lightblue}{HTML}{EAF3FA}
+\definecolor{lightgreen}{HTML}{EAF7F4}
+\definecolor{lightorange}{HTML}{FFF3E5}
+\hypersetup{colorlinks=true,citecolor=navy,linkcolor=navy,urlcolor=navy}
+\newcommand{\method}{\textsc{ExperienceEvo}}
+\newcommand{\quse}{Q_{\mathrm{use}}}
+\newcommand{\state}{\mathcal{S}}
+\newcommand{\todo}[1]{\textcolor{orange}{[\textbf{TBD:} #1]}}
+\setlist{leftmargin=*,nosep}
+\title{\method: Product-State Transition Self-Evolution for Tool-Augmented Geospatial Agents}
+\author{Anonymous Authors\\Anonymous Institution}
+\date{}
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Tool-augmented agents must compose heterogeneous intermediate products: an image, a boundary, a vector layer, a measurement, and sometimes a final rendered artifact. A successful individual call does not establish that its result is grounded, consumable by the next call, or sufficient for the requested deliverable. We introduce \method{}, a read-only experience mechanism that transfers \emph{typed, local transitions} between verified runtime product states rather than replaying full trajectories. Offline, it extracts transition events from train rollouts, anonymizes task-specific values, aggregates utility and attributable risk at both family and tool levels, and stores reusable output contracts. Online, an artifact-state tracker retrieves compatible families after each observation, ranks alternative tools with a smoothed utility estimate, and reports missing evidence as soft guidance. The current v4 runtime deliberately does not hard-stop an agent, synthesize an answer, or reuse historical paths; only directly observable schema and current-run-path errors are blocked. We provide a complete leakage-controlled evaluation design and report clearly marked single-configuration diagnostics, not final claims. A fixed-subset diagnostic suggests that step-level state guidance and tool-specific ranking merit controlled study; it does not establish a causal effect or generalization across seeds, actor models, or environments.
+\end{abstract}
+
+\section{Introduction}
+Language-model agents can interleave reasoning, actions, and observations to solve tasks that exceed a single text generation \cite{react}. This capability is particularly useful in geospatial analysis, where questions combine images, map data, spatial operations, numerical computation, and artifact generation. It is also brittle. A tool may return a GeoPackage but not the required layer; a later call may use an invented path; a numerical sub-result may be mistaken for the final requested plot; and a trajectory can be syntactically plausible while failing to create a usable product. These errors are not only failures of tool selection. They are failures to maintain a grounded account of \emph{what product has been produced, what it can support, and what product is still missing}.
+
+Prior self-improving agents retain different forms of experience. Reflexion writes verbal feedback after failed trials \cite{reflexion}; ExpeL extracts reusable natural-language experiences from successful and failed executions \cite{expel}; Voyager accumulates a library of executable skills for open-ended behavior \cite{voyager}; and recent memory and skill methods update episodic memories or reusable skills from environmental feedback \cite{memrl,autoskill,skillrl,reskill}. These methods motivate lifelong improvement, but they do not make the unit of transfer in a multi-tool dataflow explicit. An episode can contain location names, paths, tool sequences, and incidental decisions that are unsafe or irrelevant to replay. A broad reflection can explain a failure without specifying which current artifact must exist before a downstream call is valid.
+
+This paper studies a narrower unit: an atomic transition from an observed product state to a required next product state. Consider a request that needs points of interest within an area and then a map. The useful reusable fact is not ``repeat the previous task.'' It is a conditional contract: when a verified boundary artifact is present, a point-of-interest layer can be produced by a compatible tool; bind the current artifact returned by the boundary call, check that the returned layer exists, and retain that exact returned reference for downstream rendering. This representation separates reusable operational structure from historical task content.
+
+\method{} builds such transition families from training rollouts. A family contains a typed source state, a typed target state, product-level checks, multiple tool policies, and locally aggregated quality, support, and risk. At execution time, a read-only store is queried using the live product state, available tool set, and an anonymized task profile. The v4 implementation also inherits a v3 compatibility path that can synthesize narrow runtime fallback families from the current task shape and product state when a fallback rule matches. In the current inherited \texttt{retrieve()} implementation, a nonempty fallback set is returned before ordinary learned-store candidates are ranked, so a matching fallback has retrieval priority rather than merely acting as a tie-breaker. These families are not train-rollout experience and must be separated in the final audit. The result is injected as planning evidence, not an action program. The agent remains responsible for deciding whether to act or answer. This choice is central: earlier hard-convergence designs could improve strict tool-chain agreement while stopping before an aggregate calculation or requested visualization. Version 4 disables hard answer-ready and premature-final guards and forbids code-generated final answers.
+
+The contribution is therefore a concrete, falsifiable design rather than a claim that memory always improves agents:
+\begin{enumerate}
+\item a product-state transition family that combines output contracts with alternative tool-level implementations;
+\item a local credit-assignment procedure that separates observable tool-use defects from infrastructure incidents and estimates utility/risk at two granularities;
+\item a state-conditioned, step-level retrieval and soft verification runtime with explicit current-run binding, together with an explicit distinction between learned families and inherited runtime fallbacks; and
+\item a reproducible experimental and audit protocol that distinguishes store effects from generic runtime safeguards.
+\end{enumerate}
+
+\section{Related Work}
+\paragraph{Reasoning and tool use.} ReAct formalized the interleaving of reasoning traces and actions \cite{react}. Toolformer learns when and how to invoke tools from self-supervised API-use data \cite{toolformer}, while ToolLLM and ToolBench target broad API selection and tool-use evaluation \cite{toolllm}. These efforts improve an agent's ability to call tools, but a fixed tool interface does not by itself represent the data dependency among produced artifacts. \method{} operates above the tool schema: it models the products that make a tool call applicable and the products whose existence must be verified afterward.
+
+\paragraph{Experiential and memory-based agents.} Reflexion uses linguistic feedback as verbal reinforcement \cite{reflexion}; ExpeL distills experience into reusable knowledge \cite{expel}; MemRL uses runtime reinforcement learning to improve episodic-memory usage \cite{memrl}. AutoSkill, SkillRL, Skill1, and ReSkill investigate evolving reusable skills and policies \cite{autoskill,skillrl,skill1,reskill}. Recent work also learns a curator over an external skill repository (SkillOS) \cite{skillos} or combines explicit memory with online LoRA parameter updates (TMEM) \cite{tmem}. Our goal is complementary. We do not claim to be the first state-aware memory or self-evolving agent. The distinction is that a \method{} record is an executable \emph{product contract}: a goal-conditioned state transition with local artifact validation and several tool policies. The deployed v4 store is read-only: it trains neither a curator nor model weights at runtime. It is intentionally not a full plan, an answer template, or a skill that can be executed without current-state grounding.
+
+\paragraph{Planning, verification, and geospatial agents.} Tool-using agents increasingly use plans, critiques, process supervision, or environment feedback to reduce invalid actions \cite{reflexion,toolformer,toolrl}. OpenEarthAgent provides a unified framework and held-out evaluation setting for geospatial tool use \cite{openearthagent}. Geospatial tasks make the product contract especially visible because data types and files must cross toolkit boundaries. However, the proposed abstraction is not geospatial by definition: an API response, database record, rendered chart, or transaction receipt can also be a typed product. We restrict the present empirical scope to the implemented geospatial interface and do not infer cross-domain effectiveness without evidence.
+
+\begin{table*}[t]
+\centering
+\caption{Positioning of \method{}. ``Runtime transfer'' asks whether a method changes the information supplied during a new task; ``product contract'' means that input/output artifacts and their validation are explicit objects.}
+\label{tab:positioning}
+\small
+\begin{tabular}{p{2.4cm}ccccp{5.2cm}}
+\toprule
+Approach & Runtime transfer & Full episode/skill & Product contract & Local tool credit & Main distinction \\
+\midrule
+Reflexion \cite{reflexion} & yes & reflection & no & indirect & Verbal feedback over trials. \\
+ExpeL \cite{expel} & yes & experience & no & indirect & Reusable textual experience. \\
+Voyager \cite{voyager} & yes & skill library & partial & task-level & Open-ended skill acquisition. \\
+MemRL \cite{memrl} & yes & episodic memory & no & memory reward & Runtime RL over memories. \\
+AutoSkill / SkillRL \cite{autoskill,skillrl} & yes & explicit skills & partial & policy/skill level & Lifelong skill self-evolution. \\
+SkillOS / TMEM \cite{skillos,tmem} & yes & skills / parametric memory & no & curator / parameter level & Learns a skill curator or online parameter update. \\
+\method{} & yes & no & yes & yes & State-conditioned, anonymized transition families with output checks and tool alternatives. \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\section{Problem Formulation}
+Let a task be $x=(q,I,\mathcal{A})$, where $q$ is a request, $I$ is the initial runtime input, and $\mathcal{A}$ is the available tool set. A base agent emits actions $a_{1:T}$, receives observations $o_{1:T}$, and returns text $y$ and optionally a requested artifact $z$. We define a symbolic product state
+\begin{equation}
+\state_t=\{s_1,\ldots,s_m\}, \qquad s=\texttt{role:from:tool},
+\end{equation}
+where a product type describes a live, verifiable runtime result rather than a literal value. Examples include \texttt{input:image}, \texttt{gpkg:from:boundary-tool}, \texttt{vector-layer:from:poi-tool}, \texttt{result:from:calculator}, and \texttt{image:from:plot-tool}. The artifact tracker adds a state token only when the current observation satisfies the corresponding success condition. A token is a compact type descriptor; the actual artifact reference remains in the runtime observation store.
+
+A transition family is
+\begin{equation}
+f=(\iota,\state_{in},\state_{target},e,\Pi,\rho),
+\label{eq:family}
+\end{equation}
+where $\iota$ is an intent signature, $e$ is product-level experience, $\Pi$ is a set of tool policies, and $\rho$ summarizes support, utility, and risk. A tool policy does not prescribe a fixed call sequence. It states required input roles, parameter-binding rules, an output contract, post-checks, recovery advice, and per-tool statistics. The online goal is to choose actions that create sufficient current-run evidence for $y$ or $z$, not to maximize agreement with one historic trajectory.
+
+\section{Method}
+\subsection{Offline Construction from Rollouts}
+Figure~\ref{fig:overview} separates immutable, train-derived experience construction from online use. For every tool event, the extractor records
+\begin{equation}
+e_j=(\iota_j,t_j,a_j,\state^{j}_{in},\state^{j}_{target},\state^{j}_{out},u_j,v_j),
+\end{equation}
+where $u_j$ and $v_j$ are anonymized argument and observation summaries. Local evidence contains input binding, output validity, target completion, downstream consumption when observable, terminal usability, reward, risk reasons, and an infrastructure-error flag. Events are grouped by task type, intent signature, source state, and target state. If a target state is absent on an event but the same intent/source/tool combination has valid observed targets, the dominant valid target supplies a conservative resolution; unresolved events are not used to form a family.
+
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}[font=\small, node distance=7mm and 8mm, >=Latex,
+box/.style={draw=#1, fill=#2, rounded corners=2pt, minimum height=10mm, align=center, inner sep=4pt},
+arr/.style={->, thick, draw=navy}, soft/.style={->, thick, dashed, draw=teal}]
+\node[box={navy}{lightblue}] (roll) {Train rollouts\\calls and observations};
+\node[box={navy}{lightblue}, right=of roll] (event) {Extract event\\$\state_{in}\!\rightarrow\!\state_{target}$};
+\node[box={teal}{lightgreen}, right=of event] (family) {Transition family\\contracts, $Q/N/R$, policies};
+\node[box={orange}{lightorange}, below=15mm of family] (retrieve) {Compatible-family retrieval\\and $\quse$ tool ranking};
+\node[box={orange}{lightorange}, right=of family] (fallback) {Deterministic v3 fallback\\current state and tool contracts\\not train-rollout experience};
+\node[box={orange}{lightorange}, left=of retrieve] (agent) {Base agent\\soft planning evidence};
+\node[box={orange}{lightorange}, left=of agent] (task) {Held-out task\\current inputs and tools};
+\node[box={teal}{lightgreen}, below=of agent] (tool) {Current tool call\\and observation};
+\node[box={teal}{lightgreen}, below=of retrieve] (track) {Artifact tracker\\soft verifier};
+\node[box={navy}{lightblue}, right=of retrieve] (answer) {Answer and/or\\requested artifact};
+\draw[arr] (roll)--(event); \draw[arr] (event)--(family);
+\draw[arr] (task)--(agent); \draw[soft] (family)--(retrieve); \draw[soft] (fallback.south west)--(retrieve.north east); \draw[soft] (retrieve)--(agent);
+\draw[arr] (agent)--(tool); \draw[arr] (tool)--(track); \draw[soft] (track)--(retrieve);
+\draw[arr] (agent.east)--++(8mm,0)|-(answer.west);
+\node[draw=navy,dashed,fit=(roll)(event)(family),inner sep=5pt,label=above:{\footnotesize Offline: train rollouts only}] {};
+\node[draw=orange,dashed,fit=(task)(agent)(tool)(track)(retrieve)(fallback)(answer),inner sep=5pt,label=below:{\footnotesize Online: live state only}] {};
+\end{tikzpicture}
+\caption{\method{} uses train rollout events to form a read-only store. The current implementation also has a separate deterministic v3 fallback branch, shown in orange: when it matches, it is returned before ordinary learned-family ranking. Dashed arrows are recommendations, never forced actions. Test labels and historical artifact references do not enter online guidance.}
+\label{fig:overview}
+\end{figure*}
+
+The deterministic template is deliberately useful even when optional LLM distillation is unavailable. It says, for example, to bind an artifact-like parameter to the current returned artifact, to reuse a returned layer name exactly, and to reject empty output or invented references. When an LLM is used, it receives only state types, exact tool slugs, statistics, templated rules, and bounded local evidence examples. It is instructed to return concise product and tool policies without task IDs, place names, file paths, literal layer names, gold tools, or final answers. The structured output is merged only into textual fields; types, tool names, and empirical statistics remain deterministic.
+
+\subsection{State Extraction and Artifact Binding}
+The state abstraction has to be precise enough to support a call and coarse enough to transfer. We use three layers. An input layer records modalities already available at task start, such as raster/image input or a structured data file. A product layer records tool-produced references, for example a boundary GeoPackage, a named vector layer, an object localization, a count, or a numeric result. A deliverable layer records outputs requested by the user, such as a map, a plot, an annotated image, or a final numeric aggregation. The same observation can produce more than one state token only when it supplies independently usable products.
+
+State extraction is a tool-contract-driven parser over the current observation and artifact tracker, not a language-model guess over the entire trajectory. A successful response may create a compact product token and retain its concrete reference in a separate live record. A failed response, an empty layer, or an unreturned path must not create the corresponding usable token. This prevents a superficial textual mention of an artifact from satisfying a downstream precondition. It also makes a limitation explicit: undocumented or ambiguous responses can cause the tracker to under-recognize a usable result or over-recognize an invalid one. Both errors should appear in the mechanism audit.
+
+Binding rules close the gap between types and values. A recommendation that requires a GeoPackage does not authorize an agent to invent a filename; it directs the agent to use the artifact reference attached to the current state. Similarly, a recommendation that requires a layer name must consume the exact layer name returned by the preceding call. These rules are interface-level and not substitutes for validating scientific meaning: a correct file reference can still represent the wrong region, category, scale, or time period.
+
+\subsection{Local Utility, Risk, and Tool-Specific Evidence}
+During \emph{offline store construction}, a stream of non-infrastructure events with local reward $r_j\in[0,1]$ updates the product-family estimate in a fixed event order:
+\begin{equation}
+Q\leftarrow Q+\frac{\alpha_0}{\sqrt{N+1}}(r_j-Q),\quad
+R\leftarrow R+\frac{\beta_0}{\sqrt{N+1}}(\ell_j-R),\quad N\leftarrow N+1,
+\label{eq:stats}
+\end{equation}
+where $\ell_j$ is an attributable observed-risk value. The diminishing step size avoids allowing a single late event to replace all prior evidence. We clip $Q$ and $R$ to $[0,1]$. Network timeouts, provider overload, rate-limit failures, service-health failures, and out-of-memory incidents are explicitly labeled infrastructure failures and excluded from all three updates. In contrast, invalid arguments, missing required parameters, nonexistent current artifacts, empty outputs, and invalid calculator syntax are actionable local failures and may contribute to $R$.
+
+Each family also keeps statistics for each alternative tool policy. A tool's runtime score is smoothed toward the family estimate when its support is small:
+\begin{equation}
+\lambda_p=\frac{N_p}{N_p+k},\qquad
+\quse(p,f)=\lambda_pQ_p+(1-\lambda_p)Q_f.
+\label{eq:quse}
+\end{equation}
+Thus an under-observed tool is not discarded merely because it has little history, while a well-supported tool can depart from the family average. Risk is displayed beside the recommendation and contributes to retrieval, but it is neither a calibrated probability nor a hard exclusion rule.
+
+\subsection{Compatible Retrieval and Soft Runtime Guidance}
+At the start of a task, the runtime derives an initial state from available images and data files, parses the available tool set, and builds a task profile from the request. It retrieves only families whose required source state is compatible with the current state and whose candidate tool policies are available. The ordinary learned-store rank combines lexical/intent overlap, source-state overlap, task-shape specificity, support, family utility, and risk. However, a nonempty v3 fallback set is returned before this learned-store ranking in the current code. Families that reach the v4 formatter are then promoted when they better address a verifier-reported missing slot. Within a family, tool policies are ranked by Equation~\ref{eq:quse}; ties use support and lower risk.
+
+After each actual observation, the artifact tracker updates $\state_t$ and requests a fresh step hint. For learned families, the injected guidance states that lessons are rollout-derived rather than gold trajectories, that they are planning evidence rather than a forced script, and that every downstream call must bind to current-run artifacts and values. The inherited fallback branch complicates this statement twice: v4 can retrieve a deterministic v3 runtime fallback before learned families, and it currently uses the same generic rollout-derived wording. This is an implementation--documentation mismatch, not a license to reinterpret a fallback as learned experience. A submission version must label fallback guidance explicitly, record its provenance and priority decision at every retrieval, and report how often a fallback suppressed a compatible learned candidate. Subject to those corrections, the transition representation is actionable while leaving the base agent in control of its trajectory.
+
+The deterministic verifier checks only whether common evidence slots appear to be missing given the current state and task profile. For example, a visual request with no map/figure/image token is not ready; an aggregate request with no arithmetic result is not ready; a requested count distribution may need one count result per category and a current-run plot. For localized attribute questions, it can request localization before attribute evidence. The result is a checklist, not a proof of correctness. An optional LLM checker can inspect the compact state, recent observations, deterministic status, and candidate transition summaries; it is disabled by default and is told not to solve the task or use gold answers.
+
+Retrieval is filtering followed by ranking rather than nearest-neighbor trajectory replay. Let $C(f,\state_t,\mathcal{A})$ be zero when a family has an unavailable required tool or incompatible source state. For compatible families, the implemented score combines query/intent overlap, source-state overlap, task-shape specificity, support, product utility, risk, and a penalty for generic start-state families:
+\begin{equation}
+\mathrm{score}(f)=C\left[w_q\phi_q+w_s\phi_s+w_t\phi_t+w_n\phi_n+w_uQ_f-w_rR_f-w_g\phi_g\right].
+\end{equation}
+This expression abbreviates a fixed, hand-written heuristic in the current runtime rather than a learned scoring model: lexical overlap has weight $1.2$; source-state overlap is multiplied by $4$; support is $0.04\min(N_f,12)$; positive status contributes $0.6$; risk is penalized by $3R_f$; and a generic start-state family incurs a $2.5$ penalty after a tool product exists. The intent and task-shape terms are deterministic rule scores, including a narrow dynamic calculation adjustment. These constants, the state matcher, task-profile rules, and filters must be versioned in the store manifest. The score is neither a probabilistic estimate nor calibrated evidence of success; it exposes retrieval factors for audit and ablation.
+
+\subsection{Failure Attribution Boundaries}
+Local evidence is intentionally weaker than a claim that one tool caused a final outcome. A call receives positive evidence when its input is bound, its output is valid, it creates the target product, or a later visible call consumes it. It receives attributable risk when an agent passes an invalid argument, references a nonexistent artifact, violates an output contract, or repeats an identifiable failed binding. A later hallucination, evaluator disagreement, or service failure does not prove that the earlier transition was poor. This boundary explains why final task reward is only one component of local evidence and why infrastructure failures are excluded from running estimates.
+
+Training trajectories are not gold programs. A successful historical sequence may be one of several routes to a product, so a family retains alternative tool policies. A failed rollout can contribute a narrow recovery rule only where the failure is locally attributable. Source event IDs remain outside the runtime prompt so that each learned family can be audited without exposing historical task content to a new rollout. Separately, the inherited v3 compatibility path can construct runtime fallback families with provenance \texttt{experience\_evo\_v3\_runtime\_fallback}; these are deterministic interface heuristics, not learned experience, and their count and use must be reported separately.
+
+\subsection{What v4 Does and Does Not Enforce}
+The v4 design intentionally removes hard behavior inherited by earlier runtime variants. It has no answer-ready hard guard, no premature-final guard based on recommendations, and no synthetic code-generated final answer. It retains only two interface-independent hard checks: an image argument cannot point outside a current-run input/artifact reference, and a calculator request must contain one safe arithmetic expression rather than imports, assignments, or multi-line code. Therefore, any empirical effect of v4 can still include helpful generic schema protection. It cannot be interpreted as a pure retrieval effect without the controls in Section~\ref{sec:controls}.
+
+\section{Leakage, Safety, and Attribution Controls}
+\label{sec:controls}
+Experience methods are vulnerable to accidental test replay and to conflating memory with runtime engineering. We require the following constraints.
+\begin{enumerate}
+\item \textbf{Split isolation.} The store is built from actual base-agent train rollouts only. It is immutable during development and held-out evaluation.
+\item \textbf{Forbidden online inputs.} The evaluation integration must pass only the request, declared task type, live images/data files, available tools, and current artifact state to the augmenter. The v4 method signature has no fields for expected tools, reference trajectories, or gold answers, but split isolation and caller-side dataflow auditing are required to establish that these signals were not embedded upstream.
+\item \textbf{Anonymization and binding.} Historical locations, file paths, layer names, and task-specific free text are replaced by typed placeholders before runtime rendering. Guidance instructs all downstream calls to use current-run references; the v4 hard guard directly blocks only invalid image references and malformed calculator expressions. Other argument bindings require audit rather than a claim of universal runtime enforcement.
+\item \textbf{Failure neutrality.} Infrastructure events are excluded from utility/risk evidence rather than misclassified as a poor tool policy.
+\item \textbf{Causal controls.} The study includes a base-plus-generic-guard control and a no-store soft-guidance control. These are necessary to separate learned transition retrieval from shared runtime safeguards.
+\item \textbf{Mechanism logs.} Per step, record product state, learned candidates considered, retrieved/returned families, each family's provenance (``train rollout'' or ``runtime fallback''), whether fallback priority suppressed learned ranking, recommended/ranked tools, verifier status, selected action, and whether the selected action was compatible. The current generic \texttt{evolution\_trace} does not yet contain all of these fields, so this is a required submission artifact rather than a property inferred from historical traces. These logs support audits but do not establish causal attribution on their own.
+\end{enumerate}
+
+\section{Experimental Protocol}
+\subsection{Research Questions and Comparisons}
+The primary research questions are: (RQ1) whether state-conditioned experience improves task execution relative to the identical base agent; (RQ2) whether it improves completion of requested generated artifacts separately from ordinary text answers; (RQ3) whether invalid/repeated work and cost decrease; (RQ4) whether step hints, $\quse$, and verification contribute; and (RQ5) whether effects transfer beyond one model and one held-out task slice.
+
+The primary interface is OpenEarthAgent-style geospatial tool use \cite{openearthagent}. Before final reporting, freeze a train/dev/test split, tool manifest, model/provider snapshot, base prompt, max-turn setting, retry policy, and artifact directory policy. Baselines are the unchanged ReAct system \cite{react}, reflection \cite{reflexion}, ExpeL \cite{expel}, and MemRL \cite{memrl}. Any baseline that is not run from its official repository and prompt must be labeled \emph{adapted} or \emph{reimplemented}, with the specific interface changes disclosed. Results from a different actor, tool registry, or retry policy must never enter the same paired comparison.
+
+\begin{table*}[t]
+\centering
+\caption{Required main comparison. Blank cells are intentional until the frozen, multi-seed evaluation is complete. Artifact completion is not pooled into ordinary answer accuracy.}
+\label{tab:main}
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccccccc}
+\toprule
+Method & Fidelity & Success & Tool F1 & Answer & Artifact & Tools/task & Tokens/task & Time/task & Seeds \\
+\midrule
+Base ReAct & system baseline & TBD & TBD & TBD & TBD & TBD & TBD & TBD & TBD \\
+Reflection & adapted / TBD & TBD & TBD & TBD & TBD & TBD & TBD & TBD & TBD \\
+ExpeL & adapted / TBD & TBD & TBD & TBD & TBD & TBD & TBD & TBD & TBD \\
+MemRL & adapted / TBD & TBD & TBD & TBD & TBD & TBD & TBD & TBD & TBD \\
+\method{} v4 & proposed & TBD & TBD & TBD & TBD & TBD & TBD & TBD & TBD \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+\subsection{Metrics and Statistical Analysis}
+Report task completion; set, multiset, exact, and ordered tool agreement where the benchmark defines them; tool category F1; invalid-call and repeated-call rate; tools and LLM calls per task; tokens; and wall-clock time. Answer quality is evaluated separately for ordinary text-answer tasks and requested-generation tasks. For the latter, report an artifact-completion measure based on whether the final required artifact/tool contract succeeds; it is not an LLM judge score. If an LLM judge evaluates ordinary answers, state the judge model, prompt, cache/error handling, and whether the actor and judge share a provider. A blind human or independent-judge audit is required before publication claims about answer quality.
+
+All deltas are paired on common task IDs. Report paired bootstrap confidence intervals, the number of missing/empty/retried/evaluator-error cases, and stratified results by tool category, modality, and generated versus non-generated deliverable. Candidate selection belongs exclusively to dev data. Each accepted configuration should receive one locked held-out run, with additional seeds or independent actor sampling when stochasticity is material.
+
+\subsection{Execution Plan and Data Governance}
+The store-building split must be frozen before event extraction. The base agent generates train trajectories without test labels; the builder records source rollout manifest, extractor version, event and family counts, minimum support, and whether LLM distillation was enabled. Store construction must not silently fall back to an offline heuristic when its configured distillation model is unavailable. Evaluation consumes a read-only store hash. A changed tool schema, state extractor, or anonymization rule defines a new scientific object and requires a new manifest rather than an in-place store update.
+
+For cost reporting, separate actor tokens from optional verifier/checker tokens, include tool service time, and note cache status. For errors, distinguish deterministic invalid calls from transient network/provider incidents. Retain every task result, including empty finals, rather than dropping difficult cases. When workers run concurrently, task-level metadata must reconstruct the effective actor/provider and tool-service configuration without exposing credentials or private paths.
+
+\begin{table}[t]
+\centering
+\caption{Causal and component ablations. ``Generic guard'' contains only current-run image binding and calculator syntax checks.}
+\label{tab:ablation}
+\small
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+Variant & Store & Fallback & Generic guard & Step hint & $\quse$ & Verifier \\
+\midrule
+Base & no & no & no & no & no & no \\
+Base + generic guard & no & no & yes & no & no & no \\
+No-store soft-only & no & no & yes & generic & no & optional \\
+Fallback-only & no & yes & yes & yes & yes & explicit fixed setting \\
+Learned-store-only & yes & no & yes & yes & yes & explicit fixed setting \\
+Full v4 & yes & yes, priority & yes & yes & yes & yes \\
+Full $-$ step hint & yes & yes, priority & yes & no & yes & yes \\
+Full $-$ $\quse$ & yes & yes, priority & yes & yes & no & yes \\
+Full $-$ verifier & yes & yes, priority & yes & yes & yes & no \\
+Full + LLM checker & yes & yes, priority & yes & yes & yes & checker \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\section{Preliminary Diagnostics, Not Final Evidence}
+\label{sec:prelim}
+This section reports existing runs solely to document what has and has not been observed. These runs are not substitutes for the frozen comparison in Table~\ref{tab:main}: they use one actor/configuration, lack all causal controls, and have not received multi-seed confidence intervals or an independent answer audit.
+
+Two historical 1,162-task OpenEarthAgent reports used the same declared task file and enabled all reported task categories. In those records, base completion was 85.54\% and v4 completion was 91.05\%; set tool F1 changed from 0.692 to 0.764. The v4 record reports fewer tools per task (6.42 to 4.82), fewer total LLM tokens (64.49M to 60.88M), and less mean wall time (118.4s to 88.5s). Ordinary LLM-judged answer accuracy was essentially unchanged (48.71\% to 48.78\%), whereas the generated-artifact metric changed from 71.13\% to 77.46\%. These values are not a paired controlled comparison: the archived reports use different worker counts and do not establish identical actor, tool, cache, retry, or service manifests; their exported unique-tool inventories also differ. They are descriptive single-run diagnostics, not a claim of state-of-the-art answer accuracy or a causal v4 effect. In the same historical comparison, adapted reflection and memory baselines had higher ordinary-answer scores.
+
+On a fixed 200-task component subset, removing step-level guidance changed completion from 92.0\% to 84.5\%, tool F1 from 0.754 to 0.717, and generated-artifact completion from 73.1\% to 55.8\%. Removing $\quse$ changed the corresponding values to 89.5\%, 0.736, and 67.3\%. Removing the deterministic verifier or enabling the optional checker produced mixed directions on this small slice. These numbers motivate the planned component study but cannot distinguish retrieval from generic v4 behavior and should not be promoted to a final causal result. Later full-set OEA diagnostics include a v5 exploratory run, four v4-clean ablations, and strict rollout-only Memento-style CaseBank. The strict Memento-style run completed 1,162 tasks with 87.0\% success, 0.705 set tool F1, 0.647 multiset tool F1, 48.92\% ordinary answer accuracy, 72.54\% generated-artifact-inclusive accuracy, 6.23 tools per task, and 62.97M total tokens. The v5 run and four later full-set v4 ablations have tool and execution reports but no LongCat answer-judge summaries yet; their answer columns are therefore left blank.
+
+\begin{table*}[t]
+\centering
+\caption{Existing diagnostic runs. Values are descriptive and must be replaced or accompanied by the frozen-manifest multi-seed result. ``Gen.'' is a final generated-artifact contract metric, not ordinary answer accuracy.}
+\label{tab:diagnostic}
+\small
+\begin{tabular}{lrrrrrrr}
+\toprule
+Run & $n$ & Success & Tool F1 & Text answer & Gen. artifact & Tools/task & Tokens/task \\
+\midrule
+Base, historical full run & 1162 & 85.54\% & 0.692 & 48.71\% & 71.13\% & 6.42 & 55,525 \\
+\method{} v4, historical full run & 1162 & 91.05\% & 0.764 & 48.78\% & 77.46\% & 4.82 & 52,396 \\
+v4 default subset & 200 & 92.0\% & 0.754 & 49.22\% & 73.08\% & -- & -- \\
+v4 $-$ step hint subset & 200 & 84.5\% & 0.717 & 48.21\% & 55.77\% & -- & -- \\
+v4 $-$ $\quse$ subset & 200 & 89.5\% & 0.736 & 45.83\% & 67.31\% & -- & -- \\
+ExperienceEvo v5 exploratory full & 1162 & 90.3\% & 0.753 & -- & -- & 5.31 & 64,084 \\
+v4 full $-$ $\quse$/QNR & 1162 & 92.5\% & 0.770 & -- & -- & 4.83 & 52,094 \\
+v4 full $-$ step hint & 1162 & 87.9\% & 0.739 & -- & -- & 5.85 & 55,955 \\
+v4 full $-$ verifier & 1162 & 92.1\% & 0.753 & -- & -- & 5.24 & 60,547 \\
+Random retrieval control, full & 1162 & 89.9\% & 0.745 & -- & -- & 5.06 & 58,275 \\
+Memento-style CaseBank, strict rollout-only & 1162 & 87.0\% & 0.705 & 48.92\% & 72.54\% & 6.23 & 54,189 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\section{Mechanism Audits and Failure Analysis}
+The main mechanism claim requires more than an outcome table. For every test task, an audit should answer: did a compatible family exist; was it retrieved; did the agent select a suggested tool; did the observation produce the expected product; and did that product contribute to the final deliverable? Report these quantities for improved, unchanged, and regressed tasks. Analyze low-support versus high-support families and state transitions that are absent from the store. A recommendation-following rate is descriptive only: an agent can follow a compatible suggestion and still use wrong arguments or stop before synthesis.
+
+Earlier hard-convergence behavior illustrates the importance of this audit. A runtime can recognize a route-distance result or a calculator result and then prematurely block further work, even where the request needs an average, an attribute lookup, or a displayed artifact. This can improve strict sequence agreement by pruning actions while reducing real completion. The v4 soft-verifier design is meant to avoid this failure mode, but an experiment must verify that it does so through current-run evidence rather than simply increasing action count or exploiting a metric definition.
+
+Use an error taxonomy with five separately reported buckets: (1) no compatible family or missing state vocabulary; (2) retrieved family but no recommendation following; (3) selected/recommended policy with invalid current-run binding; (4) valid intermediate product but missing downstream synthesis/deliverable; and (5) external or evaluator failure. Annotate a stratified sample of improvements and regressions in each bucket. This separates a retrieval failure from a planner failure and a deliverable failure, and prevents high recommendation-following from being mistaken for proof that a recommendation was useful.
+
+\section{Additional Falsifiers}
+The method would be falsified as an experience mechanism if no-store soft-only consistently matched it under the same manifest, or if a generic-guard-only control accounted for its gains. It would also be weakened if recommendation use did not differ between improved and regressed tasks, if retrieved families retained test-specific content, or if performance disappeared when artifact tasks were scored independently of tool-chain similarity. A higher tool F1 with lower final artifact completion is a metric tradeoff, not partial confirmation of the central hypothesis. These falsifiers constrain post-hoc interpretation.
+
+\section{Limitations, Broader Impact, and Release Requirements}
+The product vocabulary may omit a semantically necessary intermediate; the state tracker can misread an ambiguous observation; and a frequent high-$Q$ transition may be contextually inappropriate. The method cannot repair missing data, broken services, provider quotas, or a flawed tool schema. Anonymization reduces direct trajectory replay but does not prove absence of benchmark overfitting. The current implementation is evaluated in a geospatial interface, so transfer to transactional, browser, or security-sensitive agents is a research question rather than a conclusion.
+
+The system can increase automation of spatial analysis. Users should not treat its state labels or soft verification as a guarantee that an output is scientifically valid. Artifacts must retain provenance, and deployments involving sensitive locations or imagery require access control, minimization of retained traces, and domain review. Before release, provide split hashes; train-rollout provenance; store and tool manifests; anonymization rules; model/provider versions; full prompts; environment flags; all trajectory/evaluator metadata; and baseline fidelity labels. Remove private paths, secrets, and task-sensitive raw entities from released logs.
+
+\section{Conclusion}
+\method{} treats experience reuse as the transfer of small, grounded contracts between current runtime products. It separates state-compatible planning evidence from historical trajectory replay, adds local tool-level credit assignment, and uses a soft verifier rather than a hard termination policy. Existing diagnostics are encouraging for execution and generated artifacts, but the unresolved causal controls, replication, and independent answer evaluation prevent broad empirical claims. The next valid result is therefore not a larger headline table; it is a frozen, controlled study that can isolate the contribution of transition experience itself.
+
+\appendix
+\section{Transition-Family Construction Algorithm}
+\noindent\textbf{Input:} train rollout events $E$, minimum support $m$, optional controlled distiller $D$.\\
+\textbf{Output:} immutable family store $\mathcal{M}$.\\
+\begin{enumerate}
+\item Normalize each event into intent signature, source/target product state, exact tool slug, anonymized argument/observation summaries, and local evidence.
+\item Resolve an absent target only from valid targets observed for the same intent, source state, and tool; otherwise discard that event for family construction.
+\item Group events by $(\text{task type},\iota,\state_{in},\state_{target})$ and remove groups with fewer than $m$ non-infrastructure observations.
+\item Compute family and per-tool $(Q,N,R)$ by Equation~\ref{eq:stats}, excluding infrastructure events.
+\item Create deterministic product checks and binding rules from typed placeholders. Preserve exact tool slugs and source-event provenance outside runtime text.
+\item Optionally ask $D$ to shorten text fields under the forbidden-content contract; retain deterministic types, statistics, and policies regardless of $D$ output.
+\item Store JSONL as the source of truth and a queryable index/mirror for retrieval. Do not append evaluation events.
+\end{enumerate}
+
+\section{Online Guidance Algorithm}
+\noindent\textbf{Input:} request $q$, live inputs $I$, available tools $\mathcal{A}$, immutable store $\mathcal{M}$.\\
+\textbf{Output:} base-agent trajectory with soft guidance.\\
+\begin{enumerate}
+\item Infer $\state_0$ from live inputs and create a task profile from $q$.
+\item Enumerate source-compatible learned families under available tools and any inherited runtime fallback family. Under the current implementation, return a nonempty fallback set before learned-store ranking; record both the candidates and this priority decision. Otherwise rank learned candidates by compatibility, support, utility, and risk. Render anonymized planning evidence.
+\item Let the base agent choose an action. Block only a non-current image reference or an invalid calculator expression.
+\item Execute the tool, update the live artifact tracker from its observation, and derive $\state_{t+1}$.
+\item Produce a missing-evidence checklist and fresh compatible transition hints. Do not force an action or final answer.
+\item Stop when the base agent elects to answer; log all retrieval, verifier, action, and product-state events for audit.
+\end{enumerate}
+
+\section{State and Evidence Vocabulary}
+The implementation uses typed symbolic states rather than a complete ontology. Input types include image and data-file presence. Output types include returned GeoPackage references, vector-layer names, region/object localization, object counts, spatial measurements, calculator/solver results, maps, figures, and annotations. Local evidence records whether input binding is valid, an output is valid, the target state is completed, a downstream consumer used the result when visible, the result is terminally usable, and which attributable risk reason occurred. This vocabulary must be versioned with each store manifest; changing the extractor or a tool output contract changes the scientific object being evaluated.
+
+\subsection{State Update Rules}
+The state tracker implements a conservative monotone abstraction: it adds a token when a current observation supplies the corresponding usable product, and it does not remove an earlier token merely because a later unrelated tool call occurs. Concrete references are versioned by observation order, so downstream binding resolves to the latest compatible current-run reference rather than an arbitrary historical value. When a tool overwrites a named layer or artifact, the tracker must record that replacement explicitly; otherwise a state token alone is insufficient to select the right concrete value. A state may contain multiple counts, multiple attribute descriptions, or multiple calculator results. Multi-target task profiles therefore include cardinality requirements instead of treating the first result as completion.
+
+The tracker deliberately distinguishes a returned artifact reference from a rendered deliverable. A GeoPackage can be sufficient for a spatial operation but not for a request that explicitly asks for a visual map. Likewise, a calculator result can support a numerical answer but not a request for a distribution plot. The verifier's missing slots are derived from this distinction. They are conservative task-shape heuristics and must be disabled or revised when an interface has a different output contract. Their role is to expose likely missing evidence to the base agent, not to impose a benchmark-specific gold workflow.
+
+\subsection{Local Evidence Labeling}
+For each event, \texttt{input\_binding\_ok} asks whether required artifact-like arguments are present in the live state and match returned references; \texttt{output\_valid} asks whether the observation is non-error and contains the promised product; \texttt{target\_completed} asks whether the typed target became available; \texttt{downstream\_consumed} records visible later use where such use exists; and \texttt{terminal\_usable} records whether the product directly supports an answer or requested deliverable. The latter two values are allowed to be unknown rather than converted into a negative label. This prevents a truncated trace from being interpreted as evidence that an intermediate product was useless.
+
+Risk reasons require a local, observable statement. Examples include missing required arguments, passing a stale/nonexistent artifact reference, returning an empty expected layer, or submitting a calculator expression outside the tool's one-expression schema. A generic final-task failure is not a risk reason for every preceding event. Likewise, an upstream HTTP timeout is neither evidence of invalid input binding nor a reward signal for another tool. Annotation guidelines should include counterexamples and a double-coded audit sample, because the quality of local labels bounds the meaning of $Q$ and $R$.
+
+\section{Submission Checklist}
+The paper must not be submitted with ``TBD'' entries in Table~\ref{tab:main}. Required gates are: immutable split and manifests; no-store and generic-guard controls; at least one replicated or stochasticity-aware result; paired uncertainty intervals; an evidence-use audit; disclosed adapted baselines; and an independent or human answer-quality check. The diagnostic table may remain as an ablation-development record only when its configuration and limitations are retained verbatim.
+
+\section{Worked Product-Contract Example}
+Consider a generic request that requires selecting locations inside a current area and producing a map. The initial state can contain \texttt{task\_request} and a live boundary product. A family may define the next target as \texttt{vector-layer:from:poi-tool}, with a product precondition that the boundary reference is present, an output check that a nonempty layer is returned, and a downstream rule that the exact returned layer name must be used by a renderer. It can hold two candidate policies: one invokes a point-of-interest tool with the current GeoPackage reference, and another invokes a compatible data-layer tool. Both policies share the same target contract while retaining separate $Q$, $N$, and $R$.
+
+Suppose that the point-of-interest policy is selected and returns an empty result. The tracker must not add a usable vector-layer token merely because the call returned syntactically. The verifier may then report that the requested layer is missing, and a recovery hint can recommend checking the spatial/category binding or choosing another compatible policy. It must not direct the agent to copy a historic location, layer name, or result. If a nonempty layer is produced, the following map-producing transition becomes eligible. The final answer can mention the current generated map only after the live artifact reference exists. This example illustrates why the transferable object is a product contract rather than an action sequence: the area, category, exact layer name, and renderer can vary while the dependency remains stable.
+
+\section{Manifest Schema and Audit Queries}
+Every experiment should emit a machine-readable manifest with the following groups of fields: \emph{data} (split hash, task identifiers, task modality counts); \emph{actor} (model revision, provider, decoding, base prompt hash, maximum iterations); \emph{tools} (registry and schema hashes, service versions, cache policy); \emph{store} (source rollout hash, builder/extractor version, state vocabulary, family count, retrieval parameters); \emph{evaluation} (metric definitions, judge identity, transient-error policy); and \emph{resources} (worker count, token accounting, service hardware configuration). The manifest must record which fields differ from a baseline comparison.
+
+Mechanism logs should support at least four audit queries. First, coverage: what fraction of steps has a source-compatible family? Second, adherence: conditional on a recommendation, what fraction of selected tools is one of the ranked policies? Third, binding validity: conditional on adherence, how often does the call consume a current returned reference and produce a valid target product? Fourth, contribution: among successful final deliverables, how often is there a chain of live product references from a retrieved transition to the final artifact? The fourth query is an explanatory trace property, not a claim that retrieval caused success. Publish aggregate counts and sampled traces for all outcome strata.
+
+\section{Statistical Reporting Details}
+For each paired primary contrast, sample task IDs with replacement and compute the mean metric difference on each bootstrap sample. Report percentile or bias-corrected intervals, the original paired difference, and the full task count. For binary completion metrics, also report the counts of base-only success, method-only success, both success, and both failure. For ratio-like efficiency metrics, report both per-task means and total cost, since a few long trajectories can dominate one but not the other. Never calculate a paired interval after filtering to completed tasks only unless completion itself is explicitly the conditioning variable and is reported.
+
+Multiple ablations are not independent confirmation. State which ablations were exploratory, which subset was selected before execution, and whether each variant used exactly the same task IDs and environmental settings. If a result is rerun because of a transient provider failure, preserve the original failure record and report the retry rule. If a result is rerun after a code change, it is a new configuration rather than an additional seed. This reporting discipline matters because agent evaluations commonly mix tool availability, service state, and model sampling variation.
+
+\section{Evaluation Protocol by Task Type}
+Different output modes require different end-to-end checks. For a direct factual or numerical task, validate that the final response is grounded in a returned current-run value and assess semantic correctness separately. For a tool-chain task, report benchmark-defined tool agreement but never substitute it for final correctness. For a generated-artifact task, verify that the requested final rendering/annotation/display tool succeeded and that the returned artifact path is accessible inside the permitted artifact directory. For a multi-object measurement task, require sufficient per-target state cardinality before treating a single result as representative. For a map/data-construction task, validate that a created layer is present, nonempty when nonemptiness is expected, and connected to the current area/data source.
+
+This protocol protects against misleading aggregate success. An agent may obtain a correct number without a required artifact, or it may call all expected tools while producing an unusable layer. Conversely, an agent may use a valid alternative tool sequence and fail a strict reference-trajectory metric. The paper should show all of these outcomes rather than selecting one as the sole definition of success. In particular, generated-artifact completion must be reported with the number of relevant tasks and its exact final-product contract; it is not interchangeable with LLM-judged natural-language answer accuracy.
+
+\section{Hyperparameters and Sensitivity Analysis}
+The builder exposes minimum family support, maximum retained families, distillation example budget, initial update rates, and risk update rate. The runtime exposes the retrieval top-$k$, tool recommendations per family, utility smoothing constant $k$, minimum utility/maximum risk filters, and verifier/checker toggles. A final study should state all default values and run a bounded sensitivity analysis around those that materially change family availability or tool ranking. Sensitivity should include at least minimum support, retrieval top-$k$, and the $\quse$ smoothing constant, while keeping the store split and tool manifest fixed.
+
+The expected qualitative tradeoff is not assumed to be monotone. Increasing minimum support can remove rare but valuable transitions; increasing top-$k$ can increase prompt length and distract the actor; and trusting tool-specific utility too quickly can overfit sparse evidence. Report coverage, prompt-token overhead, recommendation entropy, and outcome metrics together. A sensitivity plot should not be used to select a preferred parameter on the final test split. Choose parameters on development data or state explicitly that the analysis is exploratory.
+
+\begin{thebibliography}{99}
+\bibitem{react} Shunyu Yao et al. ReAct: Synergizing Reasoning and Acting in Language Models. \emph{ICLR}, 2023.
+\bibitem{toolformer} Timo Schick et al. Toolformer: Language Models Can Teach Themselves to Use Tools. \emph{NeurIPS}, 2023.
+\bibitem{toolllm} Yujia Qin et al. ToolLLM: Facilitating Large Language Models to Master 16000+ Real-world APIs. \emph{ICLR}, 2024.
+\bibitem{reflexion} Noah Shinn et al. Reflexion: Language Agents with Verbal Reinforcement Learning. \emph{NeurIPS}, 2023.
+\bibitem{expel} Shuyan Zhou et al. ExpeL: LLM Agents Are Experiential Learners. \emph{AAAI}, 2024.
+\bibitem{voyager} Guanzhi Wang et al. Voyager: An Open-Ended Embodied Agent with Large Language Models. \emph{arXiv:2305.16291}, 2023.
+\bibitem{memrl} Shengtao Zhang et al. MemRL: Self-Evolving Agents via Runtime Reinforcement Learning on Episodic Memory. \emph{arXiv:2601.03192}, 2026.
+\bibitem{autoskill} Yutao Yang et al. AutoSkill: Experience-Driven Lifelong Learning via Skill Self-Evolution. \emph{arXiv:2603.01145}, 2026.
+\bibitem{skillrl} Peng Xia et al. SkillRL: Evolving Agents via Recursive Skill-Augmented Reinforcement Learning. \emph{arXiv:2602.08234}, 2026.
+\bibitem{skill1} Yaorui Shi et al. Skill1: Unified Evolution of Skill-Augmented Agents via Reinforcement Learning. \emph{arXiv:2605.06130}, 2026.
+\bibitem{reskill} Zelin He et al. ReSkill: Reconciling Skill Creation with Policy Optimization in Agentic RL. \emph{arXiv:2606.01619}, 2026.
+\bibitem{skillos} Siru Ouyang et al. SkillOS: Learning Skill Curation for Self-Evolving Agents. \emph{arXiv:2605.06614}, 2026.
+\bibitem{tmem} Tao Ren et al. Scaling Self-Evolving Agents via Parametric Memory. \emph{arXiv:2606.04536}, 2026.
+\bibitem{toolrl} Cheng Qian, Emre Can Acikgoz, Qi He, Hongru Wang, Xiusi Chen, Dilek Hakkani-Tur, Gokhan Tur, and Heng Ji. ToolRL: Reward is All Tool Learning Needs. \emph{NeurIPS}, 2025.
+\bibitem{openearthagent} Akashah Shabbir et al. OpenEarthAgent: A Unified Framework for Tool-Augmented Geospatial Agents. \emph{arXiv:2602.17665}, 2026.
+\end{thebibliography}
+\end{document}
