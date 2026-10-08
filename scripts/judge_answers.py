@@ -14,6 +14,11 @@
   no_proxy=localhost,127.0.0.1 PYTHONPATH=src python scripts/judge_answers.py \
       --results tmp/trajectories/oe_full_react_offline/standard/results \
       --task-file data/oea_full_sft/openearth_test_tasks.json --provider local
+  # 如果本地 vLLM 不在 9100,可显式固定服务地址(不改变结果口径)
+  no_proxy=localhost,127.0.0.1 PYTHONPATH=src python scripts/judge_answers.py \
+      --results tmp/trajectories/oe_full_react_offline/standard/results \
+      --task-file data/oea_full_sft/openearth_test_tasks.json --provider local \
+      --llm-url http://localhost:9000
 
   # DeepSeek/LongCat 判固定 200 条子集(外部 judge)
   PYTHONPATH=src python scripts/judge_answers.py \
@@ -168,6 +173,11 @@ def main():
     ap.add_argument("--results", required=True, help="rollout 结果目录(含 *.json)")
     ap.add_argument("--task-file", required=True, help="含 ground_truth 的任务文件")
     ap.add_argument("--provider", default="local", help="local(默认) | deepseek | longcat")
+    ap.add_argument(
+        "--llm-url",
+        default="",
+        help="local provider 的 vLLM 地址；为空时自动探测 EVOLUTION_LLM_URLS/9100-9103/9000",
+    )
     ap.add_argument("--subset", type=int, default=0, help="只判前 N 条(0=全部)")
     ap.add_argument("--numeric-shortcut", action="store_true", help="启用单数字代码 ±10%% 快捷判分(默认关闭,全走 LLM)")
     ap.add_argument("--no-cache", action="store_true")
@@ -207,7 +217,11 @@ def main():
 
     provider_spec = None if args.provider == "local" else resolve_provider(args.provider)
     cost = CostTracker(model=provider_spec.model if provider_spec else "local")
-    client = make_llm_client(args.provider, cost=cost)
+    if args.provider == "local" and args.llm_url:
+        from terrabox.evolution.shared.llm_client import EvolutionLLMClient
+        client = EvolutionLLMClient(llm_url=args.llm_url)
+    else:
+        client = make_llm_client(args.provider, cost=cost)
     judge = AnswerJudge(client, cache_dir=cache_dir, use_cache=not args.no_cache,
                         numeric_shortcut=args.numeric_shortcut)
 

@@ -209,6 +209,8 @@ def run_sequential_react_loop(
                 accepted = {key: value for key, value in kwargs.items() if key in params}
                 hint = method(task_question, **accepted)
         except Exception as exc:
+            if getattr(evolution_augmenter, "strict_augmentation", False):
+                raise
             evolution_trace.append({"step": step, "error": f"{type(exc).__name__}: {exc}"})
             return
         hint = str(hint or "").strip()
@@ -228,6 +230,8 @@ def run_sequential_react_loop(
                 "hint_preview": hint[:1500],
                 "recommended_tools": recommended_tools,
                 "answer_ready": answer_ready,
+                **({"boundary": list(evolution_augmenter.boundary_trace)}
+                   if hasattr(evolution_augmenter, "boundary_trace") else {}),
             }
         )
         last_hint_trace_index = len(evolution_trace) - 1
@@ -265,6 +269,8 @@ def run_sequential_react_loop(
                 accepted = {key: value for key, value in kwargs.items() if key in params}
                 guard = method(task_question, **accepted)
         except Exception as exc:
+            if getattr(evolution_augmenter, "strict_augmentation", False):
+                raise
             evolution_trace.append({"step": step, "error": f"{type(exc).__name__}: {exc}"})
             return False
         guard = str(guard or "").strip()

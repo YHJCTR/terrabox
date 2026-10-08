@@ -24,10 +24,10 @@
   # 带进化增强 prompt
   python scripts/run_trajectory_experiment.py rollout \\
       --task-file data/merged/merged_train_tasks.json \\
-      --experiment merged_seqgraphevo \\
+      --experiment merged_reflection \\
       --mode standard \\
-      --evolution-method seqgraphevo \\
-      --evolution-store evo_res/merged/seqgraphevo/store
+      --evolution-method reflection \\
+      --evolution-store evolution_store/reflection
 
   # 查看轨迹统计
   python scripts/run_trajectory_experiment.py stats \\
@@ -36,6 +36,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import inspect
 import json
 import logging
@@ -68,6 +69,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 _ROLLOUT_WORKER_CTX: dict[str, Any] = {}
+
+# The Qwen2.5-3B family (base, Swift SFT, and Swift RL merges) uses the same
+# 32k native position limit, but a 24k vLLM window is the stable single-card
+# setting used by the OEA harness.  The completion cap leaves room for the
+# prompt/history instead of allowing one malformed response to consume the
+# entire request context.
+_QWEN25_ROLLOUT_CONTEXT = 24576
+_QWEN25_ROLLOUT_COMPLETION = 4096
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Tool filtering constants used by rollout task filtering.
@@ -120,6 +129,47 @@ TOOL_ALIASES = {
 
 def canonical_slug(slug: str) -> str:
     return TOOL_ALIASES.get(slug, slug)
+
+
+def _load_sft_prompt_tool_catalog(prompt_path: str | Path) -> list[str]:
+    """Read the exact tool catalog embedded in an SFT system prompt.
+
+    Text-action SFT checkpoints are trained against the catalog serialized in
+    their system prompt.  Restricting runtime tools to the union of a small
+    eval shard's ``expected_tools`` silently creates a different protocol: the
+    model can emit a tool name it was explicitly shown, while the executor
+    reports that the tool does not exist.  Parse the prompt catalog once and
+    use it as the runtime allow-list for ``sft-json`` rollouts.
+    """
+    path = Path(prompt_path).expanduser().resolve()
+    text = path.read_text(encoding="utf-8")
+    marker = "Tool catalog:"
+    marker_pos = text.find(marker)
+    if marker_pos < 0:
+        raise ValueError(
+            f"SFT system prompt does not contain '{marker}': {path}. "
+            "Use the exact prompt saved with the SFT dataset."
+        )
+    payload = text[marker_pos + len(marker) :].lstrip()
+    try:
+        catalog, _ = json.JSONDecoder().raw_decode(payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Cannot parse the JSON tool catalog in SFT system prompt: {path}"
+        ) from exc
+    if not isinstance(catalog, list):
+        raise ValueError(f"SFT tool catalog must be a JSON list: {path}")
+    slugs: list[str] = []
+    for entry in catalog:
+        if not isinstance(entry, dict) or not isinstance(entry.get("slug"), str):
+            raise ValueError(f"SFT tool catalog contains an invalid entry: {path}")
+        slug = canonical_slug(entry["slug"].strip())
+        if slug:
+            slugs.append(slug)
+    unique = sorted(set(slugs))
+    if not unique:
+        raise ValueError(f"SFT system prompt contains an empty tool catalog: {path}")
+    return unique
 
 
 def cleanup_gpu_memory():
@@ -215,6 +265,49 @@ _NONRETRYABLE_MARKERS = (
     "invalid expression",
     "max sequential tool turns reached",
 )
+_CONTEXT_OVERFLOW_MARKERS = (
+    "maximum context length",
+    "context length exceeded",
+    "context window exceeded",
+    "prompt is too long",
+    "input token count exceeds",
+    "number of tokens in the prompt",
+    "exceeds the model's maximum",
+    "exceed the model context",
+    "max_model_len",
+    "context_overflow",
+)
+_INFRA_ERROR_MARKERS = (
+    "container exited unexpectedly",
+    "failed to start instructsam",
+    "failed to start sam2",
+    "failed to start remotesam",
+    "failed to start strip-rcnn",
+    "failed to start changeos",
+    "service failed to start",
+    "docker create",
+    "docker start",
+)
+_FATAL_INFRA_MARKERS = (
+    "failed to start agent llm container",
+    "agent llm container exited unexpectedly",
+    "http/1.1 400 bad request",
+)
+
+
+def _is_fatal_infra_exception(exc: Exception) -> bool:
+    """Abort whole eval on environment/model-service failures.
+
+    These failures are run-wide configuration/service issues, not model task
+    behavior. Writing them as per-task results can pollute hundreds of metrics.
+    """
+    text = str(exc).lower()
+    return any(marker in text for marker in _FATAL_INFRA_MARKERS)
+
+
+def _is_context_overflow_exception(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _CONTEXT_OVERFLOW_MARKERS)
 
 
 def _result_top_failure_text(result: dict) -> str:
@@ -255,13 +348,17 @@ def _result_failure_text(result: dict) -> str:
 
 def _result_is_failed(result: dict) -> bool:
     status = str(result.get("status", "") or "").lower()
-    if status in {"failed", "exception", "empty_final"}:
+    if status in {"failed", "exception", "empty_final", "context_overflow", "infra_error"}:
         return True
     # Some older result files record a failed episode as success=False with a
     # completed-ish status. Only consider those for retry when an actual tool or
     # exception error is present; low F1 alone is a model behavior signal.
     return result.get("success") is False and bool(
-        result.get("has_tool_error") or result.get("has_tool_oom") or result.get("error")
+        result.get("has_tool_error")
+        or result.get("has_tool_oom")
+        or result.get("has_context_overflow")
+        or result.get("has_infra_error")
+        or result.get("error")
     )
 
 
@@ -398,7 +495,11 @@ def load_saved_results(results_dir: Path, task_order: list[dict]) -> list[dict]:
             continue
         if isinstance(row, dict):
             row.setdefault("task_id", path.stem)
-            rows.append(row)
+            # A results directory can be reused by multiple shards, but rows
+            # from an older/different task manifest must not affect this run's
+            # report or completion state.
+            if str(row.get("task_id")) in order:
+                rows.append(row)
     rows.sort(key=lambda r: (order.get(str(r.get("task_id")), len(order)), str(r.get("task_id"))))
     return rows
 
@@ -445,6 +546,15 @@ def setup_agent(
     else:
         log.info("Agent LLM provider: %s (%s @ %s)", provider.name, provider.model, provider.base_url)
 
+    local_llm_max_model_len = 0
+    if provider.is_local:
+        local_llm_max_model_len = int(
+            os.environ.get(
+                "AGENT_LLM_MAX_MODEL_LEN",
+                os.environ.get("AGENT_LLM_MODEL_LEN", "24576"),
+            )
+        )
+
     config = AgentConfig(
         use_local_llm=provider.is_local,
         use_docker=use_docker,
@@ -455,7 +565,7 @@ def setup_agent(
         remote_llm_model=provider.model,
         # API providers do not use the local vLLM context cap; keep only the
         # existing ReAct turn cap below.
-        local_llm_max_model_len=(24576 if provider.is_local else 0),
+        local_llm_max_model_len=local_llm_max_model_len,
         max_iterations=max_iterations,
         max_retries_on_error=3,
         max_progressive_steps=10,
@@ -578,6 +688,14 @@ def classify_rollout_status(final: str, messages: list) -> dict[str, Any]:
     ]
     has_error = any(any(marker in text for marker in tool_error_markers) for text in message_texts)
     has_tool_oom = any(any(marker in text for marker in oom_markers) for text in message_texts)
+    has_context_overflow = any(
+        any(marker in text.lower() for marker in _CONTEXT_OVERFLOW_MARKERS)
+        for text in message_texts
+    )
+    has_infra_error = any(
+        any(marker in text.lower() for marker in _INFRA_ERROR_MARKERS)
+        for text in message_texts
+    )
     limitation_ack = bool(
         has_tool_oom
         and final_clean
@@ -588,7 +706,11 @@ def classify_rollout_status(final: str, messages: list) -> dict[str, Any]:
         )
     )
 
-    if limitation_ack:
+    if has_context_overflow:
+        status = "context_overflow"
+    elif has_infra_error:
+        status = "infra_error"
+    elif limitation_ack:
         status = "system_limited"
     elif final.startswith("ERROR:"):
         status = "failed"
@@ -605,6 +727,8 @@ def classify_rollout_status(final: str, messages: list) -> dict[str, Any]:
         "status": status,
         "has_tool_error": has_error,
         "has_tool_oom": has_tool_oom,
+        "has_context_overflow": has_context_overflow,
+        "has_infra_error": has_infra_error,
         "system_limitation_acknowledged": limitation_ack,
         "final_clean": final_clean,
     }
@@ -698,20 +822,32 @@ def _serialize_message(msg) -> dict:
 
 @contextmanager
 def task_data_runtime_env(task: dict):
-    """Expose the current task's data files to tool path resolution."""
+    """Expose the current task's input files to tool path resolution.
+
+    Task images count as task input files, so they are merged into the same
+    resolution scope as ``data_files``. Without this, a model that echoes a
+    remembered training-set path (e.g. ``.../train_images/TG_70028.jpg``)
+    never gets rewritten to the current task's real image, because the
+    basename match in ``tool_executor._task_data_candidates`` had nothing to
+    match against.
+    """
     keys = ("TERRABOX_TASK_DATA_DIR", "TERRABOX_TASK_DATA_FILES")
     previous = {key: os.environ.get(key) for key in keys}
 
     data_dir = str(task.get("data_dir") or "").strip()
-    data_files = [str(path) for path in task.get("data_files", []) if path]
+    resolved: list[str] = []
+    for raw in list(task.get("data_files") or []) + list(task.get("images") or []):
+        path = str(raw or "").strip()
+        if path and path not in resolved:
+            resolved.append(path)
 
     try:
         if data_dir:
             os.environ["TERRABOX_TASK_DATA_DIR"] = data_dir
         else:
             os.environ.pop("TERRABOX_TASK_DATA_DIR", None)
-        if data_files:
-            os.environ["TERRABOX_TASK_DATA_FILES"] = json.dumps(data_files, ensure_ascii=False)
+        if resolved:
+            os.environ["TERRABOX_TASK_DATA_FILES"] = json.dumps(resolved, ensure_ascii=False)
         else:
             os.environ.pop("TERRABOX_TASK_DATA_FILES", None)
         yield
@@ -787,6 +923,8 @@ def run_single_task(
     status = status_info["status"]
     has_error = status_info["has_tool_error"]
     has_tool_oom = status_info["has_tool_oom"]
+    has_context_overflow = status_info["has_context_overflow"]
+    has_infra_error = status_info["has_infra_error"]
     system_limitation_acknowledged = status_info["system_limitation_acknowledged"]
 
     # Serialize complete conversation history
@@ -803,16 +941,44 @@ def run_single_task(
         "tool_calls_deduped": list(dict.fromkeys(tool_calls)),
         "metrics": metrics,
         "status": status,
-        "success": status in {"completed", "completed_with_recovery"} and metrics["f1"] > 0 and not has_tool_oom,
-        "real_success": status in {"completed", "completed_with_recovery"} and metrics["f1"] > 0 and not has_tool_oom,
+        "success": (
+            status in {"completed", "completed_with_recovery"}
+            and metrics["f1"] > 0
+            and not has_tool_oom
+            and not has_context_overflow
+            and not has_infra_error
+        ),
+        "real_success": (
+            status in {"completed", "completed_with_recovery"}
+            and metrics["f1"] > 0
+            and not has_tool_oom
+            and not has_context_overflow
+            and not has_infra_error
+        ),
         "system_limitation_acknowledged": system_limitation_acknowledged,
         "llm_calls": tracer.call_count,
         "tokens": tracer.token_totals(),
         "time": result.elapsed,
+        "rollout_contract": {
+            "tool_protocol": (
+                "sft-json"
+                if os.environ.get("TERRABOX_SFT_JSON_ACTIONS", "").strip().lower()
+                in ("1", "true", "yes")
+                else "native"
+            ),
+            "agent_context_length": int(
+                os.environ.get("AGENT_LLM_MAX_MODEL_LEN", "24576") or "24576"
+            ),
+            "max_completion_tokens": int(
+                os.environ.get("TERRABOX_AGENT_LLM_MAX_TOKENS", "0") or "0"
+            ),
+        },
         "final_answer_preview": final_clean[:500] if final_clean else "",
         "final_answer_full": final_clean,
         "has_tool_error": has_error,
         "has_tool_oom": has_tool_oom,
+        "has_context_overflow": has_context_overflow,
+        "has_infra_error": has_infra_error,
         "evolution_trace": result.extra.get("evolution_trace", []),
         # Complete conversation history with parameters
         "conversation_history": conversation_history,
@@ -846,6 +1012,8 @@ def _get_evolution_prompt(task: dict, augmenter, *, allowed_slugs: list[str] | N
         return augmenter.augment(question, **accepted)
     except Exception as e:
         log.warning("Evolution augment failed for %s: %s", task.get("task_id") or task.get("id"), e)
+        if getattr(augmenter, "strict_augmentation", False):
+            raise RuntimeError("Required evolution augmentation failed; refusing plain-base fallback") from e
         return ""
 
 
@@ -888,6 +1056,8 @@ def _run_task_with_retries(
             log.error("Task %s failed with exception: %s", task_id, e)
             traceback.print_exc()
             cleanup_gpu_memory()
+            if _is_fatal_infra_exception(e):
+                raise
             result = {
                 "task_id": task_id,
                 "source": task.get("source", "unknown"),
@@ -900,6 +1070,9 @@ def _run_task_with_retries(
                 "success": False,
                 "error": str(e),
             }
+            if _is_context_overflow_exception(e):
+                result["status"] = "context_overflow"
+                result["has_context_overflow"] = True
 
         retry_elapsed = time.monotonic() - retry_started_at
         retry_seconds = max(0, int(max_transient_retry_seconds or 0))
@@ -947,6 +1120,194 @@ def _write_result_atomic(result_path: Path, result: dict) -> None:
     with open(tmp_path, "w") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
     os.replace(tmp_path, result_path)
+
+
+def _write_run_status(out_dir: Path, *, status: str, **fields: Any) -> None:
+    """Write a small atomic lifecycle/heartbeat file for watchers.
+
+    ``results/*.json`` remains the authoritative task output.  This file is
+    only operational metadata so a watcher can distinguish a slow task from a
+    dead runner without interpreting partial metrics as a completed run.
+    """
+    payload = {
+        "status": status,
+        "pid": os.getpid(),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        **fields,
+    }
+    path = out_dir / "run_status.json"
+    tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}.{time.time_ns()}")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
+def _configure_rollout_contract(args) -> dict[str, Any]:
+    """Configure the explicit Qwen2.5-3B rollout contract.
+
+    Native Base/RL checkpoints and JSON-actions SFT checkpoints speak two
+    different tool protocols.  Keeping the switch in the unified runner makes
+    it hard to accidentally evaluate a text-ReAct SFT model with the Hermes
+    native parser (or to leak the SFT adapter into a native baseline).
+    """
+    protocol = str(getattr(args, "tool_protocol", "native") or "native").strip().lower()
+    if protocol not in {"native", "sft-json"}:
+        raise ValueError(f"Unsupported --tool-protocol: {protocol}")
+
+    if protocol == "sft-json":
+        prompt_file = str(
+            getattr(args, "sft_system_prompt_file", "")
+            or os.environ.get("TERRABOX_SFT_SYSTEM_PROMPT_FILE", "")
+        ).strip()
+        if not prompt_file:
+            raise ValueError(
+                "--tool-protocol sft-json requires --sft-system-prompt-file "
+                "(the system prompt must match the SFT catalog)"
+            )
+        prompt_path = Path(prompt_file).expanduser().resolve()
+        if not prompt_path.is_file():
+            raise FileNotFoundError(f"SFT system prompt file does not exist: {prompt_path}")
+        os.environ["TERRABOX_SFT_JSON_ACTIONS"] = "1"
+        os.environ["TERRABOX_SFT_SYSTEM_PROMPT_FILE"] = str(prompt_path)
+    else:
+        # A native run must never inherit the text-ReAct adapter from a parent
+        # shell or a previous in-process invocation.
+        os.environ.pop("TERRABOX_SFT_JSON_ACTIONS", None)
+        os.environ.pop("TERRABOX_SFT_SYSTEM_PROMPT_FILE", None)
+        prompt_path = None
+
+    context_raw = str(
+        getattr(args, "agent_context_length", "")
+        or os.environ.get("AGENT_LLM_MAX_MODEL_LEN", "")
+        or _QWEN25_ROLLOUT_CONTEXT
+    ).strip()
+    try:
+        context_length = int(context_raw)
+    except ValueError as exc:
+        raise ValueError(f"Invalid AGENT_LLM_MAX_MODEL_LEN={context_raw!r}") from exc
+    if context_length <= 0:
+        raise ValueError("Agent context length must be positive")
+    os.environ["AGENT_LLM_MAX_MODEL_LEN"] = str(context_length)
+
+    requested_completion = getattr(args, "max_completion_tokens", None)
+    if requested_completion is None:
+        requested_completion = os.environ.get(
+            "TERRABOX_AGENT_LLM_MAX_TOKENS", str(_QWEN25_ROLLOUT_COMPLETION)
+        )
+    try:
+        completion_tokens = int(requested_completion)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid TERRABOX_AGENT_LLM_MAX_TOKENS={requested_completion!r}"
+        ) from exc
+    if completion_tokens <= 0:
+        raise ValueError("max completion tokens must be positive")
+    if completion_tokens >= context_length:
+        raise ValueError(
+            "max completion tokens must be smaller than the agent context "
+            f"({completion_tokens} >= {context_length}); otherwise the prompt "
+            "would have no protected history budget"
+        )
+    os.environ["TERRABOX_AGENT_LLM_MAX_TOKENS"] = str(completion_tokens)
+
+    # A single-card perception lane must use the light VLM profile.  The
+    # repository-level agent_config.yaml intentionally keeps a two-card,
+    # 16k-context profile for normal multimodal service use; inheriting that
+    # profile in a Qwen2.5 rollout puts the ~16.6 GiB Qwen3-VL checkpoint on a
+    # 24 GiB card with no KV-cache headroom and makes the container exit before
+    # the first image task.  Apply the safe defaults only when the rollout
+    # explicitly pins VLM to one card; explicit environment overrides remain
+    # available for controlled diagnostics.
+    if getattr(args, "use_docker", False):
+        vlm_devices = [
+            item.strip()
+            for item in str(os.environ.get("VLM_GPU_DEVICES", "")).split(",")
+            if item.strip()
+        ]
+        if len(vlm_devices) == 1:
+            os.environ.setdefault("VLM_MAX_MODEL_LEN", "8192")
+            os.environ.setdefault("VLM_MIN_IMAGE_MODEL_LEN", "8192")
+            os.environ.setdefault("VLM_GPU_MEMORY_UTILIZATION", "0.95")
+            os.environ.setdefault("VLM_MAX_NUM_SEQS", "1")
+            os.environ.setdefault("TERRABOX_VLM_ANALYZE_DEFAULT_MAX_TOKENS", "4096")
+
+    return {
+        "contract_version": "qwen25_3b_rollout_v1",
+        "tool_protocol": protocol,
+        "sft_system_prompt_file": str(prompt_path) if prompt_path else "",
+        "tool_catalog_source": "sft_system_prompt" if prompt_path else "runtime_task_union",
+        "agent_context_length": context_length,
+        "max_completion_tokens": completion_tokens,
+    }
+
+
+def _write_rollout_manifest(
+    out_dir: Path,
+    *,
+    args,
+    config,
+    contract: dict[str, Any],
+    allowed_slugs: list[str] | None,
+    workers: int,
+) -> Path:
+    """Persist the model/protocol/context contract beside task results."""
+    prompt_path = contract.get("sft_system_prompt_file") or ""
+    prompt_sha256 = ""
+    if prompt_path:
+        digest = hashlib.sha256()
+        with open(prompt_path, "rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        prompt_sha256 = digest.hexdigest()
+
+    provider = "local" if getattr(config, "use_local_llm", False) else str(
+        getattr(args, "llm_provider", "") or os.environ.get("TERRABOX_LLM_PROVIDER", "remote")
+    )
+    payload = {
+        **contract,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "task_file": str(Path(args.task_file).resolve()),
+        "experiment": args.experiment,
+        "mode": args.mode,
+        "provider": provider,
+        "model_path": str(getattr(config, "local_llm_model_path", ""))
+        if getattr(config, "use_local_llm", False)
+        else str(getattr(config, "remote_llm_model", "")),
+        "agent_port": int(args.port),
+        "agent_gpu_devices": str(getattr(config, "local_llm_gpu_devices", "")),
+        "agent_tensor_parallel": int(getattr(config, "local_llm_tensor_parallel", 1)),
+        "max_iterations": int(args.max_iterations),
+        "workers": int(workers),
+        "gpu_class": args.gpu_class,
+        "use_docker": bool(args.use_docker),
+        "tool_service_scope": os.environ.get("TERRABOX_TOOL_SERVICE_SCOPE", ""),
+        "allowed_tools": sorted(allowed_slugs) if allowed_slugs is not None else "all_registered",
+        "sft_system_prompt_sha256": prompt_sha256,
+        "relevant_environment": {
+            key: os.environ.get(key, "")
+            for key in (
+                "AGENT_LLM_MAX_MODEL_LEN",
+                "TERRABOX_AGENT_LLM_MAX_TOKENS",
+                "TERRABOX_SFT_JSON_ACTIONS",
+                "TERRABOX_SFT_SYSTEM_PROMPT_FILE",
+                "AGENT_LLM_GPU_DEVICES",
+                "VLM_GPU_DEVICES",
+                "VLM_TENSOR_PARALLEL_SIZE",
+                "VLM_MAX_MODEL_LEN",
+                "VLM_MIN_IMAGE_MODEL_LEN",
+                "VLM_GPU_MEMORY_UTILIZATION",
+                "VLM_MAX_NUM_SEQS",
+                "TERRABOX_VLM_ANALYZE_DEFAULT_MAX_TOKENS",
+                "INSTRUCTSAM_GPU_DEVICES",
+                "INSTRUCTSAM_PORT",
+                "TERRABOX_TOOL_SERVICE_SCOPE",
+            )
+        },
+    }
+    path = out_dir / "rollout_manifest.json"
+    tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}.{time.time_ns()}")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp_path, path)
+    return path
 
 
 def _init_rollout_worker(ctx: dict[str, Any]) -> None:
@@ -997,6 +1358,13 @@ def _rollout_worker_run(item: tuple[int, int, dict, int]) -> tuple[int, str, dic
         previous_transient_attempts=previous_transient_attempts,
         progress_label=progress_label,
     )
+    # Persist from the worker before returning to the parent.  The parent still
+    # records the result for aggregation, but a late worker/service failure must
+    # not discard tasks that already completed successfully.
+    results_dir = _ROLLOUT_WORKER_CTX.get("results_dir")
+    if results_dir:
+        result_path = Path(results_dir) / f"{task_id}.json"
+        _write_result_atomic(result_path, result)
     return i, task_id, result
 
 
@@ -1004,8 +1372,24 @@ def _rollout_worker_run(item: tuple[int, int, dict, int]) -> tuple[int, str, dic
 # Rollout subcommand
 # ──────────────────────────────────────────────────────────────────────────────
 
-def cmd_rollout(args):
+def _cmd_rollout_impl(args):
     """Run batch rollout over a task file."""
+    workers_requested = int(getattr(args, "workers", 1) or 1)
+    if workers_requested < 1:
+        raise ValueError("--workers must be >= 1")
+    if workers_requested > 1:
+        from terrabox.agent.llm_provider import resolve_provider
+
+        provider = resolve_provider(getattr(args, "llm_provider", "") or None)
+        if provider.is_local:
+            raise ValueError(
+                "Local agent LLM rollouts require --workers 1 because all workers would "
+                "share one vLLM endpoint and race service initialization. Use workers > 1 "
+                "only with an external provider and a lane-safe tool configuration."
+            )
+
+    contract = _configure_rollout_contract(args)
+
     # Load tasks
     all_tasks = load_tasks_from_file(args.task_file)
     log.info(f"Loaded {len(all_tasks)} tasks from {args.task_file}")
@@ -1046,6 +1430,34 @@ def cmd_rollout(args):
         out_dir = REPO_ROOT / out_dir
     results_dir = out_dir / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
+    selected_task_ids = [
+        str(task.get("task_id") or task.get("id") or f"task_{i}")
+        for i, task in enumerate(tasks)
+    ]
+    manifest_task_ids = {
+        str(task.get("task_id") or task.get("id") or f"task_{i}")
+        for i, task in enumerate(all_tasks)
+    }
+
+    _write_run_status(
+        out_dir,
+        status="running",
+        experiment=args.experiment,
+        task_file=str(Path(args.task_file).resolve()),
+        manifest_total=len(all_tasks),
+        eligible_total=len(all_tasks) - sum(skip_stats.values()),
+        selected_total=len(tasks),
+        selected_task_ids=selected_task_ids,
+        completed_selected=0,
+        completed_manifest=0,
+        manifest_complete=False,
+        gpu_class=args.gpu_class,
+        workers_requested=workers_requested,
+        contract_version=contract["contract_version"],
+        tool_protocol=contract["tool_protocol"],
+        agent_context_length=contract["agent_context_length"],
+        max_completion_tokens=contract["max_completion_tokens"],
+    )
 
     # Setup agent
     # Determine agent GPU explicitly. CUDA_VISIBLE_DEVICES may contain the
@@ -1066,20 +1478,43 @@ def cmd_rollout(args):
         llm_provider=args.llm_provider,
     )
 
-    # Determine allowed tools
-    # Collect all tools from the task file's expected_tools, then exclude mock/bing/osm.
-    # This gives agent access to ~40+ tools (full dataset diversity) minus unavailable ones.
+    # Determine allowed tools.  Native rollouts use the task-file union because
+    # their system prompt is built from the live runtime catalog.  SFT
+    # text-action rollouts must instead use the exact catalog serialized in the
+    # training prompt; a small eval shard often contains only OSM gold calls,
+    # which is not a valid runtime allow-list for a prompt that also exposes
+    # perception and compute tools.
     all_expected = set()
     for task in all_tasks:  # Use all_tasks (before filtering) to get full tool set
         all_expected.update(canonical_slug(t) for t in task.get("expected_tools", []))
     registered = {spec.slug for spec in registry.list_tools()}
+    sft_catalog = None
+    if contract["tool_protocol"] == "sft-json":
+        sft_catalog = set(
+            _load_sft_prompt_tool_catalog(contract["sft_system_prompt_file"])
+        )
+        missing = sorted(sft_catalog - registered)
+        if missing:
+            raise ValueError(
+                "SFT prompt/runtime tool catalog mismatch: the prompt exposes "
+                f"unregistered tools {missing}. Check the checkpoint's system "
+                "prompt and the active Terrabox registry."
+            )
 
     if args.no_restrict_tools:
         allowed_slugs = None
         log.info("Tool restriction disabled: agent sees all %d registered tools", len(registered))
     else:
-        # Start with all tools that appear in the dataset
-        allowed_slugs_set = all_expected & registered
+        if sft_catalog is not None:
+            allowed_slugs_set = sft_catalog & registered
+            log.info(
+                "SFT tool catalog: %d tools loaded from %s",
+                len(allowed_slugs_set),
+                contract["sft_system_prompt_file"],
+            )
+        else:
+            # Start with all tools that appear in the dataset.
+            allowed_slugs_set = all_expected & registered
 
         # Remove blocked tool slugs based on skip flags
         excluded = set()
@@ -1104,10 +1539,23 @@ def cmd_rollout(args):
 
         allowed_slugs_set -= excluded
         allowed_slugs = sorted(allowed_slugs_set)
-        log.info(f"Dataset tools: {len(all_expected)} total, {len(excluded)} excluded, "
-                 f"{len(allowed_slugs)} allowed: {allowed_slugs}")
+        log.info(
+            "Task-gold tools: %d total; runtime exclusions: %d; runtime allowed: %d: %s",
+            len(all_expected),
+            len(excluded),
+            len(allowed_slugs),
+            allowed_slugs,
+        )
 
-    workers_requested = max(1, int(getattr(args, "workers", 1) or 1))
+    manifest_path = _write_rollout_manifest(
+        out_dir,
+        args=args,
+        config=config,
+        contract=contract,
+        allowed_slugs=allowed_slugs,
+        workers=workers_requested,
+    )
+    log.info("Rollout contract manifest: %s", manifest_path)
 
     # Load evolution augmenter if specified. In multi-worker mode each child
     # process loads its own augmenter to avoid shared DB/client state.
@@ -1128,6 +1576,7 @@ def cmd_rollout(args):
     # Run rollouts. `pending_tasks` contains only tasks that really need this
     # invocation; existing clean results are loaded into `results` immediately.
     results = []
+    completed_selected_ids: set[str] = set()
     success_count = 0
     total_tokens = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     pending_tasks: list[tuple[int, dict, int]] = []
@@ -1148,7 +1597,9 @@ def cmd_rollout(args):
                     existing = json.load(f)
             except Exception:
                 existing = None
-            if (
+            if existing is None:
+                log.warning("Re-running unreadable result for %s", task_id)
+            elif (
                 existing is not None
                 and getattr(args, "retry_existing_transient", True)
                 and should_retry_saved_transient(existing, max_transient)
@@ -1163,6 +1614,7 @@ def cmd_rollout(args):
                 log.info(f"[{i+1}/{len(tasks)}] Skipping {task_id} (result exists)")
                 if existing is not None:
                     results.append(existing)
+                    completed_selected_ids.add(str(task_id))
                     if existing.get("success"):
                         success_count += 1
                 continue
@@ -1172,11 +1624,6 @@ def cmd_rollout(args):
     workers = workers_requested
     if workers > 1 and len(pending_tasks) > 1:
         log.info("Running %d pending tasks with %d process workers", len(pending_tasks), workers)
-        if getattr(config, "use_local_llm", False):
-            log.warning(
-                "--workers > 1 with local LLM shares the same local vLLM endpoint; "
-                "prefer external providers or manually separated ports for heavy runs."
-            )
     else:
         workers = 1
         log.info("Running %d pending tasks sequentially", len(pending_tasks))
@@ -1189,6 +1636,7 @@ def cmd_rollout(args):
         results.append(result)
         if result.get("success"):
             success_count += 1
+        completed_selected_ids.add(str(task_id))
         for k in total_tokens:
             total_tokens[k] += result.get("tokens", {}).get(k, 0)
 
@@ -1202,6 +1650,22 @@ def cmd_rollout(args):
             f1,
             result.get("tool_calls_deduped", []),
             result.get("time", 0),
+        )
+        _write_run_status(
+            out_dir,
+            status="running",
+            experiment=args.experiment,
+            task_file=str(Path(args.task_file).resolve()),
+            manifest_total=len(all_tasks),
+            eligible_total=len(all_tasks) - sum(skip_stats.values()),
+            selected_total=len(tasks),
+            selected_task_ids=selected_task_ids,
+            completed=len(completed_selected_ids),
+            completed_selected=len(completed_selected_ids),
+            completed_manifest=len(completed_selected_ids & manifest_task_ids),
+            manifest_complete=manifest_task_ids.issubset(completed_selected_ids),
+            gpu_class=args.gpu_class,
+            workers=workers,
         )
 
     if workers == 1:
@@ -1234,6 +1698,7 @@ def cmd_rollout(args):
             "evolution_store": args.evolution_store,
             "max_transient_retries": getattr(args, "max_transient_retries", 5),
             "max_transient_retry_seconds": getattr(args, "max_transient_retry_seconds", 1200),
+            "results_dir": str(results_dir),
         }
         future_to_task: dict[Any, tuple[int, dict]] = {}
         with ProcessPoolExecutor(
@@ -1255,6 +1720,12 @@ def cmd_rollout(args):
                 except Exception as e:
                     log.error("Worker task %s failed with exception: %s", task_id, e)
                     traceback.print_exc()
+                    if _is_fatal_infra_exception(e):
+                        # A local model/container failure is a run-wide infra
+                        # problem. Do not serialize it as a task result: doing
+                        # so makes --resume skip the task and pollutes hundreds
+                        # of eval metrics after one shared service failure.
+                        raise
                     result = {
                         "task_id": task_id,
                         "source": task.get("source", "unknown"),
@@ -1267,12 +1738,22 @@ def cmd_rollout(args):
                         "success": False,
                         "error": str(e),
                     }
+                    if _is_context_overflow_exception(e):
+                        result["status"] = "context_overflow"
+                        result["has_context_overflow"] = True
                 record_result(i, task, result)
 
     # Rebuild derived outputs from the complete results/ directory. This keeps
     # report.json and trajectories*.jsonl correct after --resume, sharded runs,
     # or partial backfills.
     derived_results = load_saved_results(results_dir, all_tasks)
+    manifest_ids = manifest_task_ids
+    selected_ids = set(selected_task_ids)
+    derived_ids = {str(result.get("task_id")) for result in derived_results}
+    completed_selected = len(derived_ids & selected_ids)
+    completed_manifest = len(derived_ids & manifest_ids)
+    invocation_complete = completed_selected >= len(selected_ids)
+    manifest_complete = completed_manifest >= len(manifest_ids)
     derived_success_count = sum(1 for r in derived_results if r.get("success"))
     derived_total_tokens = {
         k: sum((r.get("tokens") or {}).get(k, 0) for r in derived_results)
@@ -1298,6 +1779,8 @@ def cmd_rollout(args):
                 "system_limitation_acknowledged": r.get("system_limitation_acknowledged", False),
                 "has_tool_error": r.get("has_tool_error", False),
                 "has_tool_oom": r.get("has_tool_oom", False),
+                "has_context_overflow": r.get("has_context_overflow", False),
+                "has_infra_error": r.get("has_infra_error", False),
             }
             f.write(json.dumps(traj, ensure_ascii=False) + "\n")
 
@@ -1319,6 +1802,8 @@ def cmd_rollout(args):
                 "system_limitation_acknowledged": r.get("system_limitation_acknowledged", False),
                 "has_tool_error": r.get("has_tool_error", False),
                 "has_tool_oom": r.get("has_tool_oom", False),
+                "has_context_overflow": r.get("has_context_overflow", False),
+                "has_infra_error": r.get("has_infra_error", False),
                 "tokens": r.get("tokens", {}),
                 "llm_calls": r.get("llm_calls", 0),
                 "time": r.get("time", 0),
@@ -1335,6 +1820,15 @@ def cmd_rollout(args):
         "task_file": args.task_file,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "total_tasks": len(derived_results),
+        "manifest_total": len(all_tasks),
+        "eligible_total": len(all_tasks) - sum(skip_stats.values()),
+        "selected_total": len(tasks),
+        "completed_selected": completed_selected,
+        "completed_manifest": completed_manifest,
+        "invocation_complete": invocation_complete,
+        "manifest_complete": manifest_complete,
+        "partial": not manifest_complete,
+        "scope": args.gpu_class,
         "success_count": derived_success_count,
         "success_rate": derived_success_count / len(derived_results) if derived_results else 0,
         "total_tokens": derived_total_tokens,
@@ -1353,11 +1847,47 @@ def cmd_rollout(args):
     with open(report_path, "w") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
 
+    metrics_doc_paths = None
+    try:
+        from terrabox.evolution.shared.rollout_report import write_metrics_artifacts
+
+        metrics_doc_paths = write_metrics_artifacts(
+            results_dir,
+            scope="all",
+            total=len(all_tasks),
+            output_dir=out_dir,
+            title=args.experiment,
+        )
+    except Exception as e:
+        log.warning("Failed to write rollout metrics summary document: %s", e)
+
+    _write_run_status(
+        out_dir,
+        status="complete" if invocation_complete else "partial",
+        experiment=args.experiment,
+        task_file=str(Path(args.task_file).resolve()),
+        manifest_total=len(all_tasks),
+        eligible_total=len(all_tasks) - sum(skip_stats.values()),
+        selected_total=len(tasks),
+        completed=completed_selected,
+        completed_selected=completed_selected,
+        completed_manifest=completed_manifest,
+        invocation_complete=invocation_complete,
+        manifest_complete=manifest_complete,
+        selected_task_ids=selected_task_ids,
+        gpu_class=args.gpu_class,
+        workers=workers,
+        report_path=str(report_path),
+        metrics_summary=str((out_dir / "metrics_summary.json")),
+    )
+
     # Print summary
     print(f"\n{'='*70}")
     print(f"  ROLLOUT COMPLETE: {args.experiment}")
     print(f"{'='*70}")
     print(f"  Tasks:       {len(derived_results)}")
+    print(f"  Selected:    {completed_selected}/{len(selected_ids)}")
+    print(f"  Manifest:    {completed_manifest}/{len(manifest_ids)}")
     print(f"  Success:     {derived_success_count} ({report['success_rate']:.1%})")
     print(f"  Avg F1:      {report['avg_f1']:.3f}")
     print(f"  Total tokens: {derived_total_tokens}")
@@ -1368,6 +1898,74 @@ def cmd_rollout(args):
     print(f"    Trajectories:      {traj_path} (compact, for evolution)")
     print(f"    Trajectories Full: {full_traj_path} (complete with conversation history)")
     print(f"    Report:            {report_path}")
+
+
+def cmd_rollout(args):
+    """Run rollout and persist an explicit failed lifecycle state on exceptions."""
+    try:
+        return _cmd_rollout_impl(args)
+    except BaseException as exc:
+        out_dir = Path(getattr(args, "output_dir", "") or "")
+        if not str(out_dir):
+            out_dir = REPO_ROOT / "tmp" / "trajectories" / str(args.experiment) / str(args.mode)
+        elif not out_dir.is_absolute():
+            out_dir = REPO_ROOT / out_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        previous: dict[str, Any] = {}
+        status_path = out_dir / "run_status.json"
+        if status_path.exists():
+            try:
+                previous = json.loads(status_path.read_text(encoding="utf-8"))
+            except Exception:
+                previous = {}
+        selected_ids = set(str(value) for value in previous.get("selected_task_ids", []))
+        completed_ids: set[str] = set()
+        manifest_ids: set[str] = set()
+        try:
+            manifest_tasks = load_tasks_from_file(args.task_file)
+            manifest_ids = {
+                str(task.get("task_id") or task.get("id") or f"task_{i}")
+                for i, task in enumerate(manifest_tasks)
+            }
+            if not selected_ids:
+                selected_ids = manifest_ids
+            results_dir = out_dir / "results"
+            for result_path in results_dir.glob("*.json"):
+                try:
+                    row = json.loads(result_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if isinstance(row, dict):
+                    task_id = str(row.get("task_id") or result_path.stem)
+                    if task_id in selected_ids:
+                        completed_ids.add(task_id)
+        except Exception:
+            pass
+        fields = {
+            key: value
+            for key, value in previous.items()
+            if key not in {"status", "pid", "updated_at", "error", "traceback", "failed_at"}
+        }
+        fields.update(
+            {
+                "experiment": str(getattr(args, "experiment", "")),
+                "selected_total": int(previous.get("selected_total", len(selected_ids))),
+                "completed": len(completed_ids),
+                "completed_selected": len(completed_ids),
+                "completed_manifest": len(completed_ids & manifest_ids),
+                "manifest_complete": bool(manifest_ids) and manifest_ids.issubset(completed_ids),
+                "error": f"{type(exc).__name__}: {exc}",
+                "traceback": traceback.format_exc(),
+                "failed_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
+        try:
+            _write_run_status(out_dir, status="failed", **fields)
+        except Exception:
+            log.exception("Could not persist failed rollout status in %s", out_dir)
+        raise
+    if metrics_doc_paths:
+        print(f"    Metrics summary:   {metrics_doc_paths['markdown']}")
     print()
 
 
@@ -1656,6 +2254,35 @@ def main():
     )
     p_rollout.add_argument("--port", type=int, default=9100, help="LLM 端口")
     p_rollout.add_argument("--max-iterations", type=int, default=15, help="Agent 最大迭代次数")
+    p_rollout.add_argument(
+        "--tool-protocol",
+        choices=["native", "sft-json"],
+        default="native",
+        help=(
+            "模型工具协议：native 适用于 Base/RL 的原生 tool_calls；"
+            "sft-json 适用于 Swift 文本 ReAct SFT（必须同时提供训练时 system prompt）"
+        ),
+    )
+    p_rollout.add_argument(
+        "--sft-system-prompt-file",
+        default="",
+        help="--tool-protocol sft-json 使用的训练 system prompt 文件",
+    )
+    p_rollout.add_argument(
+        "--agent-context-length",
+        type=int,
+        default=None,
+        help=f"本地 agent vLLM context；Qwen2.5-3B 默认 {_QWEN25_ROLLOUT_CONTEXT}",
+    )
+    p_rollout.add_argument(
+        "--max-completion-tokens",
+        type=int,
+        default=None,
+        help=(
+            f"每次 agent 请求的最大输出 token；默认 {_QWEN25_ROLLOUT_COMPLETION}，"
+            "为 prompt/history 保留 context 空间"
+        ),
+    )
     p_rollout.add_argument("--max-transient-retries", type=int, default=5,
                            help="网络/服务抖动导致整条任务失败时,丢弃该次并重跑的最大次数"
                                 "(只针对连接类瞬时错误;上下文超限/选错工具等确定性错误不重试)")
@@ -1708,7 +2335,7 @@ def main():
     )
 
     # Evolution
-    p_rollout.add_argument("--evolution-method", default="", help="进化方法名（如 seqgraphevo）")
+    p_rollout.add_argument("--evolution-method", default="", help="进化方法名（如 reflection / experience_evo）")
     p_rollout.add_argument("--evolution-store", default="", help="进化知识库目录")
 
     # ── stats ──

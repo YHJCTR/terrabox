@@ -61,3 +61,27 @@ def test_compare_experiments_uses_only_common_task_ids(tmp_path):
     assert report["base_done"] == 2
     assert report["cur"]["success_rate"] == 100.0
     assert report["delta"]["success_rate"] == 0.0
+
+
+def test_sft_json_top_level_tool_calls_are_reported_without_native_history(tmp_path):
+    from terrabox.evolution.shared.rollout_report import status_report
+
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "sft.json").write_text(
+        json.dumps(
+            {
+                "task_id": "sft",
+                "expected_tools": ["geo_perception.instructsam", "compute.calculator"],
+                "tool_calls": ["geo_perception.instructsam", "compute.calculator"],
+                "conversation_history": [],
+                "status": "completed",
+                "success": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = status_report(results, total=1)["summary"]
+    assert summary["tools_per_task"] == 2
+    assert summary["set_f1"] == 1.0

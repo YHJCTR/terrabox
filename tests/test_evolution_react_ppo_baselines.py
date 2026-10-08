@@ -1,5 +1,8 @@
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -115,7 +118,9 @@ def test_react_rollout_command_uses_existing_trajectory_script_and_gpu_split(tmp
 
     env = build_rollout_env(agent_gpu=0, tool_gpu=1)
     assert env["AGENT_LLM_GPU_DEVICES"] == "0"
-    assert env["TERRABOX_TOOL_GPU_DEVICES"] == "1"
+    assert env["INSTRUCTSAM_GPU_DEVICES"] == "1"
+    assert env["SAM2_GPU_DEVICES"] == "1"
+    assert "TERRABOX_TOOL_GPU_DEVICES" not in env
     assert env["CUDA_VISIBLE_DEVICES"] == "0,1"
     assert env["TERRABOX_TOOL_SERVICE_SCOPE"] == "call"
 
@@ -474,8 +479,9 @@ def test_sft_compaction_keeps_all_tool_slugs_and_compacts_long_context():
     assert "tool.beta" in system_content
     assert stats["system_catalog_compacted"] is True
     assert stats["observation_messages_compacted"] == 1
-    assert stats["assistant_messages_compacted"] == 1
-    assert assistant_payload["actions"][0]["arguments"]["items"]["__sft_compacted_list__"] is True
+    # Action arguments are the learning target and remain executable verbatim.
+    assert stats["assistant_messages_compacted"] == 0
+    assert len(assistant_payload["actions"][0]["arguments"]["items"]) == 20
     assert "SFT_COMPACTED" in compacted[3]["content"]
 
 
@@ -531,6 +537,7 @@ def test_sft_train_command_and_rollout_command_use_model_dir_and_gpu_split(tmp_p
         experiment="sft_eval",
         output_dir=tmp_path / "eval",
         model_path=tmp_path / "model",
+        sft_system_prompt_file=tmp_path / "system_prompt.txt",
         port=9100,
         start_index=0,
         limit=200,
@@ -541,7 +548,98 @@ def test_sft_train_command_and_rollout_command_use_model_dir_and_gpu_split(tmp_p
     assert "--start-index" in rollout_cmd
     assert "--limit" in rollout_cmd
     assert "200" in rollout_cmd
+    assert "--tool-protocol" in rollout_cmd
+    assert rollout_cmd[rollout_cmd.index("--tool-protocol") + 1] == "sft-json"
+    assert "--sft-system-prompt-file" in rollout_cmd
+    assert str(tmp_path / "system_prompt.txt") in rollout_cmd
+    assert "--agent-context-length" in rollout_cmd
+    assert "24576" in rollout_cmd
+    assert "--max-completion-tokens" in rollout_cmd
+    assert "4096" in rollout_cmd
+    assert "--workers" in rollout_cmd
+    assert "1" in rollout_cmd
     assert "AGENT_LLM_MODEL_PATH" not in " ".join(rollout_cmd)
+
+
+def test_oea_watcher_records_sft_protocol_and_prompt_contract(tmp_path):
+    """The generated watcher must keep an SFT checkpoint on the text protocol."""
+    model_dir = tmp_path / "merged_hf"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+    prompt_file = tmp_path / "system_prompt.txt"
+    prompt_file.write_text("catalog-v1\n", encoding="utf-8")
+    output_dir = tmp_path / "oea_eval"
+    repo_root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{repo_root / 'src'}:{env.get('PYTHONPATH', '')}"
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "terrabox.evolution.agent_rl.runner",
+            "write-oea-eval-command",
+            "--eval-experiment",
+            "sft_watcher_smoke",
+            "--model-path",
+            str(model_dir),
+            "--output-dir",
+            str(output_dir),
+            "--task-file",
+            str(tmp_path / "tasks.json"),
+            "--tool-protocol",
+            "sft-json",
+            "--sft-system-prompt-file",
+            str(prompt_file),
+            "--agent-model-len",
+            "24576",
+            "--agent-context-length",
+            "24576",
+            "--max-completion-tokens",
+            "4096",
+        ],
+        cwd=repo_root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    manifest = json.loads(
+        (output_dir / "configs" / "oea_eval_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["tool_protocol"] == "sft-json"
+    assert manifest["sft_system_prompt_file"] == str(prompt_file.resolve())
+    assert manifest["sft_system_prompt_sha256"]
+    assert manifest["agent_context_length"] == 24576
+    assert manifest["max_completion_tokens"] == 4096
+    for lane in ("gpu", "nogpu"):
+        command = manifest["lanes"][lane]["command"]
+        assert command[command.index("--tool-protocol") + 1] == "sft-json"
+        assert str(prompt_file.resolve()) in command
+        assert command[command.index("--agent-context-length") + 1] == "24576"
+        assert command[command.index("--max-completion-tokens") + 1] == "4096"
+
+    script = (output_dir / "configs" / "run_oea_eval.sh").read_text(encoding="utf-8")
+    assert "--tool-protocol sft-json" in script
+    assert "--sft-system-prompt-file" in script
+
+
+def test_sft_rollout_catalog_is_read_from_training_prompt(tmp_path):
+    from scripts.run_trajectory_experiment import _load_sft_prompt_tool_catalog
+
+    prompt = tmp_path / "system_prompt.txt"
+    prompt.write_text(
+        "prefix\nTool catalog: "
+        '[{"slug":"compute.calculator"},{"slug":"TextToBbox"}]\n'
+        "suffix\n",
+        encoding="utf-8",
+    )
+
+    assert _load_sft_prompt_tool_catalog(prompt) == [
+        "compute.calculator",
+        "geo_perception.instructsam",
+    ]
 
 
 def test_sft_verl_rows_keep_messages_and_trace_metadata():

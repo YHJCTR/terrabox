@@ -64,9 +64,7 @@ logger = logging.getLogger(__name__)
 
 # Methods checked in order — first found wins for primary_method selection
 _ALL_METHODS = [
-    "skillrl", "memrl", "causalevo", "seqgraphevo",
-    "causaltextevo", "agentevolver", "rewardevo",
-    "graphskillevo", "causalpolicyevo", "baseline",
+    "skillrl", "memrl", "agentevolver", "evoskill", "baseline",
 ]
 
 

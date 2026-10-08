@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import time
 
@@ -79,12 +80,118 @@ class AgentLLMDockerManager(BaseServiceManager):
         return result.returncode == 0 and result.stdout.strip() == "true"
 
     @classmethod
+    def _container_cmd_arg(cls, key: str) -> str | None:
+        """Return a docker command argument value from the managed container.
+
+        This is deliberately narrow: it prevents reusing a healthy old vLLM
+        container whose port matches but whose model/context settings do not.
+        """
+        result = subprocess.run(
+            ["docker", "inspect", "--format", "{{json .Config.Cmd}}", cls.CONTAINER_NAME],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return None
+        try:
+            import json
+
+            cmd = json.loads(result.stdout.strip() or "[]")
+            idx = cmd.index(key)
+            return str(cmd[idx + 1])
+        except Exception:
+            return None
+
+    @classmethod
+    def _running_container_matches_config(cls) -> bool:
+        if not cls._container_is_running():
+            return False
+        checks = {
+            "--tensor-parallel-size": cls.TENSOR_PARALLEL_SIZE,
+            "--max-model-len": cls.MAX_MODEL_LEN,
+            "--gpu-memory-utilization": cls.GPU_MEMORY_UTILIZATION,
+        }
+        for key, expected in checks.items():
+            actual = cls._container_cmd_arg(key)
+            if actual != str(expected):
+                logger.info(
+                    "Existing %s has %s=%s, expected %s; rebuilding.",
+                    cls.CONTAINER_NAME,
+                    key,
+                    actual,
+                    expected,
+                )
+                return False
+        return True
+
+    @classmethod
     def _get_container_logs(cls, tail: int = 50) -> str:
         result = subprocess.run(
             ["docker", "logs", "--tail", str(tail), cls.CONTAINER_NAME],
             capture_output=True, text=True,
         )
         return (result.stdout + result.stderr).strip()
+
+    @classmethod
+    def _wait_container_absent(cls, container_name: str, *, timeout_s: float = 20.0) -> bool:
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            result = subprocess.run(
+                ["docker", "inspect", container_name],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                return True
+            time.sleep(0.5)
+        return False
+
+    @classmethod
+    def _wait_existing_container_ready(cls, *, timeout_s: float = 900.0) -> bool:
+        """Wait for an already-created compatible container to become healthy.
+
+        Multiple rollout workers can call ``start_service`` at the same time.
+        The first worker may have created the container while vLLM is still
+        loading weights, so a second worker must wait rather than attempting a
+        second ``docker run`` with the same name.
+        """
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if cls.is_running():
+                logger.info(
+                    "Reusing existing agent LLM container %s on port %s after startup wait.",
+                    cls.CONTAINER_NAME,
+                    cls.PORT,
+                )
+                return True
+            if not cls._container_is_running():
+                return False
+            time.sleep(2)
+        return False
+
+    @classmethod
+    def _force_remove_container(cls, container_name: str, *, reason: str) -> None:
+        if not container_name:
+            return
+        result = subprocess.run(
+            ["docker", "rm", "-f", container_name],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "Failed to force-remove %s during %s: %s",
+                container_name,
+                reason,
+                (result.stderr or result.stdout).strip(),
+            )
+        cls._wait_container_absent(container_name)
+
+    @staticmethod
+    def _conflict_container_id(stderr: str) -> str | None:
+        match = re.search(r'container "([0-9a-f]{12,64})"', stderr or "")
+        return match.group(1) if match else None
 
     @classmethod
     def start_service(cls, config=None) -> None:
@@ -96,33 +203,48 @@ class AgentLLMDockerManager(BaseServiceManager):
             cls.PORT = config.local_llm_port
             cls.DOCKER_IMAGE = config.local_llm_docker_image
             cls.MAX_MODEL_LEN = str(config.local_llm_max_model_len)
+            cls.CONTAINER_NAME = f"{cls.CONTAINER_BASE}-{cls.PORT}"
 
         if cls.is_running():
-            return
-
-        if cls._container_is_running():
-            logger.info(f"Container {cls.CONTAINER_NAME} is running but service is not healthy; rebuilding it.")
+            if cls._running_container_matches_config():
+                return
             cls.stop_service()
 
-        adopted = find_reusable_managed_lease(
-            service="agent-llm",
-            image=cls.DOCKER_IMAGE,
-            container_base=cls.CONTAINER_BASE,
-            host=cls.HOST,
-            internal_port=8000,
-            required_model_path=cls.MODEL_PATH,
-            required_cmd_args={
-                "--tensor-parallel-size": cls.TENSOR_PARALLEL_SIZE,
-                "--max-model-len": cls.MAX_MODEL_LEN,
-            },
-            health_check=cls._is_healthy_on_port,
-        )
-        if adopted is not None:
-            cls._lease = adopted
-            cls.CONTAINER_NAME = adopted.container_name
-            cls.PORT = adopted.port
-            logger.info("Adopted existing agent LLM container %s on port %s", adopted.container_name, adopted.port)
-            return
+        if cls._container_is_running():
+            # A concurrent worker may have created the same compatible
+            # container and still be waiting for vLLM readiness. Never stop it
+            # just because /health is not ready yet.
+            if cls._running_container_matches_config() and cls._wait_existing_container_ready():
+                return
+            logger.info(
+                "Container %s is running but incompatible or failed health wait; rebuilding it.",
+                cls.CONTAINER_NAME,
+            )
+            cls.stop_service()
+
+        adopted = None
+        if os.environ.get("AGENT_LLM_DISABLE_REUSE", "0") != "1":
+            adopted = find_reusable_managed_lease(
+                service="agent-llm",
+                image=cls.DOCKER_IMAGE,
+                container_base=cls.CONTAINER_BASE,
+                host=cls.HOST,
+                internal_port=8000,
+                required_model_path=cls.MODEL_PATH,
+                required_cmd_args={
+                    "--tensor-parallel-size": cls.TENSOR_PARALLEL_SIZE,
+                    "--max-model-len": cls.MAX_MODEL_LEN,
+                },
+                health_check=cls._is_healthy_on_port,
+            )
+            if adopted is not None:
+                cls._lease = adopted
+                cls.CONTAINER_NAME = adopted.container_name
+                cls.PORT = adopted.port
+                logger.info("Adopted existing agent LLM container %s on port %s", adopted.container_name, adopted.port)
+                return
+        else:
+            logger.info("Agent LLM container reuse disabled by AGENT_LLM_DISABLE_REUSE=1")
 
         lease = acquire_docker_lease(
             service="agent-llm",
@@ -141,6 +263,7 @@ class AgentLLMDockerManager(BaseServiceManager):
         cls.CONTAINER_NAME = lease.container_name
         cls.PORT = lease.port
         remove_container_if_exists(cls.CONTAINER_NAME, service="agent-llm", reason="before_docker_run")
+        cls._wait_container_absent(cls.CONTAINER_NAME)
 
         cmd = [
             "docker", "run", "-d",
@@ -168,7 +291,49 @@ class AgentLLMDockerManager(BaseServiceManager):
         logger.info(f"Starting agent LLM container (GPU: {lease.gpu_devices}, port: {lease.port}, model: {cls.MODEL_PATH})...")
         record_service_event({"event": "start_requested", "service": "agent-llm", "lease": lease.__dict__})
         result = subprocess.run(cmd, capture_output=True, text=True)
+        for retry_idx in range(2):
+            if result.returncode == 0 or "Conflict" not in result.stderr or "container name" not in result.stderr:
+                break
+            # Another worker may have won the startup race. If the existing
+            # container matches this request, adopt it and wait for readiness;
+            # do not remove a live container owned by the sibling worker.
+            if cls._running_container_matches_config():
+                if cls._wait_existing_container_ready():
+                    return
+                logger.warning(
+                    "Conflicting agent LLM container %s never became healthy; rebuilding.",
+                    cls.CONTAINER_NAME,
+                )
+            logger.warning(
+                "Container name conflict for %s; forcing removal and retrying (%s/2).",
+                cls.CONTAINER_NAME,
+                retry_idx + 1,
+            )
+            conflict_id = cls._conflict_container_id(result.stderr)
+            cls._force_remove_container(cls.CONTAINER_NAME, reason="docker_run_name_conflict")
+            if conflict_id and conflict_id != cls.CONTAINER_NAME:
+                cls._force_remove_container(conflict_id, reason="docker_run_conflict_id")
+            result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
+            if cls._container_is_running():
+                logger.warning(
+                    "docker run for %s returned non-zero, but the target container is running; adopting it and waiting for health. stderr=%s",
+                    cls.CONTAINER_NAME,
+                    result.stderr.strip(),
+                )
+            else:
+                subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
+                record_service_event({"event": "start_failed", "service": "agent-llm", "stderr": result.stderr, "lease": lease.__dict__})
+                raise RuntimeError(
+                    f"Failed to start agent LLM container.\nstderr: {result.stderr}"
+                )
+
+        if result.returncode != 0:
+            record_service_event({"event": "start_adopted_after_nonzero", "service": "agent-llm", "stderr": result.stderr, "lease": lease.__dict__})
+        else:
+            record_service_event({"event": "started", "service": "agent-llm", "lease": lease.__dict__})
+
+        if result.returncode != 0 and not cls._container_is_running():
             subprocess.run(["docker", "rm", "-f", cls.CONTAINER_NAME], capture_output=True)
             record_service_event({"event": "start_failed", "service": "agent-llm", "stderr": result.stderr, "lease": lease.__dict__})
             raise RuntimeError(
@@ -205,10 +370,13 @@ class AgentLLMDockerManager(BaseServiceManager):
     def stop_service(cls) -> None:
         logger.info(f"Stopping container {cls.CONTAINER_NAME}...")
         # -t 2: send SIGKILL after 2s instead of default 10s
-        subprocess.run(
-            ["docker", "stop", "-t", "2", cls.CONTAINER_NAME],
-            capture_output=True, timeout=6,
-        )
+        try:
+            subprocess.run(
+                ["docker", "stop", "-t", "2", cls.CONTAINER_NAME],
+                capture_output=True, timeout=6,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("Timed out stopping %s; forcing removal.", cls.CONTAINER_NAME)
         subprocess.run(
             ["docker", "rm", "-f", cls.CONTAINER_NAME],
             capture_output=True, timeout=5,

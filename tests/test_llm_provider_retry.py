@@ -108,3 +108,38 @@ def test_remote_workload_queue_allows_single_active_workload_to_continue():
         "queues": {"tau2": [{"request_id": "t1"}, {"request_id": "t2"}]},
     }
     assert _remote_llm_next_workload(state, "tau2") == "tau2"
+
+
+def test_evolution_llm_client_probes_available_local_lane(monkeypatch):
+    """An unpinned evolution call finds a watcher-assigned local port."""
+    import terrabox.evolution.shared.llm_client as evolution_llm
+
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"data": [{"id": "/model"}]}'
+
+    class Opener:
+        def open(self, url, timeout=0):
+            del timeout
+            calls.append(url)
+            if url == "http://localhost:9000/v1/models":
+                return Response()
+            raise OSError("lane unavailable")
+
+    monkeypatch.delenv("EVOLUTION_LLM_URL", raising=False)
+    monkeypatch.delenv("EVOLUTION_LLM_URLS", raising=False)
+    monkeypatch.setattr(evolution_llm, "_get_no_proxy_opener", lambda: Opener())
+
+    client = evolution_llm.EvolutionLLMClient()
+
+    assert client._use_docker is True
+    assert client._llm_url == "http://localhost:9000"
+    assert calls[-1] == "http://localhost:9000/v1/models"

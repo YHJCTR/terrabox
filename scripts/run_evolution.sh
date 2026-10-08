@@ -7,22 +7,18 @@
 # 选项：
 #   --experiment <name>   实验名（必填），结果输出到 evo_res/<name>/
 #   --dataset <ds>        数据集：disaster（默认）| openearth
-#   --methods <m1 m2 ..>  运行指定方法（默认全部 9 个）
+#   --methods <m1 m2 ..>  运行指定方法（默认保留的旧方法）
 #   --phase <1|2|all>     仅运行指定阶段（默认 all）
 #   --no-eval             仅自进化，跳过离线评测步骤
 #
 # 支持的方法：
-#   agentevolver  memrl  causalevo  seqgraphevo  causalpolicyevo(build) ← 阶段 1（无 LLM，并行）
-#   causaltextevo  causalpolicyevo(optimize)                             ← 阶段 1 build + 阶段 2 optimize（需 LLM）
-#   skillrl  rewardevo  graphskillevo                                     ← 阶段 2（需 LLM，GPU 并行）
+#   agentevolver  memrl                                                    ← 阶段 1（无 LLM，并行）
+#   skillrl                                                                 ← 阶段 2（需 LLM）
 #
 # 执行流程：
-#   阶段 1（无 LLM，并行）：AgentEvolver / MemRL / CausalEvo / SeqGraphEvo / CausalPolicyEvo(build)  (~5min)
-#   阶段 2（需 LLM，GPU 并行，4 GPU）：
+#   阶段 1（无 LLM，并行）：AgentEvolver / MemRL  (~5min)
+#   阶段 2（需 LLM）：
 #     GPU 0 (port 9100): SkillRL 蒸馏  (~2h)
-#     GPU 1 (port 9101): RewardEvo LLM-judge  (~1.5h)
-#     GPU 2 (port 9102): GraphSkillEvo  (~30min)
-#     GPU 3 (port 9103): CausalTextEvo + CausalPolicyEvo optimize queue  (~45min)
 #   汇总：离线评测结果对比（--no-eval 时跳过）
 #
 # 示例：
@@ -68,7 +64,7 @@ DATASET="disaster"
 PHASE="all"
 SKIP_EVAL=false
 LIMIT=""
-ALL_METHODS=(agentevolver memrl causalevo seqgraphevo causalpolicyevo causaltextevo skillrl rewardevo graphskillevo)
+ALL_METHODS=(agentevolver memrl skillrl)
 METHODS=()
 
 print_usage() {
@@ -78,9 +74,8 @@ print_usage() {
 选项：
   --experiment <name>      实验名（必填），输出到 evo_res/<name>/
   --dataset <ds>           数据集: disaster（默认）| openearth
-  --methods <m1 m2 ..>     运行指定方法（默认全部 9 个）
-                           可选: agentevolver memrl causalevo seqgraphevo causalpolicyevo causaltextevo
-                                 skillrl rewardevo graphskillevo
+  --methods <m1 m2 ..>     运行指定方法（默认保留的旧方法）
+                           可选: agentevolver memrl skillrl
   --phase <1|2|all>        仅运行指定阶段（默认 all）
                            1 = 无 LLM 方法，2 = 需 LLM 方法，all = 全部
   --no-eval                仅自进化，跳过离线评测步骤
@@ -122,6 +117,13 @@ if [[ "$DATASET" != "disaster" && "$DATASET" != "openearth" ]]; then
 fi
 
 [[ ${#METHODS[@]} -eq 0 ]] && METHODS=("${ALL_METHODS[@]}")
+
+for m in "${METHODS[@]}"; do
+    case " $m " in
+        " agentevolver "|" memrl "|" skillrl ") ;;
+        *) echo "错误：方法 $m 已不在当前保留列表中；旧原创方法已归档。"; exit 1 ;;
+    esac
+done
 
 # --limit: 构造传给各 runner 的参数片段
 LIMIT_ARG=""
@@ -262,131 +264,6 @@ run_memrl() {
     ok "MemRL done"
 }
 
-run_causalevo() {
-    local d="${OUT}/causalevo"
-    mkdir -p "${d}/test"
-
-    ts "CausalEvo: build..."
-    $PY -m terrabox.evolution.causalevo.runner build \
-        --train-data "$TRAIN_DATA" --store-dir "$d" $LIMIT_ARG
-
-    if [[ "$SKIP_EVAL" == "false" ]]; then
-        ts "CausalEvo: eval..."
-        $PY -m terrabox.evolution.causalevo.runner eval \
-            --eval-data "$EVAL_DATA" --store-dir "$d" \
-            --output "${d}/test/eval_offline.json"
-    fi
-    ok "CausalEvo done"
-}
-
-run_seqgraphevo() {
-    local d="${OUT}/seqgraphevo"
-    local store="${d}/store"
-    mkdir -p "$store" "${d}/test"
-
-    # SeqGraphEvo 从 AgentEvolver JSONL 数据构建序列图
-    # 优先用 agentevolver 输出（若已生成），否则直接用原始 AE_DATA
-    local traj_src="${OUT}/agentevolver/experience_pool.jsonl"
-    if [ ! -f "$traj_src" ]; then
-        traj_src="$AE_DATA"
-    fi
-
-    ts "SeqGraphEvo: build seq graph from ${traj_src}..."
-    $PY -m terrabox.evolution.seqgraphevo.runner build \
-        --traj-file "$traj_src" \
-        --store-dir "$store" $LIMIT_ARG
-
-    if [[ "$SKIP_EVAL" == "false" ]]; then
-        ts "SeqGraphEvo: eval..."
-        $PY -m terrabox.evolution.seqgraphevo.runner eval \
-            --store-dir "$store" \
-            --eval-data "$EVAL_DATA" \
-            --output "${d}/test/eval_offline.json"
-    fi
-    ok "SeqGraphEvo done"
-}
-
-run_causaltextevo_build() {
-    local d="${OUT}/causaltextevo"
-    local store="${d}/store"
-    mkdir -p "$store" "${d}/test"
-
-    ts "CausalTextEvo: build (CCA + SeqGraph + keywords)..."
-    $PY -m terrabox.evolution.causaltextevo.runner build \
-        --train-data "$TRAIN_DATA" --eval-data "$EVAL_DATA" \
-        --store-dir "$store" $LIMIT_ARG
-
-    if [[ "$SKIP_EVAL" == "false" ]]; then
-        ts "CausalTextEvo: offline eval (pre-optimize)..."
-        $PY -m terrabox.evolution.causaltextevo.runner eval \
-            --train-data "$TRAIN_DATA" --eval-data "$EVAL_DATA" \
-            --store-dir "$store" \
-            --output "${d}/test/eval_offline.json"
-    fi
-    ok "CausalTextEvo build done"
-}
-
-run_causalpolicyevo_build() {
-    local d="${OUT}/causalpolicyevo"
-    local store="${d}/store"
-    mkdir -p "$store" "${d}/test"
-
-    ts "CausalPolicyEvo: build policy state..."
-    $PY -m terrabox.evolution.causalpolicyevo.runner build \
-        --train-data "$TRAIN_DATA" --eval-data "$EVAL_DATA" \
-        --store-dir "$store" $LIMIT_ARG
-
-    if [[ "$SKIP_EVAL" == "false" ]]; then
-        ts "CausalPolicyEvo: offline eval (pre-optimize)..."
-        $PY -m terrabox.evolution.causalpolicyevo.runner eval \
-            --train-data "$TRAIN_DATA" --eval-data "$EVAL_DATA" \
-            --store-dir "$store" \
-            --output "${d}/test/eval_offline_preopt.json"
-    fi
-    ok "CausalPolicyEvo build done"
-}
-
-run_causaltextevo_optimize() {
-    local d="${OUT}/causaltextevo"
-    local store="${d}/store"
-
-    ts "CausalTextEvo: optimize (TextGrad @ port 9103)..."
-    EVOLUTION_LLM_URL="http://localhost:9103" \
-    $PY -m terrabox.evolution.causaltextevo.runner optimize \
-        --train-data "$TRAIN_DATA" --eval-data "$EVAL_DATA" \
-        --store-dir "$store" \
-        --max-epochs 10 --patience 3 $LIMIT_ARG
-
-    if [[ "$SKIP_EVAL" == "false" ]]; then
-        ts "CausalTextEvo: offline eval (post-optimize)..."
-        $PY -m terrabox.evolution.causaltextevo.runner eval \
-            --train-data "$TRAIN_DATA" --eval-data "$EVAL_DATA" \
-            --store-dir "$store" \
-            --output "${d}/test/eval_offline.json"
-    fi
-    ok "CausalTextEvo optimize done"
-}
-
-run_causalpolicyevo_optimize() {
-    local d="${OUT}/causalpolicyevo"
-    local store="${d}/store"
-
-    ts "CausalPolicyEvo: optimize (@ port 9103)..."
-    EVOLUTION_LLM_URL="http://localhost:9103" \
-    $PY -m terrabox.evolution.causalpolicyevo.runner optimize \
-        --train-data "$TRAIN_DATA" --eval-data "$EVAL_DATA" \
-        --store-dir "$store" $LIMIT_ARG
-
-    if [[ "$SKIP_EVAL" == "false" ]]; then
-        ts "CausalPolicyEvo: offline eval (post-optimize)..."
-        $PY -m terrabox.evolution.causalpolicyevo.runner eval \
-            --train-data "$TRAIN_DATA" --eval-data "$EVAL_DATA" \
-            --store-dir "$store" \
-            --output "${d}/test/eval_offline.json"
-    fi
-    ok "CausalPolicyEvo optimize done"
-}
-
 # ──────────────────────────────────────────────────────────────────────────────
 # 阶段 2: 需要 LLM 的方法
 # ──────────────────────────────────────────────────────────────────────────────
@@ -418,94 +295,6 @@ run_skillrl() {
     ok "SkillRL done"
 }
 
-run_rewardevo() {
-    local d="${OUT}/rewardevo"
-    local store="${d}/store"
-    mkdir -p "$store" "${d}/test"
-
-    ts "RewardEvo: LLM-judge labeling (port 9101)..."
-    EVOLUTION_LLM_URL="http://localhost:9101" \
-    $PY << REWARDEVO_TRAIN
-import sys, json, os
-sys.path.insert(0, 'src')
-os.environ['EVOLUTION_LLM_URL'] = 'http://localhost:9101'
-
-from terrabox.evolution.rewardevo import SelfConsistentLabeler
-from terrabox.evolution.shared.trajectory import Trajectory, Turn
-
-with open('${TRAIN_DATA}') as f:
-    traj_dicts = json.load(f)
-
-trajectories = []
-for td in traj_dicts:
-    turns = [Turn(**t) for t in td.get('turns', [])]
-    traj = Trajectory(
-        task_id=td.get('task_id'), question=td.get('question'),
-        images=td.get('images', []), turns=turns,
-        tools_called=td.get('tools_called', []),
-        expected_tools=td.get('expected_tools', []),
-        final_answer=td.get('final_answer', ''),
-        success=td.get('success', True),
-        source=td.get('source', '${DATASET}'),
-        task_type=td.get('task_type', '')
-    )
-    trajectories.append(traj)
-
-limit = ${LIMIT:-0}
-if limit > 0:
-    trajectories = trajectories[:limit]
-    print(f'Limited to {len(trajectories)} trajectories (--limit {limit})')
-else:
-    print(f'Loaded {len(trajectories)} trajectories')
-
-try:
-    labeler = SelfConsistentLabeler()
-    labeled = labeler.label_trajectories(trajectories)
-    result = labeler.write_to_memrl(labeled, '${store}/episodic_memory.db')
-    print(f'LLM judge: pos={result["positive_written"]}, neg={result["negative_written"]}, unc={result["uncertain_written"]}')
-except Exception as e:
-    print(f'LLM judge failed ({type(e).__name__}: {str(e)[:200]})')
-    print('Falling back to heuristic labeling...')
-    labeler = SelfConsistentLabeler()
-    labeled = {
-        'labeled_positive': [(t, 0.8) for t in trajectories if len(t.tools_called) >= 2],
-        'labeled_negative': [(t, 0.2) for t in trajectories if len(t.tools_called) < 2],
-        'uncertain': []
-    }
-    result = labeler.write_to_memrl(labeled, '${store}/episodic_memory.db')
-    print(f'Heuristic: pos={result["positive_written"]}, neg={result["negative_written"]}')
-REWARDEVO_TRAIN
-
-    if [[ "$SKIP_EVAL" == "false" ]]; then
-        ts "RewardEvo: eval (via MemRL runner)..."
-        $PY -m terrabox.evolution.memrl.runner eval \
-            --memory-db "${store}/episodic_memory.db" --eval-data "$EVAL_DATA" \
-            --output "${d}/test/eval_offline.json"
-    fi
-    ok "RewardEvo done"
-}
-
-run_graphskillevo() {
-    local d="${OUT}/graphskillevo"
-    local store="${d}/store_v2"
-    local skillrl_store="${OUT}/skillrl/store"
-    mkdir -p "$store" "${d}/test"
-
-    # GraphSkillEvo v2: 从轨迹数据统计工具共现图（不依赖 SkillRL LLM 输出）
-    ts "GraphSkillEvo: build tool co-occurrence graph..."
-    $PY -m terrabox.evolution.graphskillevo.runner build \
-        --traj-file "$AE_DATA" \
-        --store-dir "$store" $LIMIT_ARG
-
-    if [[ "$SKIP_EVAL" == "false" ]]; then
-        ts "GraphSkillEvo: eval..."
-        $PY -m terrabox.evolution.graphskillevo.runner eval \
-            --store-dir "$store" --eval-data "$EVAL_DATA" \
-            --output "${d}/test/eval_offline.json"
-    fi
-    ok "GraphSkillEvo done"
-}
-
 # ──────────────────────────────────────────────────────────────────────────────
 # 评测汇总
 # ──────────────────────────────────────────────────────────────────────────────
@@ -520,7 +309,7 @@ import json, os
 
 out = '${OUT}'
 exp = '${EXPERIMENT}'
-methods = ['agentevolver', 'memrl', 'causalevo', 'seqgraphevo', 'causalpolicyevo', 'causaltextevo', 'skillrl', 'rewardevo', 'graphskillevo']
+methods = ['agentevolver', 'memrl', 'skillrl']
 comp = {}
 
 for m in methods:
@@ -616,31 +405,6 @@ if [[ "$PHASE" == "all" || "$PHASE" == "1" ]]; then
         pids_1+=("$!:memrl")
         echo "  [PID $!] MemRL"
     fi
-    if has_method causalevo; then
-        mkdir -p "${OUT}/causalevo"
-        run_causalevo > "${OUT}/causalevo/run.log" 2>&1 &
-        pids_1+=("$!:causalevo")
-        echo "  [PID $!] CausalEvo"
-    fi
-    if has_method seqgraphevo; then
-        mkdir -p "${OUT}/seqgraphevo"
-        run_seqgraphevo > "${OUT}/seqgraphevo/run.log" 2>&1 &
-        pids_1+=("$!:seqgraphevo")
-        echo "  [PID $!] SeqGraphEvo"
-    fi
-    if has_method causaltextevo; then
-        mkdir -p "${OUT}/causaltextevo"
-        run_causaltextevo_build > "${OUT}/causaltextevo/run.log" 2>&1 &
-        pids_1+=("$!:causaltextevo")
-        echo "  [PID $!] CausalTextEvo (build)"
-    fi
-    if has_method causalpolicyevo; then
-        mkdir -p "${OUT}/causalpolicyevo"
-        run_causalpolicyevo_build > "${OUT}/causalpolicyevo/run.log" 2>&1 &
-        pids_1+=("$!:causalpolicyevo")
-        echo "  [PID $!] CausalPolicyEvo (build)"
-    fi
-
     echo ""
     ts "等待阶段 1..."
     for entry in "${pids_1[@]}"; do
@@ -657,73 +421,23 @@ if [[ "$PHASE" == "all" || "$PHASE" == "2" ]]; then
     section "阶段 2: LLM 方法（GPU 并行）"
     t2=$(date +%s)
 
-    need_skillrl=false; need_rewardevo=false; need_graphskillevo=false; need_causaltextevo=false; need_causalpolicyevo=false
+    need_skillrl=false
     has_method skillrl && need_skillrl=true
-    has_method rewardevo && need_rewardevo=true
-    has_method graphskillevo && need_graphskillevo=true
-    has_method causaltextevo && need_causaltextevo=true
-    has_method causalpolicyevo && need_causalpolicyevo=true
 
-    if [[ "$need_skillrl" == "false" && "$need_rewardevo" == "false" && "$need_graphskillevo" == "false" && "$need_causaltextevo" == "false" && "$need_causalpolicyevo" == "false" ]]; then
+    if [[ "$need_skillrl" == "false" ]]; then
         ok "阶段 2 无需运行的方法，跳过"
     else
         ts "启动 Docker LLM 服务..."
         $need_skillrl && start_llm 0 9100
-        $need_rewardevo && start_llm 1 9101
-        if $need_causaltextevo || $need_causalpolicyevo; then
-            start_llm 3 9103
-        fi
 
-        # 并行: SkillRL + RewardEvo
         if $need_skillrl; then
             mkdir -p "${OUT}/skillrl"
             run_skillrl > "${OUT}/skillrl/run.log" 2>&1 &
             p_sk=$!; echo "  [PID $p_sk] SkillRL (GPU 0)"
         fi
-        if $need_rewardevo; then
-            mkdir -p "${OUT}/rewardevo"
-            { run_rewardevo > "${OUT}/rewardevo/run.log" 2>&1; docker stop terrabox-agent-llm-9101 >/dev/null 2>&1 && ts "已释放 GPU 1 (port 9101)"; } &
-            p_re=$!; echo "  [PID $p_re] RewardEvo (GPU 1)"
-        fi
 
-        # GraphSkillEvo 不再等待 SkillRL，直接从轨迹数据构建工具图
-        if $need_graphskillevo; then
-            start_llm 2 9102
-            mkdir -p "${OUT}/graphskillevo"
-            { run_graphskillevo > "${OUT}/graphskillevo/run.log" 2>&1; docker stop terrabox-agent-llm-9102 >/dev/null 2>&1 && ts "已释放 GPU 2 (port 9102)"; } &
-            p_gs=$!; echo "  [PID $p_gs] GraphSkillEvo (GPU 2)"
-        fi
-
-        # GPU 3 queue: CausalTextEvo optimize + CausalPolicyEvo optimize
-        if $need_causaltextevo || $need_causalpolicyevo; then
-            mkdir -p "${OUT}/causaltextevo" "${OUT}/causalpolicyevo"
-            {
-                if $need_causaltextevo; then
-                    run_causaltextevo_optimize >> "${OUT}/causaltextevo/run.log" 2>&1
-                fi
-                if $need_causalpolicyevo; then
-                    run_causalpolicyevo_optimize >> "${OUT}/causalpolicyevo/run.log" 2>&1
-                fi
-                docker stop terrabox-agent-llm-9103 >/dev/null 2>&1 && ts "已释放 GPU 3 (port 9103)"
-            } &
-            p_cp=$!; echo "  [PID $p_cp] GPU 3 optimize queue"
-        fi
-
-        # 等待所有任务
         $need_skillrl && { wait $p_sk && ok "SkillRL ✓" || err "SkillRL ✗ (see ${OUT}/skillrl/run.log)"; }
-        $need_rewardevo && { wait $p_re && ok "RewardEvo ✓" || err "RewardEvo ✗ (see ${OUT}/rewardevo/run.log)"; }
-        $need_graphskillevo && { wait $p_gs && ok "GraphSkillEvo ✓" || err "GraphSkillEvo ✗ (see ${OUT}/graphskillevo/run.log)"; }
-        if $need_causaltextevo || $need_causalpolicyevo; then
-            if wait $p_cp; then
-                $need_causaltextevo && ok "CausalTextEvo ✓"
-                $need_causalpolicyevo && ok "CausalPolicyEvo ✓"
-            else
-                $need_causaltextevo && err "CausalTextEvo ✗ (see ${OUT}/causaltextevo/run.log)"
-                $need_causalpolicyevo && err "CausalPolicyEvo ✗ (see ${OUT}/causalpolicyevo/run.log)"
-            fi
-        fi
 
-        # 释放 GPU 0 (SkillRL 完成后停)
         if $need_skillrl; then
             docker stop terrabox-agent-llm-9100 >/dev/null 2>&1 && ts "已释放 GPU 0 (port 9100)"
         fi

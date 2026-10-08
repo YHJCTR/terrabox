@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 
 import httpx
@@ -18,6 +19,29 @@ from .llm_provider import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _local_agent_max_tokens() -> int | None:
+    """Return an optional local-agent completion cap from the environment.
+
+    vLLM otherwise allows a request to consume the remainder of the model
+    context window.  Keeping this opt-in preserves existing local rollout
+    behavior while allowing long evaluations to bound malformed/overlong
+    tool-call responses.
+    """
+
+    raw = os.environ.get("TERRABOX_AGENT_LLM_MAX_TOKENS", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Ignoring invalid TERRABOX_AGENT_LLM_MAX_TOKENS=%r", raw)
+        return None
+    if value <= 0:
+        logger.warning("Ignoring non-positive TERRABOX_AGENT_LLM_MAX_TOKENS=%r", raw)
+        return None
+    return value
 
 
 def _remote_provider_name(config: AgentConfig) -> str:
@@ -75,6 +99,11 @@ def get_llm(config: AgentConfig) -> ChatOpenAI:
         # serves it as "/model". Subprocess mode serves the model under its host
         # path. Use the correct name accordingly.
         model_name = "/model" if config.use_docker else config.local_llm_model_path
+        local_max_tokens = _local_agent_max_tokens()
+        local_kwargs: dict[str, Any] = {}
+        if local_max_tokens is not None:
+            local_kwargs["max_tokens"] = local_max_tokens
+            logger.info("Local agent completion cap: max_tokens=%d", local_max_tokens)
         return ChatOpenAI(
             base_url=api_base,
             api_key="EMPTY",   # vLLM does not require a real key
@@ -89,6 +118,7 @@ def get_llm(config: AgentConfig) -> ChatOpenAI:
                 trust_env=False,
                 transport=httpx.AsyncHTTPTransport(retries=3),
             ),
+            **local_kwargs,
         )
     else:
         logger.info(f"Using remote LLM: {config.remote_llm_model} via {config.remote_llm_api_base}")

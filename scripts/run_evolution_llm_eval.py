@@ -18,9 +18,7 @@ Usage:
     conda run -n unsloth env PYTHONPATH=src python scripts/run_evolution_llm_eval.py \
         --methods baseline agentevolver memrl --port 9100 &
     conda run -n unsloth env PYTHONPATH=src python scripts/run_evolution_llm_eval.py \
-        --methods causalevo skillrl --port 9101 &
-    conda run -n unsloth env PYTHONPATH=src python scripts/run_evolution_llm_eval.py \
-        --methods rewardevo graphskillevo --port 9102 &
+        --methods skillrl evoskill --port 9101 &
 """
 
 import argparse
@@ -43,9 +41,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 ALL_METHODS = [
-    "baseline", "agentevolver", "memrl", "causalevo",
-    "skillrl", "rewardevo", "graphskillevo", "seqgraphevo",
-    "causaltextevo", "causalpolicyevo",
+    "baseline", "agentevolver", "memrl", "skillrl", "evoskill",
 ]
 
 
@@ -142,29 +138,10 @@ def get_system_prompt(
         kwargs["store_dir"] = os.path.join(output_root, "agentevolver")
     elif method == "memrl":
         kwargs["memory_db"] = os.path.join(output_root, "memrl", "episodic_memory.db")
-    elif method == "causalevo":
-        kwargs["store_dir"] = os.path.join(output_root, "causalevo")
     elif method == "skillrl":
         kwargs["store_dir"] = os.path.join(output_root, "skillrl", "store")
-    elif method == "rewardevo":
-        kwargs["memory_db"] = os.path.join(
-            output_root, "rewardevo", "store", "episodic_memory.db"
-        )
-    elif method == "graphskillevo":
-        # Prefer new tool co-occurrence graph (store_v2), fall back to legacy
-        new_graph = os.path.join(output_root, "graphskillevo", "store_v2", "tool_graph.json")
-        legacy_graph = os.path.join(output_root, "graphskillevo", "store", "skill_graph.json")
-        kwargs["tool_graph_path"] = new_graph if os.path.exists(new_graph) else legacy_graph
-
-    elif method == "seqgraphevo":
-        kwargs["seq_graph_path"] = os.path.join(
-            output_root, "seqgraphevo", "store", "seq_graph.json"
-        )
-
-    elif method == "causaltextevo":
-        kwargs["store_dir"] = os.path.join(output_root, "causaltextevo", "store")
-    elif method == "causalpolicyevo":
-        kwargs["store_dir"] = os.path.join(output_root, "causalpolicyevo", "store")
+    elif method == "evoskill":
+        kwargs["store_dir"] = os.path.join(output_root, "evoskill")
 
     augmenter = get_prompt_augmenter(method, top_k=top_k, **kwargs)
 

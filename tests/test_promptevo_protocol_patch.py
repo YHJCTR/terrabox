@@ -7,14 +7,20 @@ from types import SimpleNamespace
 
 from terrabox.evolution.promptevo.contrastive_optimizer import ContrastiveOptimizer
 from terrabox.evolution.promptevo.interfaces import Step, TaskMetric, Trace
-from terrabox.evolution.promptevo.loop import ContrastiveUpdater
+from terrabox.evolution.promptevo.loop import (
+    ContrastiveUpdater,
+    _call_candidate_filter,
+    _paired_effect_summary,
+)
 from terrabox.evolution.promptevo.optimizer import PromptOptimizer
 from terrabox.evolution.promptevo.protocol_patch import (
     ProtocolPatchError,
+    QUERY_ABSTRACTION_SCOPE,
     compile_protocol_prompt,
     parse_patch_proposal,
 )
 from terrabox.evolution.promptevo.schemas import Attribution
+from terrabox.evolution.promptevo.adapters.api_bank.pipeline import _conditional_patch_gate
 
 
 BASE_PROMPT = "Use the available interface.\n\nTools:\n"
@@ -62,6 +68,106 @@ def test_patch_compile_preserves_placeholder_and_trailing_anchor():
     assert "{tools}" in compiled
     assert compiled.rstrip().splitlines()[-1] == "Tools:"
     assert "Check that required arguments" in compiled
+
+
+def test_conditional_compiler_preserves_trigger_scope_and_state_transition():
+    proposal = parse_patch_proposal(
+        patch_payload(
+            patch_id="state-transition",
+            kind="state_transition",
+            trigger="when the visible context lacks a required state",
+            rule="defer the dependent action until that state is available",
+            scope="next action",
+        ),
+        BASE_PROMPT,
+        protocol_mode="conditional",
+    )
+    compiled = proposal.compiled_prompt
+    assert "IF when the visible context lacks a required state THEN defer the dependent action until that state is available [Scope: next action]" in compiled
+    assert compiled.count("Protocol rules added by the prompt compiler:") == 1
+    second, _ = compile_protocol_prompt(compiled, proposal.patches, "conditional")
+    assert second == compiled
+
+
+def test_query_abstraction_is_a_typed_conditional_patch():
+    proposal = parse_patch_proposal(
+        patch_payload(
+            patch_id="query-summary",
+            kind="query_abstraction",
+            trigger="When filling a discovery query field from a user request",
+            rule="Use a concise description of the requested operation and target object, grounded in the available descriptions; omit incidental details.",
+            scope="discovery query fields only",
+        ),
+        BASE_PROMPT,
+        protocol_mode="conditional",
+    )
+    assert "query_abstraction" in proposal.compiled_prompt
+    assert "IF When filling a discovery query field" in proposal.compiled_prompt
+    assert proposal.patches[0].scope == QUERY_ABSTRACTION_SCOPE
+
+
+def test_conditional_query_abstraction_scope_is_narrowed_from_global():
+    proposal = parse_patch_proposal(
+        patch_payload(
+            patch_id="query-global-input",
+            kind="query_abstraction",
+            trigger="when filling a search field",
+            rule="Preserve schema-significant entity values and remove conversational filler.",
+            scope="global",
+        ),
+        BASE_PROMPT,
+        protocol_mode="conditional",
+    )
+    assert proposal.patches[0].scope == QUERY_ABSTRACTION_SCOPE
+    assert f"[Scope: {QUERY_ABSTRACTION_SCOPE}]" in proposal.compiled_prompt
+
+
+def test_conditional_gate_uses_paired_gain_and_protects_baseline_success():
+    before = {
+        "good": TaskMetric("good", True, extra={
+            "parse_success": True, "called_api": True, "exact_match_ok": True,
+        }),
+        "bad": TaskMetric("bad", False, extra={
+            "parse_success": True, "called_api": True, "exact_match_ok": False,
+        }),
+    }
+    after = {
+        "good": TaskMetric("good", True, extra={
+            "parse_success": True, "called_api": True, "exact_match_ok": True,
+        }),
+        "bad": TaskMetric("bad", True, extra={
+            "parse_success": True, "called_api": True, "exact_match_ok": True,
+        }),
+    }
+    effect = _paired_effect_summary(before, after, ["good", "bad"])
+    context = {
+        "paired_effect": effect,
+        "task_ids": ["good", "bad"],
+        "baseline_tasks": before,
+        "candidate_tasks": after,
+    }
+    # Aggregate API-name changes are irrelevant when the changed task was a baseline failure.
+    assert _conditional_patch_gate(
+        {"success_rate": 0.5, "api_name_accuracy": 0.0},
+        {"success_rate": 0.5, "api_name_accuracy": 1.0},
+        context,
+    )
+
+    regressed = dict(after)
+    regressed["good"] = TaskMetric("good", False, extra={
+        "parse_success": False, "called_api": False, "exact_match_ok": False,
+    })
+    regressed_effect = _paired_effect_summary(before, regressed, ["good", "bad"])
+    assert not _conditional_patch_gate(
+        {"success_rate": 0.5},
+        {"success_rate": 0.5},
+        {**context, "paired_effect": regressed_effect, "candidate_tasks": regressed},
+    )
+
+
+def test_candidate_filter_keeps_two_argument_adapter_compatibility():
+    assert _call_candidate_filter(lambda after, before: True, {}, {}, {})
+    assert _call_candidate_filter(lambda after, before, context: context["ok"], {}, {}, {"ok": True})
 
 
 def test_patch_parser_rejects_conflicts_and_task_specific_content():

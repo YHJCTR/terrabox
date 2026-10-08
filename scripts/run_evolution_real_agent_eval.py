@@ -186,7 +186,7 @@ def evaluate_method_with_real_agent(method_name: str, eval_cases: list[dict],
     真实 Agent 评测：使用方法的 augmented_prompt 运行真实 agent。
 
     Args:
-        method_name: 方法名称 ('agentevolver', 'memrl', 'causalevo', 'skillrl', 'rewardevo', 'graphskillevo')
+        method_name: 方法名称 ('agentevolver', 'memrl', 'skillrl', 'evoskill')
         eval_cases: 评测样本列表
         agent_mode: agent 模式 ('react', 'progressive', 'category')
         sample_size: 如果指定，只评测前 N 个样本
@@ -212,19 +212,7 @@ def evaluate_method_with_real_agent(method_name: str, eval_cases: list[dict],
             kwargs["memory_db"] = os.path.join(store_root, "memrl", "episodic_memory.db")
         elif method_name == "skillrl":
             kwargs["store_dir"] = os.path.join(store_root, "skillrl", "store")
-        elif method_name == "rewardevo":
-            kwargs["memory_db"] = os.path.join(store_root, "rewardevo", "store", "episodic_memory.db")
-        elif method_name == "graphskillevo":
-            store_v2 = os.path.join(store_root, "graphskillevo", "store_v2", "tool_graph.json")
-            legacy = os.path.join(store_root, "graphskillevo", "store", "tool_graph.json")
-            legacy_skill = os.path.join(store_root, "graphskillevo", "store", "skill_graph.json")
-            if os.path.exists(store_v2):
-                kwargs["tool_graph_path"] = store_v2
-            elif os.path.exists(legacy):
-                kwargs["tool_graph_path"] = legacy
-            else:
-                kwargs["tool_graph_path"] = legacy_skill
-        elif method_name in {"agentevolver", "causalevo", "evoskill", "seqgraphevo", "causaltextevo", "causalpolicyevo"}:
+        elif method_name in {"agentevolver", "evoskill"}:
             kwargs["store_dir"] = os.path.join(store_root, method_name, "store")
 
         augmenter = get_prompt_augmenter(method_name, **kwargs)
@@ -338,8 +326,8 @@ def main():
                        help="Agent 模式选择（默认: progressive，推荐）")
     parser.add_argument("--sample", type=int, default=None, help="仅评测前 N 个样本（用于快速测试）")
     parser.add_argument("--methods", nargs="+",
-                       default=["agentevolver", "memrl", "causalevo", "skillrl", "rewardevo", "graphskillevo", "causalpolicyevo"],
-                       help="要评测的方法列表（默认: 所有7个）")
+                       default=["agentevolver", "memrl", "skillrl", "evoskill"],
+                       help="要评测的方法列表（默认: 当前保留的4个旧评测方法）")
     parser.add_argument("--output-suffix", default="real", help="输出文件名后缀（默认: real）")
     parser.add_argument("--store-root", default="evo_res/disaster_1", help="方法产物根目录（默认: evo_res/disaster_1）")
 
