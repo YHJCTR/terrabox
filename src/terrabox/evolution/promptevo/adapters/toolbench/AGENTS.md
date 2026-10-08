@@ -25,14 +25,20 @@ checkout at `/data1/yuhongjie2/ToolBench`.
 - For LongCat agent experiments, pass `--agent-provider longcat`. This uses
   StableToolBench's official `chatgpt_function` path against LongCat's
   OpenAI-compatible endpoint, does not start local vLLM/GPU lanes, and still
-  uses the shared Terrabox LongCat limiter with
-  `TERRABOX_REMOTE_LLM_WORKLOAD=toolbench`.
+  uses the shared Terrabox LongCat provider limiter. Do not set
+  `TERRABOX_REMOTE_LLM_WORKLOAD` for ToolBench-only runs; set
+  `TERRABOX_REMOTE_LLM_WORKLOAD=toolbench` only when this run must fairly rotate
+  with other LongCat workloads.
 - Experiment outputs live under
-  `src/terrabox/evolution/promptevo/adapters/toolbench/experiments/<experiment>/`.
+  `tmp/promptevo_toolbench_experiments/<experiment>/`.
 - Generated prompt versions live under
   `evolution_store/promptevo/toolbench/versions/`.
 
 ## Services
+
+- 冷启动服务 wrapper 是动态生成的 Python：内层 f-string 的花括号必须转义，
+  防止父进程提前求值子进程的异常变量。验证必须覆盖实际 wrapper 生成、编译和
+  子进程异常分支；仅对 pipeline 做 `py_compile` 不足。异常日志使用脱敏 print。
 
 - `pipeline.py` may explicitly start the StableToolBench cached tool server
   (`server/main.py`, port 8081) and per-GPU vLLM lanes.
@@ -49,12 +55,17 @@ checkout at `/data1/yuhongjie2/ToolBench`.
   win because it may also be true for a `give_up` termination.
 - For DFS/DFSDT outputs without `train_messages`, metrics may consume the whole
   nested tree, but PromptEvo diagnosis must select one representative path and
-  must not concatenate sibling branches. Static selection is not rollout validation;
-  an unvalidated Stage2 candidate must be rejected before formal rollout. The
-  adapter now validates Stage2 candidates on a fixed, group-balanced dev slice
-  under the new experiment's `validation/` directory before launching the full
-  765-task Stage2 rollout; validation selects two `query_id` values per
-  StableToolBench group and never falls back to row-index matching. Validation
-  output must not be mixed into formal metrics.
+  must not concatenate sibling branches. Static selection is not rollout validation.
+  Both Stage1 and Stage2 candidates must pass real rollout validation before a
+  formal rollout. `paper-split-chain` writes a deterministic, group-stratified
+  `split_manifest.json`: evolution trajectories generate candidates, held-out
+  dev rollouts choose them, and test rollouts are only run after the versions are
+  frozen. Split selection always uses `query_id`, never row indexes. Validation
+  outputs under `validation/` must not be mixed into formal metrics. Current
+  ToolBench paper-split runs use typed protocol patches for Stage1 and Stage2;
+  Stage2 is contrastive regression repair, so it compares Base/Stage1 paired
+  traces and only accepts a candidate if the held-out dev gate protects success,
+  give-up, no-finish, tool-error, repeated calls, over-calling, and average tool
+  calls.
 - For paper-style final reporting, use StableToolBench's official
   `toolbench/tooleval` conversion and pass-rate scripts on generated answers.

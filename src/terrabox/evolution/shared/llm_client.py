@@ -23,8 +23,26 @@ def _strip_think(text: str) -> str:
 
 logger = logging.getLogger(__name__)
 
-# Default vLLM service URL; override with EVOLUTION_LLM_URL env var
+# Default vLLM service URL; override with EVOLUTION_LLM_URL env var. When no
+# explicit URL is supplied, EvolutionLLMClient probes the local agent lanes and
+# the long-lived 9000 lane in order. An explicit URL remains pinned.
 _DEFAULT_LLM_URL = "http://localhost:9100"
+_DEFAULT_LLM_PORTS = (9100, 9101, 9102, 9103, 9000)
+
+
+def _llm_url_candidates(explicit_url: Optional[str] = None) -> list[str]:
+    """Return ordered local vLLM candidates for an unpinned client."""
+    pinned = str(explicit_url or "").strip()
+    if pinned:
+        return [pinned.rstrip("/")]
+
+    configured = os.environ.get("EVOLUTION_LLM_URLS", "").strip()
+    if configured:
+        values = [item.strip().rstrip("/") for item in configured.split(",") if item.strip()]
+        if values:
+            return values
+
+    return [f"http://localhost:{port}" for port in _DEFAULT_LLM_PORTS]
 
 
 def _get_no_proxy_opener():
@@ -81,21 +99,31 @@ class EvolutionLLMClient:
     def __init__(self, config=None, llm_url: Optional[str] = None):
         self._config = config
         self._llm = None  # lazy-initialized fallback
-        self._llm_url = llm_url or os.environ.get("EVOLUTION_LLM_URL", _DEFAULT_LLM_URL)
+        pinned_url = llm_url or os.environ.get("EVOLUTION_LLM_URL")
+        self._llm_url = (pinned_url or _DEFAULT_LLM_URL).rstrip("/")
+        self._llm_url_pinned = bool(str(pinned_url or "").strip())
         self._use_docker = self._detect_docker_llm()
 
     def _detect_docker_llm(self) -> bool:
         """Check if the Docker vLLM service is reachable."""
-        try:
-            opener = _get_no_proxy_opener()
-            with opener.open(self._llm_url + "/v1/models", timeout=3) as r:
-                r.read()
-            logger.info(f"EvolutionLLMClient: using Docker vLLM at {self._llm_url}")
-            return True
-        except Exception:
-            logger.info(f"EvolutionLLMClient: Docker vLLM not available at {self._llm_url}, "
-                        f"falling back to agent LLM")
-            return False
+        candidates = _llm_url_candidates(self._llm_url if self._llm_url_pinned else None)
+        opener = _get_no_proxy_opener()
+        for candidate in candidates:
+            try:
+                with opener.open(candidate + "/v1/models", timeout=3) as r:
+                    r.read()
+                self._llm_url = candidate
+                logger.info("EvolutionLLMClient: using Docker vLLM at %s", candidate)
+                return True
+            except Exception:
+                if self._llm_url_pinned:
+                    break
+        logger.info(
+            "EvolutionLLMClient: no Docker vLLM candidate reachable (%s), "
+            "falling back to agent LLM",
+            ", ".join(candidates),
+        )
+        return False
 
     def _get_fallback_llm(self):
         if self._llm is None:

@@ -20,6 +20,7 @@ class ReflectionPromptInjector(PromptAugmenter):
         if not retrieved:
             return ""
         lines = [
+            "## Retrieved Reflection Memories",
             "## Lessons from your past similar attempts",
             "These are your own self-reflections from earlier tasks. Use only the relevant ones.",
         ]

@@ -9,7 +9,7 @@ task state, and dialogue history outside the optimized prompt.
 - Source: `/data1/yuhongjie2/tau2-bench`
 - Adapter: `src/terrabox/evolution/promptevo/adapters/tau2_bench/`
 - Adapter experiments:
-  `src/terrabox/evolution/promptevo/adapters/tau2_bench/experiments/`
+  `tmp/promptevo_tau2_experiments/`
 - Prompt versions:
   `evolution_store/promptevo/tau2_bench/versions/`
 
@@ -167,6 +167,33 @@ checkpoints under its local `simulations/`. Completed results are mirrored to
 the adapter experiment's `tau2_results/` directory.
 
 ## Three-stage pipeline and optional Stage3
+
+## 六方法统一对比
+
+`comparison.py` 提供 tau2 静态 `AGENT_INSTRUCTION` 槽位的统一对比入口：
+
+```bash
+CUDA_VISIBLE_DEVICES= \
+PYTHONPATH=src \
+TERRABOX_LONGCAT_THINKING=disabled \
+TERRABOX_LONGCAT_MIN_INTERVAL_SECONDS=1 \
+TERRABOX_REMOTE_LLM_MIN_INTERVAL_SECONDS=1 \
+python -u -m terrabox.evolution.promptevo.adapters.tau2_bench.comparison \
+  --group <group> \
+  --methods base gepa scope aho promptevo evotool \
+  --provider longcat --profile longcat_agent4
+```
+
+held-out 只使用 tau2 官方 test；优化只使用 train 和从 train 切出的 dev。
+`banking_knowledge` 当前 checkout 的 train/test helper 返回重叠任务，因此
+adapter 会改用固定 seed 的 60/20/20 本地划分，并在 `manifest.json` 标记，
+不能把它描述为官方 held-out。
+
+GEPA 使用官方搜索引擎；SCOPE、AHO、EvoTool 在 tau2 的静态 prompt 边界下
+属于 agent-level adapted 版本，不能宣称是原方法的完整运行时复现。每个方法
+保存 `selected_prompt.txt`、`prompt_meta.json`、`coverage.json`、
+`test_metrics.json` 和 `result.json`。`queue.lock` 防止重复启动，已完成方法
+可续跑。
 
 `pipeline.py chain-after-base` continues from an existing Base group, while
 `pipeline.py full-chain` is the formal Base -> Stage1 -> Stage2 entry. Both

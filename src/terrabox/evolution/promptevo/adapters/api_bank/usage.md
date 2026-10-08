@@ -10,9 +10,9 @@ as prompt versions.
 - API-Bank checkout: `/data1/yuhongjie2/DAMO-ConvAI-api-bank/api-bank`
 - Default data: `/data1/yuhongjie2/DAMO-ConvAI-api-bank/api-bank/lv1-lv2-samples/level-1-given-desc`
 - Default output root:
-  `src/terrabox/evolution/promptevo/adapters/api_bank/experiments/`
+  `tmp/promptevo_api_bank_experiments/`
 - For the original full API-Bank rerun in this document, use:
-  `src/terrabox/evolution/promptevo/adapters/api_bank/experiments/original_full/`
+  `tmp/promptevo_api_bank_experiments/original_full/`
 
 Each experiment writes:
 
@@ -75,7 +75,7 @@ EVOLUTION_LLM_URL=http://localhost:9200 no_proxy=localhost,127.0.0.1 PYTHONPATH=
 from terrabox.evolution.promptevo.adapters.api_bank import make_api_bank_components
 root = "/data1/yuhongjie2/DAMO-ConvAI-api-bank/api-bank"
 data = root + "/lv1-lv2-samples/level-1-given-desc"
-_, _, _, runner = make_api_bank_components(data, root, output_dir="src/terrabox/evolution/promptevo/adapters/api_bank/experiments/original_level1_3gpu", max_tokens=128)
+_, _, _, runner = make_api_bank_components(data, root, output_dir="tmp/promptevo_api_bank_experiments/original_level1_3gpu", max_tokens=128)
 runner.run_version("base", "base_original_gpu0", shard_index=0, num_shards=3, resume=True)
 PY
 
@@ -83,7 +83,7 @@ EVOLUTION_LLM_URL=http://localhost:9201 no_proxy=localhost,127.0.0.1 PYTHONPATH=
 from terrabox.evolution.promptevo.adapters.api_bank import make_api_bank_components
 root = "/data1/yuhongjie2/DAMO-ConvAI-api-bank/api-bank"
 data = root + "/lv1-lv2-samples/level-1-given-desc"
-_, _, _, runner = make_api_bank_components(data, root, output_dir="src/terrabox/evolution/promptevo/adapters/api_bank/experiments/original_level1_3gpu", max_tokens=128)
+_, _, _, runner = make_api_bank_components(data, root, output_dir="tmp/promptevo_api_bank_experiments/original_level1_3gpu", max_tokens=128)
 runner.run_version("base", "base_original_gpu1", shard_index=1, num_shards=3, resume=True)
 PY
 
@@ -91,7 +91,7 @@ EVOLUTION_LLM_URL=http://localhost:9202 no_proxy=localhost,127.0.0.1 PYTHONPATH=
 from terrabox.evolution.promptevo.adapters.api_bank import make_api_bank_components
 root = "/data1/yuhongjie2/DAMO-ConvAI-api-bank/api-bank"
 data = root + "/lv1-lv2-samples/level-1-given-desc"
-_, _, _, runner = make_api_bank_components(data, root, output_dir="src/terrabox/evolution/promptevo/adapters/api_bank/experiments/original_level1_3gpu", max_tokens=128)
+_, _, _, runner = make_api_bank_components(data, root, output_dir="tmp/promptevo_api_bank_experiments/original_level1_3gpu", max_tokens=128)
 runner.run_version("base", "base_original_gpu2", shard_index=2, num_shards=3, resume=True)
 PY
 ```
@@ -133,7 +133,7 @@ import json
 from pathlib import Path
 from terrabox.evolution.promptevo.adapters.api_bank import APIBankMetricProvider
 
-root = Path("src/terrabox/evolution/promptevo/adapters/api_bank/experiments/original_level1_3gpu")
+root = Path("tmp/promptevo_api_bank_experiments/original_level1_3gpu")
 out = root / "base_original_merged"
 out.mkdir(parents=True, exist_ok=True)
 
@@ -211,7 +211,7 @@ The full local coverage therefore consists of four runs:
 The latest full run is saved under:
 
 ```text
-src/terrabox/evolution/promptevo/adapters/api_bank/experiments/original_full/
+tmp/promptevo_api_bank_experiments/original_full/
 ```
 
 Score it again:
@@ -222,7 +222,7 @@ import json
 from pathlib import Path
 from terrabox.evolution.promptevo.adapters.api_bank import APIBankMetricProvider
 
-root = Path("src/terrabox/evolution/promptevo/adapters/api_bank/experiments/original_full")
+root = Path("tmp/promptevo_api_bank_experiments/original_full")
 data_root = "/data1/yuhongjie2/DAMO-ConvAI-api-bank/api-bank/lv1-lv2-samples"
 configs = {
     "level1_api": (data_root + "/level-1-given-desc", False),
@@ -282,7 +282,7 @@ vLLM services were stopped after completion.
 The current API-call prompt-evolution search output is saved under:
 
 ```text
-src/terrabox/evolution/promptevo/adapters/api_bank/experiments/meta_v2c_stage1_20260629_172816/
+tmp/promptevo_api_bank_experiments/meta_v2c_stage1_20260629_172816/
 ```
 
 Important files:
@@ -324,7 +324,7 @@ evolution_store/promptevo/api_bank/versions/api_bank_api_call_meta_v2c_stage1_20
 The latest generic meta-prompt backups from this search are in:
 
 ```text
-src/terrabox/evolution/promptevo/adapters/api_bank/experiments/meta_prompt_backups_20260629/
+tmp/promptevo_api_bank_experiments/meta_prompt_backups_20260629/
 ```
 
 The second-stage meta prompt improved after adding two general constraints:
@@ -338,7 +338,7 @@ settings.
 The latest quality-fix run is saved under:
 
 ```text
-src/terrabox/evolution/promptevo/adapters/api_bank/experiments/quality_fix_twostage_20260629_200956/
+tmp/promptevo_api_bank_experiments/quality_fix_twostage_20260629_200956/
 ```
 
 Important files:
@@ -381,7 +381,7 @@ context slot and should be rejected before rollout.
 The latest successful v2c-style generalization run is saved under:
 
 ```text
-src/terrabox/evolution/promptevo/adapters/api_bank/experiments/quality_v2c_manual_general_20260629_210641/
+tmp/promptevo_api_bank_experiments/quality_v2c_manual_general_20260629_210641/
 ```
 
 This experiment tested a domain-neutral version of the original v2c insight:

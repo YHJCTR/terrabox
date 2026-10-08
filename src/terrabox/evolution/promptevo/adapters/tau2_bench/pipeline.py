@@ -562,7 +562,12 @@ def _run_domain_chunk(
     return runner.run(prompt, experiment=experiment, run_config=config, env=_merged_env(agent_env, user_env))
 
 
-def _merge_domain_results(group: str, domain: str, profile: Tau2PipelineProfile) -> str:
+def _merge_domain_results(
+    group: str,
+    domain: str,
+    profile: Tau2PipelineProfile,
+    task_order: list[str] | None = None,
+) -> str:
     paths = _results_json_paths(group, domain, include_chunks=True)
     if not paths:
         raise RuntimeError(f"no tau2 results found for {group}/{domain}")
@@ -591,7 +596,8 @@ def _merge_domain_results(group: str, domain: str, profile: Tau2PipelineProfile)
                 sims_by_key.setdefault(key, sim)
 
     assert merged is not None
-    task_order = _task_ids_for_domain(domain)
+    if task_order is None:
+        task_order = _task_ids_for_domain(domain)
     merged["tasks"] = [tasks_by_id[task_id] for task_id in task_order if task_id in tasks_by_id]
     ordered_sims = sorted(
         sims_by_key.values(),
@@ -789,7 +795,12 @@ def _rollout_group_dynamic_chunks(
                 chunk_results.extend(future.result())
 
         results = {
-            domain: _merge_domain_results(group, domain, profile)
+            domain: _merge_domain_results(
+                group,
+                domain,
+                profile,
+                task_order=_task_ids_for_domain(domain),
+            )
             for domain, _, _ in profile.domains
         }
         status = {
@@ -944,7 +955,12 @@ class _Tau2ValidationRunner:
         ports = _profile_worker_ports(self.profile)
         for index, (domain, ids) in enumerate(sorted(by_domain.items())):
             _run_domain_chunk(root_group, prompt, domain, sorted(ids), index, ports[index % len(ports)], self.profile)
-            _merge_domain_results(root_group, domain, self.profile)
+            _merge_domain_results(
+                root_group,
+                domain,
+                self.profile,
+                task_order=sorted(ids),
+            )
         return experiment_dir(root_group)
 
 

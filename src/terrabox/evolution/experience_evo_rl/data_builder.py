@@ -259,15 +259,22 @@ def build_prompt(
         if online
         else "This RL stage trains process actions only: do not include a final answer field."
     )
-    if online:
-        tool_block = "Available tools are provided by the function schemas for this turn."
-    else:
-        tool_block = "Available tools:\n" + compact_tool_catalog(tool_catalog, tool_name_style=tool_name_style)
+    # Keep the tool catalog visible in text even for online Gym-env training.
+    # veRL can pass tool schemas directly to a tool-agent loop, but MS-Swift's
+    # generic Gym scheduler seeds model turns from env.reset() text and does not
+    # automatically render dataset-side tool metadata.  Embedding the compact
+    # public catalog keeps Swift GRPO aligned with the LongCat/OEA standard
+    # rollout setting: the model sees the same OEA-compatible tools, while gold
+    # labels/expected trajectories remain excluded from the prompt.
+    tool_block = "Available tools:\n" + compact_tool_catalog(tool_catalog, tool_name_style=tool_name_style)
     system = (
         "You are a Terrabox geospatial tool-use agent. Use tools to solve the task with observable evidence. "
         f"{final_note}\n\n"
         "Use only tools from the public tool schemas. Do not invent tool names or arguments. "
         f"{action_note}\n\n"
+        "Keep every assistant turn compact: output only one JSON object, no markdown, no prose outside JSON. "
+        "The thought field must be at most 12 words; arguments must contain only values needed by the tool. "
+        "Final answers must be concise and evidence-based.\n\n"
         "Required action-only format:\n"
         '{"thought":"short reason","actions":[{"tool":"tool_name","arguments":{"required_arg":"value"}}]}\n\n'
         "Invalid tool outputs: empty actions, more than one action in one turn, markdown, commentary, "

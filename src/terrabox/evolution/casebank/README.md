@@ -1,5 +1,8 @@
 # Memento-style CaseBank（严格无标签适配）
 
+Embedding transport、索引持久化和相似度计算统一实现于
+`shared/embedding_index.py`；CaseBank 只负责 case 文本序列化。严格无标签建库时，embedding 文档同样不包含 `task_type`。
+
 本模块是 Memento 的非参数 Case Memory / Case-Based Reasoning 思路在 Terrabox OEA 真实工具
 rollout 上的适配，复用正负案例、语义检索和压缩案例指导。它不是官方完整复现：官方仓库
 `/data1/yuhongjie2/external_repos/Memento` 的 Meta-Planner、独立 Executor MCP runtime、在线

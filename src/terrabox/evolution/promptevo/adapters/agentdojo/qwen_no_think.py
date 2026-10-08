@@ -89,7 +89,7 @@ def _pace_external_api_request() -> None:
         return
     pace_remote_llm_request(
         REQUEST_PROFILE,
-        workload=os.getenv("TERRABOX_REMOTE_LLM_WORKLOAD", "agentdojo"),
+        workload=os.getenv("TERRABOX_REMOTE_LLM_WORKLOAD"),
         interval=API_MIN_INTERVAL_SECONDS,
         lock_path=API_RATE_LOCK,
     )

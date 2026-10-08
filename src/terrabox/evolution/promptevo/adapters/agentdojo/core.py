@@ -31,7 +31,9 @@ Follow these instructions:
   - Do not assume the current year, but use the provided tools to see what year it is."""
 
 DEFAULT_AGENTDOJO_ROOT = "/data1/yuhongjie2/agentdojo"
-DEFAULT_AGENTDOJO_EXPERIMENTS_DIR = os.path.join(os.path.dirname(__file__), "experiments")
+DEFAULT_AGENTDOJO_EXPERIMENTS_DIR = str(
+    Path(__file__).resolve().parents[6] / "tmp" / "promptevo_agentdojo_experiments"
+)
 DEFAULT_AGENTDOJO_VERSIONS_DIR = "evolution_store/promptevo/agentdojo/versions"
 DEFAULT_AGENTDOJO_SITE_PACKAGES = str(
     Path(__file__).resolve().parents[6] / "tmp" / "agentdojo_site_packages"

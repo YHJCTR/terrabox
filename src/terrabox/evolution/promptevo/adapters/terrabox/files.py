@@ -10,7 +10,9 @@ from typing import Iterable
 
 
 TERRABOX_ADAPTER_DIR = os.path.dirname(__file__)
-DEFAULT_TERRABOX_EXPERIMENTS_DIR = os.path.join(TERRABOX_ADAPTER_DIR, "experiments")
+DEFAULT_TERRABOX_EXPERIMENTS_DIR = str(
+    Path(__file__).resolve().parents[6] / "tmp" / "promptevo_terrabox_experiments"
+)
 DEFAULT_OEA_TASK_FILE = "data/oea_full_sft/openearth_test_tasks.json"
 DEFAULT_BASE_EXPERIMENT = "oe_full_react_offline"
 DEFAULT_MODE = "standard"

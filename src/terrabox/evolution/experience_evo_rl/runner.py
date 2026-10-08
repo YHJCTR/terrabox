@@ -36,6 +36,10 @@ def build_grpo_command(
     val_max_samples: int = 8,
     val_batch_size: int | None = None,
     dataloader_num_workers: int = 0,
+    ray_num_cpus: int = 8,
+    ray_object_store_memory_gib: int = 4,
+    actor_param_offload: bool = False,
+    min_available_memory_gib: int = 64,
     val_before_train: bool = False,
     max_prompt_length: int = 8192,
     max_response_length: int = 4096,
@@ -115,7 +119,7 @@ def build_grpo_command(
         # training objective while reducing peak activation memory.
         "actor_rollout_ref.actor.fsdp_config.entropy_from_logits_with_chunking=True",
         "actor_rollout_ref.actor.fsdp_config.entropy_checkpointing=True",
-        "actor_rollout_ref.actor.fsdp_config.param_offload=True",
+        f"actor_rollout_ref.actor.fsdp_config.param_offload={str(actor_param_offload)}",
         "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True",
         f"actor_rollout_ref.rollout.name={rollout_backend}",
         f"actor_rollout_ref.rollout.tensor_model_parallel_size={rollout_tensor_parallel_size}",
@@ -148,6 +152,8 @@ def build_grpo_command(
         f"trainer.max_actor_ckpt_to_keep={max_actor_ckpt_to_keep}",
         f"trainer.resume_mode={resume_mode}",
         f"trainer.n_gpus_per_node={n_gpus}",
+        f"ray_kwargs.ray_init.num_cpus={ray_num_cpus}",
+        f"+ray_kwargs.ray_init.object_store_memory={ray_object_store_memory_gib * 1024**3}",
         "trainer.nnodes=1",
         f"trainer.save_freq={save_freq}",
         f"trainer.test_freq={test_freq}",
@@ -374,6 +380,10 @@ def cmd_train_grpo(args: argparse.Namespace) -> None:
         val_max_samples=args.val_max_samples,
         val_batch_size=args.val_batch_size,
         dataloader_num_workers=args.dataloader_num_workers,
+        ray_num_cpus=args.ray_num_cpus,
+        ray_object_store_memory_gib=args.ray_object_store_memory_gib,
+        actor_param_offload=args.actor_param_offload,
+        min_available_memory_gib=args.min_available_memory_gib,
         val_before_train=not args.no_val_before_train,
         max_prompt_length=args.max_prompt_length,
         max_response_length=args.max_response_length,
@@ -447,6 +457,8 @@ def cmd_train_grpo(args: argparse.Namespace) -> None:
         "export MKL_NUM_THREADS=${MKL_NUM_THREADS:-1}\n"
         "export RAY_memory_usage_threshold=${RAY_memory_usage_threshold:-0.90}\n"
         "export RAY_memory_monitor_refresh_ms=${RAY_memory_monitor_refresh_ms:-1000}\n"
+        f"export RAY_object_spilling_config=${{RAY_object_spilling_config:-'{{\"type\":\"filesystem\",\"params\":{{\"directory_path\":\"{exp_dir / 'ray_spill'}\"}}}}'}}\n"
+        f"export TERRABOX_MIN_AVAILABLE_MEMORY_GIB=${{TERRABOX_MIN_AVAILABLE_MEMORY_GIB:-{args.min_available_memory_gib}}}\n"
         "export TERRABOX_USE_DOCKER=true\n"
         "export no_proxy=localhost,127.0.0.1\n"
         "export TERRABOX_SERVICE_CALL_LOCKS=1\n"
@@ -459,6 +471,19 @@ def cmd_train_grpo(args: argparse.Namespace) -> None:
         f"{online_env}"
         + "\n"
         + "monitor_pid=''\n"
+        + "wait_for_memory() {\n"
+        + "  local required_kib=$((TERRABOX_MIN_AVAILABLE_MEMORY_GIB * 1024 * 1024))\n"
+        + "  while true; do\n"
+        + "    local available_kib\n"
+        + "    available_kib=\"$(awk '/MemAvailable:/{print $2}' /proc/meminfo)\"\n"
+        + "    if [ \"${available_kib:-0}\" -ge \"$required_kib\" ]; then\n"
+        + "      echo \"[$(date -Is)] CPU memory gate passed: $((available_kib / 1024 / 1024)) GiB available\"\n"
+        + "      return\n"
+        + "    fi\n"
+        + "    echo \"[$(date -Is)] Waiting for CPU memory: $((available_kib / 1024 / 1024)) GiB available, need ${TERRABOX_MIN_AVAILABLE_MEMORY_GIB} GiB\"\n"
+        + "    sleep 60\n"
+        + "  done\n"
+        + "}\n"
         + "monitor_resources() {\n"
         + "  local target_pid=\"$1\"\n"
         + "  while kill -0 \"$target_pid\" 2>/dev/null; do\n"
@@ -469,6 +494,7 @@ def cmd_train_grpo(args: argparse.Namespace) -> None:
         + "    sleep 10\n"
         + "  done\n"
         + "}\n"
+        + "wait_for_memory\n"
         + "set +e\n"
         + "("
         + " ".join(shlex.quote(str(part)) for part in cmd)
@@ -572,6 +598,29 @@ def main() -> None:
         type=int,
         default=0,
         help="veRL dataloader workers. Use 0/1 for memory-constrained online tool RL.",
+    )
+    p_train.add_argument(
+        "--ray-num-cpus",
+        type=int,
+        default=8,
+        help="Ray 可用 CPU 调度令牌；veRL 默认每张 GPU bundle 需要 3 个，在线双卡 actor 加 TaskRunner 至少需要 7，实际 CPU 内存由 object store 和 worker 数限制。",
+    )
+    p_train.add_argument(
+        "--ray-object-store-memory-gib",
+        type=int,
+        default=4,
+        help="Ray object store 上限（GiB）；超出的序列化轨迹落盘，避免默认按整机内存比例预留。",
+    )
+    p_train.add_argument(
+        "--actor-param-offload",
+        action="store_true",
+        help="将 actor 参数卸载到 CPU；会显著增加 CPU 内存，仅在 GPU 显存不足时启用。",
+    )
+    p_train.add_argument(
+        "--min-available-memory-gib",
+        type=int,
+        default=64,
+        help="启动 veRL 前要求的最小可用 CPU 内存（GiB）；不足时等待，避免与其他作业争抢触发 Ray OOM。",
     )
     p_train.add_argument(
         "--no-val-before-train",

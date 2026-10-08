@@ -293,7 +293,7 @@ class APIBankRolloutRunner:
     def run(self, prompt: str, task_ids: list[str], experiment: str) -> str:
         version = f"{experiment}_prompt"
         self.prompts.save(version, prompt, {"source": "APIBankRolloutRunner.run"})
-        return self.run_version(version, experiment, task_ids=task_ids)
+        return self.run_version(version, experiment, task_ids=task_ids, resume=True)
 
 
 def _messages_to_user_prompt(messages: list[dict[str, str]]) -> str:

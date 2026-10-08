@@ -5,6 +5,8 @@
 1. **离线首动作 GRPO 诊断**：只训练/评测单步 JSON action，不执行 Terrabox 工具。该链路只用于格式、显存和 reward 工程诊断，不能作为正式 OEA agent RL 主结果。
 2. **online veRL 真实工具 RL**：通过 veRL multi-turn `ToolAgentLoop` 接入真实 Terrabox 工具，模型生成动作后执行工具、回填 observation，并由完整 episode 的可观察事件计算 reward。这是后续 Qwen 3B/4B RL 的正式主线。
 
+Swift / veRL 双框架适配不属于 ExperienceEvo 专属逻辑，后续统一放在 `src/terrabox/evolution/agent_rl/` 公共层。`experience_evo_rl` 只保留 ExperienceEvo 如何进入 prompt、reward 与消融实验的具体方法逻辑。
+
 ## 口径
 
 - 训练 prompt 只包含任务公开文本、公开输入文件和公开工具目录；可选注入 ExperienceEvo 的 rollout-derived 过程经验摘要。
@@ -28,6 +30,7 @@
 - validation 安全策略：online OEA 不依赖 veRL 默认的全量同批 validation。默认应显式设置 `data.val_batch_size`、`data.val_max_samples` 和 `data.dataloader_num_workers`；在 24GB GPU + 126GiB CPU 内存机器上，2000 条训练的安全起点是 `val_max_samples=8`、`val_batch_size=1`、`dataloader_num_workers=0`、`val_before_train=False`。这只限制训练期健康检查，不改变完整 1900 条 train 数据，也不替代最终 OEA test 全量评测。
 - 记忆压缩：工具原始 observation 先完整写入 `metrics/raw_tool_observations.jsonl`，再由 `online_tools.py` 的确定性压缩器送回模型。压缩器保留头部、尾部以及错误、artifact 路径、统计值和图层等关键行，默认上下文预算为 8192 字符（可用 `TERRABOX_ONLINE_TOOL_CONTEXT_MAX_CHARS` 调整）。`metrics/online_episode_traces.jsonl` 记录每次调用的原始/压缩字符数和保留行数。训练与评测必须使用同一预算；改变预算后旧 online 结果不可直接混合。
 - 显存配置：pure online GRPO 关闭 actor KL/entropy 分支（`use_kl_loss=False`）。实验不使用 KL reward，因此不改变 reward；关闭它可避免 24GB 卡在 old-logprob 阶段为全词表 entropy 额外申请数 GB 显存。online 训练默认将 `actor_ppo_max_token_len_per_gpu`、`rollout_log_prob_max_token_len_per_gpu` 和 `ref_log_prob_max_token_len_per_gpu` 设为 8192；如果再次在 old-logprob 或 actor update 阶段 OOM，优先降低这些训练侧 token 上限，不要先降低任务 prompt、response 或工具 observation 的语义预算。
+- CPU 内存稳定性：online runner 默认给 Ray `--ray-num-cpus 8` 个调度令牌。veRL 默认每张 GPU placement bundle 需要 3 个令牌，双卡 actor 加 TaskRunner 至少需要 7；这不是预留 CPU 内存。将 `--ray-object-store-memory-gib` 固定为 4 GiB，并把超出的可序列化对象落盘到实验目录 `ray_spill/`；禁止 actor 参数卸载到 CPU。每个 episode trace 写入后执行 Python GC 与 libc arena trim，降低长寿命 agent worker 保留大 observation 的风险。生成的启动脚本会在可用 CPU 内存不足 `--min-available-memory-gib`（默认 64 GiB）时等待，不会与其他训练/批处理作业竞争资源后再由 Ray 强制杀 worker；正式恢复训练建议保留 `--save-freq 50` 和 `--resume-mode resume_path`。
 - 长序列配置：如果真实 rollout 序列超过训练侧 token 上限，veRL 会在 old-logprob 动态切 batch 前直接断言失败；此时应把训练侧 token 上限升到覆盖实际序列长度（当前 3B online 安全值 10240），并同步降低 `train_batch_size` 到 1 控制显存。不要用低于实际序列长度的 max-token 上限伪装“降并发”。
 - 不要给 online veRL/vLLM 路径设置 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`；当前 colocated vLLM 会走 V1 memory pool，该配置会让 engine core 初始化失败。
 - RemoteSAM：online runner 默认将 `/data1/yuhongjie2/RemoteSAM/pretrained_weights` 作为 `REMOTESAM_CHECKPOINT_HOST` 挂载，并关闭 EPOC，保证离线加载本地 BERT 权重；若路径不存在，应先中止实验而不是让服务错误进入 reward。

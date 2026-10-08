@@ -22,15 +22,23 @@ Guidelines:
   metrics and `metric_specs()` with directions so the two-stage optimizer can
   reason about real gains and regressions.
 - The optional `--proposal-format patch` may compile only the generic protocol
-  kinds `tool_selection`, `argument_validation`, `error_recovery`, and
-  `termination_and_repetition`. Do not inject project-specific tool names,
-  task IDs, paths, benchmark names, entities, gold labels, or fixed workflows
-  into a patch. The compiler deterministically rejects task IDs, paths, and
-  known benchmark markers; the proposal prompt prohibits the remaining cases.
+  kinds `tool_selection`, `argument_validation`, `error_recovery`,
+  `termination_and_repetition`, `answer_contract`, `tool_output_security`, and
+  `candidate_metric_guard`. Do not inject project-specific tool names, task
+  IDs, paths, benchmark names, entities, gold labels, or fixed workflows into a
+  patch. The compiler deterministically rejects task IDs, paths, known
+  benchmark markers, and placeholder evidence; every patch must cite concrete
+  trace or metric evidence.
 - A patch candidate is accepted only after the adapter's `RolloutRunner` runs
   the predeclared fixed dev task IDs and passes the real metric gate. Static
   candidate ranking, gold trajectories, or evaluator labels are not a
   substitute for validation.
+- Long-running Stage1/Stage2 validation must checkpoint optimizer candidates
+  before launching paid rollout validation. Stage1 should persist the generated
+  typed patch proposals, and Stage2/Stage3 should pass `candidate_cache_path` to
+  `ContrastiveUpdater`; resume must reuse the same candidate prompts and
+  fingerprints instead of regenerating new candidates after a watcher/session is
+  interrupted.
 - Experiment outputs produced by an adapter should live under that adapter's
   `experiments/` directory, with generated prompt versions saved under
   `evolution_store/promptevo/<project>/versions/`.
@@ -74,7 +82,7 @@ Naming example:
 
 ```text
 evolution_store/promptevo/terrabox/versions/promptevo_oea_stage1_sam2refresh_20260630_075048.txt
-src/terrabox/evolution/promptevo/adapters/terrabox/experiments/promptevo_oea_stage1_sam2refresh_20260630_075048/
+tmp/promptevo_terrabox_experiments/promptevo_oea_stage1_sam2refresh_20260630_075048/
 tmp/trajectories/promptevo_oea_stage1_sam2refresh_20260630_075048/standard/results/
 ```
 
@@ -193,7 +201,7 @@ The tau2-bench adapter optimizes only
 `src/tau2/agent/llm_agent.py::AGENT_INSTRUCTION`. Do not optimize dynamic
 `domain_policy`, tool schemas, dialogue history, task state, gold actions, or
 reward labels. Adapter-owned tau2 runs should write outputs under
-`adapters/tau2_bench/experiments/<experiment>/` and use tau2 final reward plus
+`tmp/promptevo_tau2_experiments/<experiment>/` and use tau2 final reward plus
 reward components as metrics. Reference actions are only required when tau2
 includes ACTION in a task's `reward_basis`.
 
@@ -205,7 +213,7 @@ Base -> Stage1 -> Stage2 pipeline. The formal local-Qwen configuration runs the
 four v1.2.2 suites on four single-GPU vLLM lanes, using AgentDojo's
 `vllm_parsed` provider and Hermes native tool calls. Every stage includes both a
 clean utility phase and an `important_instructions` attack phase. Results are
-resumable and live under `agentdojo/experiments/<group>/`; metricViewer
+resumable and live under `tmp/promptevo_agentdojo_experiments/<group>/`; metricViewer
 discovers those top-level groups and legacy upstream runs separately.
 
 AgentDojo metrics must stay faithful to its labels: clean user-task utility,

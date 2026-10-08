@@ -10,7 +10,7 @@ unchanged.
 - Upstream version: package `0.1.35`, git `089ed468`, benchmark `v1.2.2`
 - Static prompt source: `src/agentdojo/data/system_messages.yaml`, key `default`
 - Prompt versions: `evolution_store/promptevo/agentdojo/versions/`
-- Adapter experiments: `src/terrabox/evolution/promptevo/adapters/agentdojo/experiments/`
+- Adapter experiments: `tmp/promptevo_agentdojo_experiments/`
 
 The upstream prompt file is never overwritten. Each run passes the selected
 prompt through AgentDojo's official `--system-message` override and saves a copy
@@ -172,9 +172,23 @@ version's traces and proposes a conservative first edit, while Stage2 v2 uses
 the exact Base-to-Stage1 prompt diff plus paired same-task traces to keep gains
 and narrowly repair regressions.
 
+Stage1/Stage2 are explicitly checkpointed for long LongCat runs. Stage1 writes
+typed patch proposals to `optimization/stage1_candidates.json` before starting
+real dev validation. Stage2 and optional Stage3 pass `candidate_cache_path` to
+the contrastive updater, so resumed runs reuse the same candidate prompts and
+fingerprints instead of generating a fresh candidate set after the Codex session
+or watcher is interrupted. If an older run started candidate validation before
+Stage1 checkpointing existed, the adapter can recover candidate prompts from
+`validation/stage1_candidate_*/active_system_message.txt` and write the cache
+before resuming. AgentDojo Stage2 is also forced through typed protocol-patch
+generation, not whole-prompt free rewrite.
+
 The pipeline uses `force_rerun=False`. Existing upstream JSON files are the
 checkpoint; rerunning the same group skips completed tasks and phases. Every
 rollout invocation owns its four vLLM containers and removes them in `finally`.
+The global AgentDojo rollout lock now waits by default instead of failing fast;
+use `TERRABOX_AGENTDOJO_ROLLOUT_LOCK_TIMEOUT_SECONDS` and
+`TERRABOX_AGENTDOJO_ROLLOUT_LOCK_POLL_SECONDS` to tune long watcher behavior.
 It also verifies every job's valid result count and the stage-wide total before
 writing `pipeline_status=complete`; a successful CLI exit with missing JSON is
 recorded as `incomplete_results` and retried. If a single sample deterministically
@@ -198,7 +212,7 @@ paid-API checkpoints in `optimization/stage1_protocol_patch.json` and
 ## Experiment layout
 
 ```text
-experiments/<group>/
+tmp/promptevo_agentdojo_experiments/<group>/
   active_system_message.txt
   experiment_meta.json
   preflight.json
@@ -247,13 +261,14 @@ recursively reads its authoritative AgentDojo JSON traces. Legacy upstream
   is put at the back of the queue; `TERRABOX_AGENTDOJO_QUEUE_RETRIES` (default
   12) caps this so real benchmark or adapter bugs still surface. Even with one
   API worker, a single AgentDojo sample can issue rapid multi-turn model calls;
-  external API calls therefore go through Terrabox's shared
-  `pace_remote_llm_request` limiter. Set `TERRABOX_REMOTE_LLM_WORKLOAD=agentdojo`
-  and tune `TERRABOX_REMOTE_LLM_MIN_INTERVAL_SECONDS` / provider-specific aliases
-  for pacing. The default lock is shared
-  `tmp/service_locks/remote_llm_longcat.lock`, with JSON workload state beside it,
-  so tau2, AgentDojo, and future ExperienceEvo LongCat jobs share one global
-  limit and rotate fairly by workload instead of using independent adapter locks.
+external API calls therefore go through Terrabox's shared
+`pace_remote_llm_request` limiter. Leave `TERRABOX_REMOTE_LLM_WORKLOAD` unset
+for single-family PromptEvo LongCat runs; set it only when multiple workload
+families must share LongCat fairly. Tune `TERRABOX_REMOTE_LLM_MIN_INTERVAL_SECONDS`
+/ provider-specific aliases for pacing. The default lock is shared
+`tmp/service_locks/remote_llm_longcat.lock`, with JSON workload state beside it,
+so concurrent LongCat jobs share one global limit instead of using independent
+adapter locks.
   The old `TERRABOX_AGENTDOJO_API_*` and `TERRABOX_AGENTDOJO_LONGCAT_*` names
   remain compatibility aliases. Restart the watcher or rollout parent after
   changing pacing/workload env vars, because running Python parents keep their

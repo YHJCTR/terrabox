@@ -16,7 +16,7 @@ Keep that boundary intact for every experiment.
 
 Put adapter-owned experiments under:
 
-`src/terrabox/evolution/promptevo/adapters/tau2_bench/experiments/`
+`tmp/promptevo_tau2_experiments/`
 
 Each run should record:
 
@@ -26,6 +26,16 @@ Each run should record:
 - `stdout.log` and `stderr.log`
 - `tau2_results/` copied from tau2 `data/simulations/<save_to>/`
 - `metrics_summary.json` when results exist
+
+统一六方法比较入口为 `comparison.py`。它严格只替换 tau2 的
+`AGENT_INSTRUCTION`，并把 GEPA 标为 official optimizer adapter，把
+SCOPE/AHO/EvoTool 标为 agent-level adapted；不得把这些 adapted 版本写成
+完整官方 runtime 复现。正式队列使用 `queue.lock`、逐方法 checkpoint 和
+`coverage.json`，测试阶段必须覆盖 official test 的全部任务及 profile 指定
+trial 数。
+
+当前 `banking_knowledge` 的 train/test helper 存在重叠，比较入口会使用固定
+seed 的本地 60/20/20 划分，并在 manifest 中记录该事实。
 
 Do not overwrite tau2 source files to test a prompt. Use the adapter runner's
 process-local prompt override.

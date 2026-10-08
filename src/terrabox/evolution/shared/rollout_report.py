@@ -12,6 +12,7 @@ import glob
 import json
 import os
 import sys
+from datetime import datetime
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -190,6 +191,112 @@ def status_report(results_dir: str | Path, *, scope: str = "all", total: int | N
     }
 
 
+def experiment_dir_from_results(results_dir: str | Path) -> Path:
+    path = Path(results_dir).resolve()
+    return path.parent if path.name == "results" else path
+
+
+def _fmt_pct(value: float | int | None, digits: int = 2) -> str:
+    if value is None:
+        return "--"
+    return f"{float(value):.{digits}f}%"
+
+
+def _fmt_num(value: float | int | None, digits: int = 3) -> str:
+    if value is None:
+        return "--"
+    return f"{float(value):.{digits}f}"
+
+
+def _fmt_float(value: float | int | None, digits: int = 2) -> str:
+    if value is None:
+        return "--"
+    return f"{float(value):.{digits}f}"
+
+
+def metrics_doc_markdown(report: dict[str, Any], *, title: str | None = None) -> str:
+    """Render a compact Chinese Markdown metrics document for an experiment dir.
+
+    The document is intentionally generated from `results/*.json` through the
+    same summarize/status path used by the CLI, so it is safe after resume,
+    sharded lanes, or partial backfills.
+    """
+    summary = report.get("summary") or {}
+    exp_dir = experiment_dir_from_results(report["results_dir"])
+    title = title or exp_dir.name
+    total_tokens = int(round((summary.get("tokens_per_task") or 0) * (summary.get("n") or 0)))
+    lines = [
+        f"# {title} 指标汇总",
+        "",
+        f"生成时间：{datetime.now().isoformat(timespec='seconds')}",
+        "",
+        "## 口径",
+        "",
+        "- 指标从 `results/*.json` 只读重算生成，适用于断点续跑、分 lane 合并和补跑后的目录。",
+        "- 工具序列指标使用 `oea15` 口径：最多 15 轮工具调用；分类 F1 使用 OEA Table4 风格的工具类别 micro F1。",
+        "- 本文档不自动计算最终答案正确率；Answer / Gen Acc. 需要单独接 judge 后再补充。",
+        "",
+        "## 进度与状态",
+        "",
+        "| 字段 | 数值 |",
+        "|---|---:|",
+        f"| Scope | `{report.get('scope')}` |",
+        f"| Results dir | `{report.get('results_dir')}` |",
+        f"| 完成数 | {report.get('done', 0)} / {report.get('total', 0)} |",
+        f"| 完成率 | {_fmt_pct(report.get('progress_pct'))} |",
+        f"| 状态分布 | `{summary.get('status', {})}` |",
+        f"| Success | {_fmt_pct(summary.get('success_rate'))} |",
+        f"| Has tool error | {_fmt_pct(summary.get('has_tool_error'))} |",
+        "",
+        "## 工具链指标",
+        "",
+        "| 指标 | 数值 |",
+        "|---|---:|",
+        f"| Set Precision / Recall / F1 | {_fmt_num(summary.get('set_precision'))} / {_fmt_num(summary.get('set_recall'))} / {_fmt_num(summary.get('set_f1'))} |",
+        f"| Multiset Precision / Recall / F1 | {_fmt_num(summary.get('multiset_precision'))} / {_fmt_num(summary.get('multiset_recall'))} / {_fmt_num(summary.get('multiset_f1'))} |",
+        f"| Exact / Ordered | {_fmt_pct(summary.get('exact_match'))} / {_fmt_pct(summary.get('ordered_exact'))} |",
+        f"| LCS ratio | {_fmt_num(summary.get('lcs_ratio'))} |",
+        f"| OEA AnyOrder / SameOrder / Unique | {_fmt_pct(summary.get('any_order'))} / {_fmt_pct(summary.get('same_order'))} / {_fmt_pct(summary.get('unique'))} |",
+        f"| Category F1 P/O/L/GIS | {_fmt_float(summary.get('f1_perception'))} / {_fmt_float(summary.get('f1_operation'))} / {_fmt_float(summary.get('f1_logic'))} / {_fmt_float(summary.get('f1_gis'))} |",
+        "",
+        "## 行为与资源",
+        "",
+        "| 指标 | 数值 |",
+        "|---|---:|",
+        f"| Empty-call rate | {_fmt_pct(summary.get('empty_rate'))} |",
+        f"| Max-turn cap rate | {_fmt_pct(summary.get('cap_rate'))} |",
+        f"| Same-tool ≥4 tasks | {_fmt_float(summary.get('repeat4_tasks'), 0)} |",
+        f"| Errors / task | {_fmt_float(summary.get('errors_per_task'))} |",
+        f"| Tools / task | {_fmt_float(summary.get('tools_per_task'))} |",
+        f"| LLM calls / task | {_fmt_float(summary.get('llm_per_task'))} |",
+        f"| Tokens / task | {_fmt_float(summary.get('tokens_per_task'), 0)} |",
+        f"| Total tokens | {total_tokens:,} |",
+        f"| Time / task | {_fmt_float(summary.get('time_per_task'), 1)}s |",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def write_metrics_artifacts(
+    results_dir: str | Path,
+    *,
+    scope: str = "all",
+    total: int | None = None,
+    output_dir: str | Path | None = None,
+    title: str | None = None,
+) -> dict[str, str]:
+    """Write `metrics_summary.json` and `metrics_summary.md` into an experiment dir."""
+    results_dir = Path(results_dir).resolve()
+    out_dir = Path(output_dir).resolve() if output_dir else experiment_dir_from_results(results_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rep = status_report(results_dir, scope=scope, total=total)
+    json_path = out_dir / "metrics_summary.json"
+    md_path = out_dir / "metrics_summary.md"
+    json_path.write_text(json.dumps(rep, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    md_path.write_text(metrics_doc_markdown(rep, title=title), encoding="utf-8")
+    return {"json": str(json_path), "markdown": str(md_path)}
+
+
 def compare_experiments(cur_dir: str | Path, base_dir: str | Path) -> dict[str, Any]:
     cur_ids = result_ids(cur_dir)
     base_ids = result_ids(base_dir)
@@ -330,6 +437,14 @@ def cli_main(argv: list[str] | None = None) -> None:
     status.add_argument("--scope", choices=["offline", "online", "all"], default="all")
     status.add_argument("--total", type=int, default=None)
 
+    write_doc = sub.add_parser("write-doc", help="write metrics_summary.json/md for one rollout")
+    write_doc.add_argument("experiment", nargs="?", help="experiment name or results directory")
+    write_doc.add_argument("--results-dir", help="explicit results directory")
+    write_doc.add_argument("--scope", choices=["offline", "online", "all"], default="all")
+    write_doc.add_argument("--total", type=int, default=None)
+    write_doc.add_argument("--output-dir", help="where to write metrics_summary.*; default experiment dir")
+    write_doc.add_argument("--title", help="Markdown title prefix")
+
     compare = sub.add_parser("compare", help="paired comparison over common completed task_id")
     compare.add_argument("current", help="current experiment name or results directory")
     compare.add_argument("baseline", help="baseline experiment name or results directory")
@@ -343,6 +458,20 @@ def cli_main(argv: list[str] | None = None) -> None:
             parser.error("status requires an experiment or --results-dir")
         results_dir = Path(args.results_dir).resolve() if args.results_dir else resolve_results_dir(target)
         print_status(status_report(results_dir, scope=args.scope, total=args.total))
+        return
+    if args.command == "write-doc":
+        target = args.results_dir or args.experiment
+        if not target:
+            parser.error("write-doc requires an experiment or --results-dir")
+        results_dir = Path(args.results_dir).resolve() if args.results_dir else resolve_results_dir(target)
+        paths = write_metrics_artifacts(
+            results_dir,
+            scope=args.scope,
+            total=args.total,
+            output_dir=args.output_dir,
+            title=args.title,
+        )
+        print(json.dumps(paths, ensure_ascii=False, indent=2))
         return
     if args.command == "compare":
         cur_dir = Path(args.current_results_dir).resolve() if args.current_results_dir else resolve_results_dir(args.current)

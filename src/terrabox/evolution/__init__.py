@@ -3,16 +3,13 @@
 All methods augment agent behavior via system prompt injection — no existing
 code is modified. Each method can be used independently or combined.
 
-Papers implemented & original ideas:
+Active methods and maintained baselines:
   - SkillRL    (arXiv 2602.08234): Hierarchical skill library + recursive evolution
   - EvoSkill   (arXiv 2603.02766): Multi-agent failure-driven skill discovery
   - AgentEvolver (arXiv 2511.10395): Self-questioning + navigating + attributing
   - MemRL      (arXiv 2601.03192): Non-parametric RL on episodic memory
-  - CausalEvo  (original):         Counterfactual CCA + CTFM + causal graph synthesis
-  - RewardEvo  (original):         LLM-as-judge for annotation-free self-evolution
-  - GraphSkillEvo (original):      Relational skill graph + graph-based routing
-  - CausalTextEvo (original):      Causal-aware textual gradient optimization
-  - CausalPolicyEvo (original):    External policy-state evolution for tool calling
+  - PromptEvo: Static prompt optimization and protocol patching
+  - ExperienceEvo: Rollout-derived external experience memory
 
 Quick start:
     from terrabox.evolution import get_prompt_augmenter
@@ -45,15 +42,13 @@ def get_prompt_augmenter(
     """Return a ready-to-use PromptAugmenter for the specified evolution method.
 
     Args:
-        method: One of "skillrl", "skillrl_rollout", "skillrl_full", "evoskill", "agentevolver", "memrl", "memrl_full", "memrl_full_source", "reflection", "experience_evo", "ace_playbook", "memento_casebank", "evolver_lifecycle", "causalevo", "rewardevo", "graphskillevo", "seqgraphevo", "causaltextevo", "causalpolicyevo", "expel".
+        method: One of "skillrl", "skillrl_rollout", "skillrl_full", "evoskill", "agentevolver", "memrl", "memrl_full", "memrl_full_source", "reflection", "experience_evo", "ace_playbook", "memento_casebank", "evolver_lifecycle", "reasoningbank", "reme", "expel".
         store_dir: Directory containing evolution store. Defaults to
                    "evolution_store/{method}". For memrl, pass memory_db=...
         top_k: Number of skills/memories to inject per query.
         **kwargs: Method-specific kwargs:
                   memrl: memory_db="path/to/episodic_memory.db"
                   skillrl: store_dir="path/to/skillrl/store"
-                  rewardevo: memory_db="path/to/memrl/episodic_memory.db"
-                  graphskillevo: skillrl_store_dir="path", skill_graph_path="path"
 
     Returns:
         PromptAugmenter instance with augment(user_query) method.
@@ -209,6 +204,18 @@ def get_prompt_augmenter(
             q_use_smoothing_k=float(kwargs.get("q_use_smoothing_k", 5.0)),
         )
 
+    elif method in {"experience_evo_boundary", "experienceevo_boundary", "product_transition_evo_boundary"}:
+        from .experience_evo.boundary import ExperienceEvoBoundaryRuntime
+
+        boundary_top_k = int(kwargs.get("boundary_top_k", kwargs.get("v4_top_k", 3 if top_k == 5 else top_k)))
+        return ExperienceEvoBoundaryRuntime(
+            store_dir or "evolution_store/experience_evo/oea_train2000_v4_clean_boundary_v1",
+            top_k=boundary_top_k,
+            min_q=float(kwargs.get("min_q", 0.0)),
+            max_risk=float(kwargs.get("max_risk", 0.75)),
+            q_use_smoothing_k=float(kwargs.get("q_use_smoothing_k", 5.0)),
+        )
+
     elif method in {"experience_evo_v5", "experienceevo_v5", "product_transition_evo_v5"}:
         from .experience_evo.v5 import ExperienceEvoV5Runtime
 
@@ -297,6 +304,14 @@ def get_prompt_augmenter(
             top_k=top_k,
         )
 
+    elif method in {"reasoningbank", "reasoning_bank"}:
+        from .reasoningbank.prompt_injector import ReasoningBankPromptInjector
+        return ReasoningBankPromptInjector(store_dir or "evolution_store/reasoningbank", top_k=top_k, **kwargs)
+
+    elif method in {"reme", "reme_procedural"}:
+        from .reme.prompt_injector import ReMePromptInjector
+        return ReMePromptInjector(store_dir or "evolution_store/reme", top_k=top_k, **kwargs)
+
     elif method in {"evolver", "evolver_lifecycle", "evolver_lifecycle_strict", "evolver_adapted"}:
         from .evolver_lifecycle.prompt_injector import EvolveRLifecyclePromptInjector
 
@@ -305,75 +320,6 @@ def get_prompt_augmenter(
             top_k=top_k,
             threshold=float(kwargs.get("threshold", 0.0)),
         )
-
-    elif method == "causalevo":
-        if store_dir is None:
-            store_dir = kwargs.get("store_dir", "evolution_store/causalevo")
-        from .causalevo.tool_function_model import CTFMStore
-        from .causalevo.prompt_injector import CausalEvoPromptInjector
-
-        store = CTFMStore(os.path.join(store_dir, "causal_tool_models.json"))
-        ablation = kwargs.get("ablation", None)
-        return CausalEvoPromptInjector(store, top_k=top_k, use_ablation=ablation)
-
-    elif method == "rewardevo":
-        memory_db = kwargs.get(
-            "memory_db",
-            os.path.join(store_dir or "evolution_store/rewardevo", "episodic_memory.db"),
-        )
-        from .rewardevo.prompt_injector import RewardEvoPromptInjector
-
-        return RewardEvoPromptInjector(memory_db, top_k=top_k)
-
-    elif method == "graphskillevo":
-        # New interface: tool co-occurrence graph
-        tool_graph_path = kwargs.get(
-            "tool_graph_path",
-            kwargs.get("skill_graph_path", "evolution_store/graphskillevo/tool_graph.json"),
-        )
-        traj_file = kwargs.get("traj_file", None)
-        from .graphskillevo.prompt_injector import GraphSkillEvoPromptInjector
-
-        return GraphSkillEvoPromptInjector(
-            tool_graph_path=tool_graph_path,
-            traj_file=traj_file,
-            top_k=top_k,
-        )
-
-    elif method == "seqgraphevo":
-        seq_graph_path = kwargs.get(
-            "seq_graph_path",
-            os.path.join(store_dir or "evolution_store/seqgraphevo", "seq_graph.json"),
-        )
-        traj_file = kwargs.get("traj_file", None)
-        from .seqgraphevo.prompt_injector import SeqGraphEvoPromptInjector
-
-        return SeqGraphEvoPromptInjector(
-            seq_graph_path=seq_graph_path,
-            traj_file=traj_file,
-            top_k=top_k,
-        )
-
-    elif method == "causaltextevo":
-        if store_dir is None:
-            store_dir = kwargs.get("store_dir", "evolution_store/causaltextevo")
-        from .causaltextevo.knowledge_state import KnowledgeState
-        from .causaltextevo.prompt_injector import CausalTextEvoPromptInjector
-
-        state_path = os.path.join(store_dir, "knowledge_state.json")
-        state = KnowledgeState.load(state_path)
-        ablation = kwargs.get("ablation", None)
-        return CausalTextEvoPromptInjector(state, top_k=top_k, ablation=ablation)
-
-    elif method == "causalpolicyevo":
-        if store_dir is None:
-            store_dir = kwargs.get("store_dir", "evolution_store/causalpolicyevo")
-        from .causalpolicyevo.policy_state import PolicyState
-        from .causalpolicyevo.prompt_injector import CausalPolicyEvoPromptInjector
-
-        state_path = os.path.join(store_dir, "policy_state.json")
-        state = PolicyState.load(state_path)
-        return CausalPolicyEvoPromptInjector(state, top_k=top_k)
 
     elif method in {"expel", "expel_live", "expel_official"}:
         if store_dir is None:
@@ -403,9 +349,9 @@ def get_prompt_augmenter(
     else:
         raise ValueError(
             f"Unknown evolution method: {method!r}. "
-            f"Choose from: 'skillrl', 'skillrl_rollout', 'skillrl_full', 'evoskill', 'agentevolver', 'memrl', 'memrl_full', 'memrl_full_source', 'causalevo', "
-            f"'reflection', 'experience_evo', 'experience_evo_v5_hybrid_qwen', 'rewardevo', 'graphskillevo', 'seqgraphevo', 'causaltextevo', 'causalpolicyevo', "
-            f"'ace_playbook', 'memento_casebank', 'evolver_lifecycle', 'expel', 'selfcritic'"
+            f"Choose from: 'skillrl', 'skillrl_rollout', 'skillrl_full', 'evoskill', 'agentevolver', 'memrl', 'memrl_full', 'memrl_full_source', "
+            f"'reflection', 'experience_evo', 'experience_evo_v5_hybrid_qwen', "
+            f"'ace_playbook', 'memento_casebank', 'evolver_lifecycle', 'reasoningbank', 'reme', 'expel', 'selfcritic'"
         )
 
 

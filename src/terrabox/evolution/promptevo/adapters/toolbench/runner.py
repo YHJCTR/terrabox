@@ -30,7 +30,9 @@ from .core import (
 )
 
 
-DEFAULT_TOOLBENCH_EXPERIMENTS_DIR = os.path.join(os.path.dirname(__file__), "experiments")
+DEFAULT_TOOLBENCH_EXPERIMENTS_DIR = str(
+    Path(__file__).resolve().parents[6] / "tmp" / "promptevo_toolbench_experiments"
+)
 DEFAULT_STABLE_GROUPS = (
     "G1_instruction",
     "G1_category",
@@ -51,9 +53,11 @@ STABLE_TOOLBENCH_REQUIRED_IMPORTS = (
 def stable_toolbench_has_core_dependencies(
     stable_root: str = DEFAULT_STABLE_TOOLBENCH_ROOT,
     python_executable: str = sys.executable,
-    timeout: int = 90,
+    timeout: int | None = None,
+    disable_cuda: bool = False,
 ) -> tuple[bool, str]:
     """Check whether the official StableToolBench inference pipeline imports."""
+    timeout = int(os.getenv("TERRABOX_TOOLBENCH_PREFLIGHT_TIMEOUT_SECONDS", str(timeout or 300)))
     code = r'''
 import importlib
 import os
@@ -79,6 +83,10 @@ print(pipeline_runner.__name__)
     env["STABLE_TOOLBENCH_ROOT"] = stable_root
     env["STABLE_TOOLBENCH_REQUIRED_IMPORTS"] = ",".join(STABLE_TOOLBENCH_REQUIRED_IMPORTS)
     env["PYTHONPATH"] = _toolbench_pythonpath(stable_root, env.get("PYTHONPATH", ""))
+    if disable_cuda:
+        # The chatgpt_function/LongCat path never serves a local agent model.
+        # Avoid importing Torch against GPUs owned by unrelated training jobs.
+        env["CUDA_VISIBLE_DEVICES"] = ""
     proc = subprocess.run(
         [python_executable, "-c", code],
         cwd=stable_root,
@@ -172,7 +180,7 @@ def _install_stable_import_compat() -> None:
                     payload["tool_choice"] = tool_choice
                 pace_remote_llm_request(
                     "longcat",
-                    workload=os.getenv("TERRABOX_REMOTE_LLM_WORKLOAD", "toolbench"),
+                    workload=os.getenv("TERRABOX_REMOTE_LLM_WORKLOAD"),
                 )
                 client = OpenAI(base_url=base_url, api_key=key)
                 response = client.chat.completions.create(**payload)
@@ -263,6 +271,7 @@ def _prepare_query_file(
     input_query_file: str,
     output_dir: str,
     task_ids: Optional[list[str]] = None,
+    allow_index_ids: bool = True,
 ) -> str:
     if not task_ids:
         return input_query_file
@@ -278,7 +287,7 @@ def _prepare_query_file(
             continue
         task_id = str(row.get("query_id", idx))
         index_id = str(idx)
-        if task_id not in keep and index_id not in keep:
+        if task_id not in keep and (not allow_index_ids or index_id not in keep):
             continue
         copied = dict(row)
         copied.setdefault("query_id", idx)
@@ -431,6 +440,7 @@ class StableToolBenchRolloutRunner:
         prompt: str | None = None,
         dry_run: bool = False,
         check: bool = True,
+        allow_index_ids: bool = True,
     ) -> str:
         cfg = run_config or self.run_config
         exp_dir = stable_experiment_dir(experiment, self.output_dir)
@@ -445,6 +455,7 @@ class StableToolBenchRolloutRunner:
             cfg.resolved_input_query_file(),
             exp_dir,
             task_ids=task_ids,
+            allow_index_ids=allow_index_ids,
         )
         output_answer_file = stable_group_results(exp_dir, cfg.group)
         if cfg.overwrite and os.path.exists(output_answer_file):
@@ -483,6 +494,7 @@ class StableToolBenchRolloutRunner:
         ok, reason = stable_toolbench_has_core_dependencies(
             stable_root=cfg.stable_root,
             python_executable=self.python_executable,
+            disable_cuda=cfg.env_overrides.get("CUDA_VISIBLE_DEVICES") == "",
         )
         if not ok:
             _write_json(

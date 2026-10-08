@@ -387,12 +387,18 @@ def _fmt_metric_summary(agg_a: dict, agg_b: dict, specs=None) -> str:
 
 
 class ContrastiveOptimizer:
-    def __init__(self, llm: Optional[LLMClient] = None, meta_prompt_version: str = "v1"):
+    def __init__(
+        self,
+        llm: Optional[LLMClient] = None,
+        meta_prompt_version: str = "v1",
+        protocol_mode: str = "legacy",
+    ):
         if llm is None:
             from ..shared.llm_client import EvolutionLLMClient
             llm = EvolutionLLMClient()
         self.llm = llm
         self.meta_prompt_version = meta_prompt_version
+        self.protocol_mode = protocol_mode
 
     def diagnose(self, prompt_a: str, prompt_b: str, agg_a: dict, agg_b: dict,
                  cases: list[PairedCase], n_batches: int = 2,
@@ -507,10 +513,13 @@ class ContrastiveOptimizer:
                 prompt_b,
                 "Objective: " + objective,
                 comparison="Paired base/stage1 attribution evidence:\n" + evidence,
+                protocol_mode=self.protocol_mode,
             )
             try:
                 data = self.llm.call_json(prompt, system=_SYSTEM, max_tokens=max_tokens)
-                proposal: PatchProposal = parse_patch_proposal(data, prompt_b)
+                proposal: PatchProposal = parse_patch_proposal(
+                    data, prompt_b, self.protocol_mode
+                )
             except ProtocolPatchError:
                 continue
             out.append({

@@ -369,6 +369,24 @@ def cmd_build_v5_hybrid_index(args: argparse.Namespace) -> None:
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
+def cmd_build_boundary(args: argparse.Namespace) -> None:
+    """Copy a v4-clean store and attach deterministic boundary rules."""
+    from .boundary.builder import build_boundary_store
+
+    if args.train_results:
+        from .boundary.learning import build_learned_boundary
+        if not args.eval_tasks:
+            raise ValueError("--eval-tasks is required for train/eval isolation")
+        summary = build_learned_boundary(args.parent_store, args.output_store,
+                                        train_results=args.train_results, eval_tasks=args.eval_tasks,
+                                        min_support=args.min_boundary_support, replay_dir=args.boundary_replay_dir,
+                                        research_dir=args.boundary_research_dir,
+                                        proposer_url=args.boundary_proposer_url, auditor_url=args.boundary_auditor_url)
+    else:
+        summary = build_boundary_store(args.parent_store, args.output_store, overwrite=args.overwrite)
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
 def cmd_preview_v2(args: argparse.Namespace) -> None:
     from .v2.runtime import ExperienceEvoV2Runtime
 
@@ -634,6 +652,30 @@ def build_parser() -> argparse.ArgumentParser:
     p_build_v5_hybrid_index.add_argument("--batch-size", type=int, default=24)
     p_build_v5_hybrid_index.add_argument("--force", action="store_true", help="Re-embed all family documents")
     p_build_v5_hybrid_index.set_defaults(func=cmd_build_v5_hybrid_index)
+
+    p_build_boundary = sub.add_parser(
+        "build-boundary",
+        help="Create an independent counterexample-boundary store from v4-clean",
+    )
+    p_build_boundary.add_argument("--parent-store", required=True)
+    p_build_boundary.add_argument("--output-store", required=True)
+    p_build_boundary.add_argument("--overwrite", action="store_true")
+    p_build_boundary.add_argument("--train-results", help="Parent-manifest training results for condition learning")
+    p_build_boundary.add_argument("--eval-tasks", help="Manifest used only to reject train/test question overlap")
+    p_build_boundary.add_argument("--min-boundary-support", type=int, default=2)
+    p_build_boundary.add_argument("--boundary-replay-dir", help="Execute resumable paired train tool probes in this directory")
+    p_build_boundary.add_argument("--boundary-research-dir", help="Run proposer, semantic paired execution and independent auditor")
+    p_build_boundary.add_argument("--boundary-proposer-url", default="http://127.0.0.1:9102")
+    p_build_boundary.add_argument("--boundary-auditor-url", default="http://127.0.0.1:9113")
+    p_build_boundary.set_defaults(func=cmd_build_boundary)
+
+    p_boundary_experiment = sub.add_parser("boundary-experiment", help="Train-only probes, frozen boundary build and full OEA eval")
+    for name in ("parent-store", "output-store", "train-results", "eval-tasks", "output-dir"):
+        p_boundary_experiment.add_argument("--" + name, required=True)
+    p_boundary_experiment.add_argument("--vlm-gpu", default="0")
+    p_boundary_experiment.add_argument("--tool-gpu", default="1")
+    from .boundary.experiment import run_experiment
+    p_boundary_experiment.set_defaults(func=run_experiment)
 
     p_preview_v2 = sub.add_parser("preview-v2", help="Preview the v2 injected product-transition block")
     p_preview_v2.add_argument("--store-dir", default=DEFAULT_STORE_V2)

@@ -6,13 +6,235 @@ messages/calls so rollout remains comparable with ReAct and Reflection.
 """
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
+import random
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
 from ..ReAct.data_adapter import samples_to_tasks
 from ..full_shared.sft_schema import FullSFTSample
+
+
+def _read_jsonl_dicts(path: str | Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with Path(path).open(encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                value = json.loads(line)
+                if isinstance(value, dict):
+                    rows.append(value)
+    return rows
+
+
+def _replay_is_usable(result: dict[str, Any], expected_tools: list[str]) -> tuple[bool, str]:
+    """Return whether a gold replay is safe to turn into SFT supervision.
+
+    A teacher-forced replay validates the executable tool protocol; it does not
+    validate the natural-language answer.  We therefore require a complete,
+    error-free, order-preserving tool trace here and leave answer correctness
+    to the source ground truth and the later rollout judge.
+    """
+    if str(result.get("status") or "") != "completed":
+        return False, str((result.get("replay_meta") or {}).get("failure_type") or "replay_not_completed")
+    observations = result.get("replay_observations") or []
+    called = [str(item.get("tool") or "") for item in observations if isinstance(item, dict)]
+    if called != [str(tool) for tool in expected_tools]:
+        return False, "tool_sequence_mismatch"
+    if any(bool(item.get("is_error")) for item in observations if isinstance(item, dict)):
+        return False, "tool_error_observation"
+    if not observations:
+        return False, "empty_replay_observations"
+    return True, "usable"
+
+
+def _canonicalize_replay_observation(text: str, result: dict[str, Any]) -> str:
+    """Remove run-specific replay paths while retaining real tool evidence."""
+    value = str(text or "")
+    meta = result.get("replay_meta") or {}
+    replacements: list[tuple[str, str]] = []
+    for item in meta.get("alias_captures") or []:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "")
+        alias = str(item.get("alias") or "")
+        if path and alias:
+            replacements.append((path, alias))
+    # Replace longer paths first so a nested artifact path cannot partially
+    # consume a more specific alias replacement.
+    for path, alias in sorted(replacements, key=lambda pair: len(pair[0]), reverse=True):
+        value = value.replace(path, alias)
+    artifact_dir = str(meta.get("artifact_dir") or "")
+    if artifact_dir:
+        value = value.replace(artifact_dir, "<current_artifact_dir>")
+    # The replay may expose the artifact index path in a diagnostic field.
+    value = re.sub(r"/[^\s\"']*/artifact_index\.json", "<artifact_index>", value)
+    return value
+
+
+def _with_replayed_observations(source: dict[str, Any], replay: dict[str, Any]) -> dict[str, Any]:
+    """Merge full real observations into an OEA JSON-actions SFT row."""
+    row = copy.deepcopy(source)
+    replay_observations = [
+        item for item in (replay.get("replay_observations") or []) if isinstance(item, dict)
+    ]
+    obs_index = 0
+    messages = row.get("messages") or []
+    for message in messages:
+        if str(message.get("role") or "") != "user":
+            continue
+        content = str(message.get("content") or "")
+        if not content.startswith("OBSERVATION:"):
+            continue
+        if obs_index >= len(replay_observations):
+            break
+        prefix = "OBSERVATION:\n"
+        suffix = ""
+        # Preserve the source protocol's short request after each observation;
+        # only the observation body is replaced by actual Terrabox output.
+        marker = "\nPlease summarize"
+        marker_pos = content.find(marker)
+        if marker_pos >= 0:
+            suffix = content[marker_pos:]
+        actual = _canonicalize_replay_observation(
+            str(replay_observations[obs_index].get("content") or ""), replay
+        )
+        message["content"] = prefix + actual + suffix
+        obs_index += 1
+
+    # The original OEA rows often encode the final turn as an empty-actions
+    # object without final_answer.  That is ambiguous to the SFT rollout loop
+    # (it looks like the initial planning turn), so attach the labelled answer
+    # only to the final assistant turn.  Earlier empty-actions planning turns
+    # remain unchanged.
+    assistant_indices = [
+        index for index, message in enumerate(messages)
+        if str(message.get("role") or "") == "assistant"
+    ]
+    if assistant_indices:
+        final_index = assistant_indices[-1]
+        final_message = messages[final_index]
+        try:
+            payload = json.loads(str(final_message.get("content") or ""))
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict) and not payload.get("actions") and "final_answer" not in payload:
+            answer = source.get("ground_truth")
+            if answer is not None:
+                payload["final_answer"] = str(answer)
+                final_message["content"] = json.dumps(payload, ensure_ascii=False)
+    row["messages"] = messages
+    row["sft_replay"] = {
+        "method": "gold_teacher_forced_replay",
+        "source_task_id": str(source.get("id") or source.get("task_id") or ""),
+        "replay_status": replay.get("status"),
+        "replay_observation_count": len(replay_observations),
+        "answer_source": "source_ground_truth_only",
+        "absolute_paths_removed_from_observations": True,
+    }
+    # Keep only the model-facing messages in the output writer; these fields
+    # are useful to audits before writing but must never be passed to rollout.
+    return row
+
+
+def build_replayed_sft_dataset(
+    source_data: str | Path,
+    replay_dir: str | Path,
+    output_dir: str | Path,
+    *,
+    validation_fraction: float = 0.1,
+    seed: int = 42,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Create a repeatable SFT set backed by actual Terrabox tool replays.
+
+    ``source_data`` may be a selected OEA train JSONL.  Only rows with a full,
+    order-preserving replay are retained.  The output contains plain
+    JSON-actions ``messages`` compatible with the existing SFT adapter; no
+    gold fields are included in the model-facing JSONL.
+    """
+    source_rows = _read_jsonl_dicts(source_data)
+    results_dir = Path(replay_dir) / "results"
+    output = Path(output_dir)
+    managed_outputs = [
+        output / "train.jsonl",
+        output / "val.jsonl",
+        output / "system_prompt.txt",
+        output / "manifest.json",
+    ]
+    existing_outputs = [path for path in managed_outputs if path.exists()]
+    if existing_outputs and not overwrite:
+        names = ", ".join(path.name for path in existing_outputs)
+        raise FileExistsError(
+            f"Refusing to overwrite replayed SFT outputs in {output}: {names}. "
+            "Choose a new --output-dir or pass --overwrite explicitly."
+        )
+    output.mkdir(parents=True, exist_ok=True)
+    usable: list[dict[str, Any]] = []
+    rejected: dict[str, int] = {}
+    for index, source in enumerate(source_rows):
+        task_id = str(source.get("id") or source.get("task_id") or f"row_{index}")
+        result_path = results_dir / f"{task_id}.json"
+        if not result_path.exists():
+            rejected["missing_replay_result"] = rejected.get("missing_replay_result", 0) + 1
+            continue
+        try:
+            replay = json.loads(result_path.read_text(encoding="utf-8"))
+        except Exception:
+            rejected["invalid_replay_json"] = rejected.get("invalid_replay_json", 0) + 1
+            continue
+        expected = [str(tool) for tool in (source.get("expected_tools") or [])]
+        ok, reason = _replay_is_usable(replay, expected)
+        if not ok:
+            rejected[reason] = rejected.get(reason, 0) + 1
+            continue
+        usable.append(_with_replayed_observations(source, replay))
+
+    rng = random.Random(seed)
+    rng.shuffle(usable)
+    val_count = int(round(len(usable) * max(0.0, min(0.5, validation_fraction))))
+    val_rows = usable[:val_count]
+    train_rows = usable[val_count:]
+
+    def write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
+        with path.open("w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps({"messages": row.get("messages") or []}, ensure_ascii=False) + "\n")
+
+    train_path = output / "train.jsonl"
+    val_path = output / "val.jsonl"
+    write_rows(train_path, train_rows)
+    write_rows(val_path, val_rows)
+    system_prompt = ""
+    if train_rows:
+        system_prompt = str((train_rows[0].get("messages") or [{}])[0].get("content") or "")
+    (output / "system_prompt.txt").write_text(system_prompt, encoding="utf-8")
+    manifest = {
+        "format": "terrabox_json_actions_sft_replayed",
+        "source_data": str(source_data),
+        "replay_dir": str(replay_dir),
+        "output_dir": str(output),
+        "seed": seed,
+        "validation_fraction": validation_fraction,
+        "source_rows": len(source_rows),
+        "usable_rows": len(usable),
+        "train_rows": len(train_rows),
+        "val_rows": len(val_rows),
+        "rejected_rows": sum(rejected.values()),
+        "rejection_reasons": rejected,
+        "observation_policy": "actual Terrabox gold-replay observations; run-specific paths canonicalized to aliases",
+        "answer_policy": "source ground_truth is supervised only; rollout eval uses prompt-only test tasks",
+        "loss_policy": "assistant JSON action/final-answer spans only; user observations are context",
+        "train_file": str(train_path),
+        "val_file": str(val_path),
+        "system_prompt_file": str(output / "system_prompt.txt"),
+    }
+    (output / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return manifest
 
 
 def _shorten_text(value: str, *, max_chars: int) -> str:

@@ -1,8 +1,72 @@
 # SFT Baseline
 
-这个目录保存 Terrabox 当前 strict 数据上的 SFT baseline。目标是训练一个后续方法可复用的 Qwen3-8B 冷启动模型，让模型先学会当前 Terrabox 工具名、JSON action 格式、常见调用顺序和任务风格。
+这个目录保存 Terrabox 的 SFT 实验入口与记录。当前 Qwen2.5-3B 研究主线以 Swift 为主要训练后端，包含 current-harness 冷启动和真实 gold-replay 数据实验；下方 Qwen3-8B、旧 strict 数据与旧后端记录保留为历史实验，不作为当前默认配置。
 
-> 训练的是**纯文本 Qwen3-8B**(工具调用能力),不是 VL。ReAct/Reflection 的 agent LLM(port 9100)就是这个文本 8B(vLLM 挂载 HF 目录跑 `--model /model`);感知交给工具(instructsam 等),图片不进 agent LLM。`scripts/train/train_sft.py` 与 `/data1/yuhongjie2` 下的 SFT 是**另一套 VL 训练**,与本模块无关,勿混用。
+> 本模块训练的是纯文本 Agent 模型，不是 VL。旧 Qwen3-8B 记录及 `scripts/train/train_sft.py` 的 VL 训练是不同实验线，不要混作当前 Qwen2.5-3B 默认流程。
+
+## ✅ 当前 Qwen2.5-3B 冷启动准备(2026-09-17，Swift 默认)
+
+面向当前 Qwen2.5-3B + Terrabox harness 的 SFT 数据已生成并完成预检，详见 `Qwen3B_CurrentHarness_SFT_冷启动流程_20260916.md`。
+
+关键结论：
+
+- 数据目录：`data/oea_current_harness_sft/`，保留原始 `data/oea_full_sft/` 不动。
+- Swift 训练输入：`swift_train_messages.jsonl` / `swift_eval_messages.jsonl`，只保留 `messages` 列；原始 `train.jsonl` / `eval.jsonl` 保留 gold 与元数据，仅用于审计，不直接喂给 Swift，避免 HF datasets 因嵌套元数据类型不一致加载失败。
+- 默认训练入口：`python -m terrabox.evolution.sft.runner train-swift`，后端为 `/data1/yuhongjie2/ms-swift`。
+- 训练前预检：`python -m terrabox.evolution.sft.runner swift-preflight --cuda-visible-devices <GPU> --torch-dtype auto`，会检查 CUDA 可见性、bf16/fp16 dtype、flash-attn 与 Swift CLI 路径。
+- 旧入口：`train_lora.py --chat-format auto` 仅保留为 Unsloth/TRL legacy/debug，不再作为正式 SFT 默认。
+- Loss 口径：Swift `loss_scale=default`，assistant/tool_call 参与监督，system/user/tool_response 不参与 loss；不会训练模型模仿 observation/user。
+- 稳定窗口：默认 `max_length=4096`；`8192` 可在显存充足时尝试；`12288` 仅表示数据预检不过长，不代表单卡训练稳定。
+- Packing：默认关闭，避免依赖 `flash-attn` 并控制单卡显存峰值；确认安装并启用 flash-attn 后，才通过 `--packing` 打开。
+- CPU 并发：默认 `dataset_num_proc=1`、`dataloader_num_workers=1`、`dataloader_persistent_workers=false`；低 CPU 或 smoke 可把 workers 设为 0，避免 PyTorch persistent worker 校验失败和 CPU 内存峰值。
+- 本机 Swift 依赖：`tmp/python_deps/` 覆盖了 conda 中过旧的 `datasets==4.3.0`，当前使用本地 `datasets==4.8.4` 以满足 Swift 4.6 的 `datasets.features.Json/List` 导入；正式脚本已把该目录放到 `PYTHONPATH` 最前。
+- GPU 可见性：如果普通 shell 看不到 NVIDIA driver，优先在 full-access/tmux 环境运行；这属于执行权限上下文问题，不是 Swift SFT 代码问题。
+- 长度预检：`train-swift` 默认用实际 Qwen tokenizer 统计 train/val 的 chat token 长度，并写入 `<run-dir>/swift_length_preflight.json`。发现超过 `--max-length` 的样本时默认直接失败，避免 Swift `truncation_strategy=delete` 静默删掉 replay episode；current-harness 可从 4096 起步，real-replayed OEA 通常应先用 8192–10240 并查看预检报告。只有审查报告后才使用 `--allow-overlength`；`--skip-length-preflight` 仅用于诊断，不能作为正式训练默认。
+- Swift 训练脚本已生成但未启动：`src/terrabox/evolution/sft/exp/qwen25_3b_current_harness_sft_swift_coldstart_20260916/run_swift_sft_train.sh`。
+- 输出目录：`tmp/agent_rl_runs/sft/qwen25_3b_current_harness_sft_swift_coldstart_20260916/swift`。
+
+### 2026-09-17 smoke 验证
+
+已在 GPU2 跑通 1-step Swift SFT + eval + adapter 保存 + merged HF 导出链路：
+
+- SFT checkpoint：`tmp/agent_rl_runs/sft/swift_sft_backend_smoke_gpu2_20260917/swift/v2-20260917-003515/checkpoint-1/`，包含 `adapter_config.json` 与 `adapter_model.safetensors`。
+- 训练信号：`loss=1.46048808`、`grad_norm=5.92506266`、`learning_rate=1e-4`、`token_acc=0.77195594`、峰值 `memory=7.25GiB`。
+- Eval 信号：`eval_loss=2.17857671`、`eval_token_acc=0.70989975`。
+- 导出产物：`tmp/agent_rl_runs/sft/swift_sft_backend_smoke_gpu2_20260917/merged_hf/checkpoint-1/`。
+- 结论：Swift 后端、dtype auto、packing 关闭、本地 datasets 覆盖和 persistent worker 配置已跑通；该 smoke 不是正式训练结果。
+
+只做 legacy 渲染预检：
+
+```bash
+PYTHONPATH=src /home/yuhongjie/miniconda3/envs/unsloth/bin/python -m terrabox.evolution.sft.train_lora \
+  --train-file data/oea_current_harness_sft/train.jsonl \
+  --val-file data/oea_current_harness_sft/eval.jsonl \
+  --model-path /data1/yuhongjie2/Earth-Agent/llm/qwen/2.5_3B_Instruct \
+  --output-dir tmp/sft_cold_start_qwen25_3b_current_harness_preflight_12288_20260916 \
+  --max-seq-length 12288 --chat-format auto --preflight-only
+```
+
+启动训练：
+
+```bash
+tmux new-session -d -s qwen25_3b_swift_sft_coldstart_20260916 \
+  'cd /data1/yuhongjie2/terrabox && bash src/terrabox/evolution/sft/exp/qwen25_3b_current_harness_sft_swift_coldstart_20260916/run_swift_sft_train.sh'
+```
+
+重新生成 Swift 训练脚本：
+
+```bash
+PYTHONPATH=src /home/yuhongjie/miniconda3/envs/unsloth/bin/python -m terrabox.evolution.sft.runner train-swift \
+  --experiment qwen25_3b_current_harness_sft_swift_coldstart_20260916 \
+  --max-length 4096 --cuda-visible-devices 2
+```
+
+训练后导出 merged HF：
+
+```bash
+PYTHONPATH=src /home/yuhongjie/miniconda3/envs/unsloth/bin/python -m terrabox.evolution.sft.runner export-swift \
+  --experiment qwen25_3b_current_harness_sft_swift_coldstart_20260916
+```
 
 ## ✅ 最新实验(2026-06-15 实跑):`oe_full` —— OE 全量 + 23 工具聚焦 catalog + 单卡 QLoRA
 
@@ -135,6 +199,92 @@ $PY -m terrabox.evolution.ReAct.runner rollout \
 ```
 
 校验适配器生效:首条结果应 **tool_calls 非空、llm_calls>1、F1 有值**;system prompt 是 `You are a Terrabox geospatial tool-use agent...`。代码见 `agent/eval_modes/common.py`(`parse_sft_actions` / plan-turn)、`agent/eval_modes/standard.py`(`_resolve_system_prompt`)、`scripts/run_trajectory_experiment.py`(`extract_tool_calls` 也解析 SFT content)。
+
+### Qwen2.5-3B rollout 固定合同（2026-10-05）
+
+Base、Swift SFT merge、Swift GRPO/RLOO/REINFORCE++ merge 都使用同一个
+`scripts/run_trajectory_experiment.py`，但工具协议必须和训练格式一致：
+
+| 模型 | `--tool-protocol` | system prompt | 说明 |
+|---|---|---|---|
+| Base / RL merge | `native` | runner 默认 prompt | 由 vLLM Hermes 解析原生 `tool_calls` |
+| JSON-actions SFT merge（包括 real-replayed SFT） | `sft-json` | 必须传训练数据生成的 `system_prompt.txt` | 不绑定 native tools，解析 assistant content 中的 JSON `actions`，observation 以 `HumanMessage` 回填 |
+
+统一 runner 对本地 3B rollout 默认固定 `AGENT_LLM_MAX_MODEL_LEN=24576` 和每次请求
+`TERRABOX_AGENT_LLM_MAX_TOKENS=4096`。前者保留完整任务与历史，后者防止格式失控时把
+剩余上下文全部生成完；历史不会为了凑输出预算而静默截断。若某次请求确实超过 vLLM
+context，会在该任务结果中记录 `status=context_overflow` 与
+`has_context_overflow=true`，并跳过瞬时错误重试；不能把被截断的结果当作正常完成。每个实验目录会写
+`rollout_manifest.json`，记录模型路径、协议、system prompt 哈希、context、输出预算、工具目录、GPU 和服务范围。
+如果工具服务容器启动失败或中途退出，结果会记录为 `status=infra_error`、
+`has_infra_error=true`，按有限瞬时重试处理；即使模型随后凭已有记忆生成了 calculator/solver 结果，也不计为成功。
+
+任务级图片也会加入 `TERRABOX_TASK_DATA_FILES` 的当前输入解析范围。这样 SFT 模型即使复述
+训练集中的绝对路径（例如 `.../train_images/TG_70028.jpg`），只要 basename 与当前测试图片一致，
+工具执行器也会解析到当前任务的真实图片；没有当前任务图片的路径不会被凭空补全，仍按工具错误记录。
+
+replayed SFT 的推荐命令（GPU/服务变量按机器 lane 调整）如下：
+
+```bash
+PY=/home/yuhongjie/miniconda3/envs/unsloth/bin/python
+MODEL=tmp/agent_rl_runs/sft/qwen25_3b_real_replayed_sft_20261004/swift_offline_full_len10240_20261004/merged_hf/checkpoint-148
+SP=tmp/agent_rl_runs/sft/qwen25_3b_real_replayed_sft_20261004/replayed_sft_offline_full_20261004/system_prompt.txt
+
+AGENT_LLM_MODEL_PATH="$MODEL" AGENT_LLM_GPU_DEVICES=1 \
+PYTHONPATH=src no_proxy=localhost,127.0.0.1 NO_PROXY=localhost,127.0.0.1 \
+VLM_GPU_DEVICES=3 VLM_TENSOR_PARALLEL_SIZE=1 \
+$PY scripts/run_trajectory_experiment.py rollout \
+  --task-file data/oea_full_sft/openearth_test_tasks.json \
+  --experiment qwen25_3b_replayed_sft_oea_standard \
+  --output-dir tmp/agent_rl_runs/sft/qwen25_3b_replayed_sft_oea_standard \
+  --mode standard --tool-protocol sft-json --sft-system-prompt-file "$SP" \
+  --agent-context-length 24576 --max-completion-tokens 4096 \
+  --port 9101 --workers 1 --max-iterations 15 --use-docker --resume \
+  --no-skip-bing --no-skip-osm --no-skip-vlm --no-skip-changeos
+```
+
+Base/RL merge 只需把 `MODEL` 换成对应合并 checkpoint，并把
+`--tool-protocol sft-json --sft-system-prompt-file "$SP"` 换成
+`--tool-protocol native`。不要把 SFT JSON 数据文件或包含 `ground_truth` 的训练行作为
+`--task-file`；评测仍使用 prompt-only 的 `openearth_test_tasks.json`。先用 3–10 条 smoke
+检查首条结果的 `tool_calls`、`tokens`、`rollout_contract`、`status`/`has_context_overflow`/
+`has_infra_error`
+和 `rollout_manifest.json`，再用
+同一输出目录 `--resume` 进入全量。GPU 感知 lane 保持 `workers=1`，agent LLM 与感知服务
+使用不同 GPU；实验结束按仓库根 `AGENTS.md` 检查并释放本次启动的容器和进程。
+
+### ⑤ 真实工具回放版冷启动数据（当前推荐）
+
+`data/oea_current_harness_sft/` 是早期协议转换数据，格式虽然接近当前 harness，但其中 observation 直接来自 OEA 原始文本，尚未经过当前 Terrabox 工具执行。它可以用于格式调试，不能作为“真实工具监督已经对齐”的证据。
+
+当前推荐流程是先用 `experience_evo gold-replay` 按 OEA `gold_tool_calls` teacher-force 执行真实工具，再用 `sft runner prepare-replayed-data` 只保留完整、无工具错误且顺序一致的轨迹。回放不调用 actor LLM，也不把 gold 轨迹暴露给 rollout；它只验证工具链和产物引用能否在当前 registry 中真实执行。
+
+```bash
+PY=/home/yuhongjie/miniconda3/envs/unsloth/bin/python
+PYTHONPATH=src $PY -m terrabox.evolution.experience_evo.runner gold-replay \
+  --data data/oea_full_sft/openearth/train.jsonl \
+  --subset-file tmp/agent_rl_runs/sft/<exp>/train_subset.json \
+  --out-dir tmp/agent_rl_runs/sft/<exp>/gold_replay \
+  --use-docker --resume --max-transient-retries 5
+
+PYTHONPATH=src $PY -m terrabox.evolution.sft.runner prepare-replayed-data \
+  --source-data tmp/agent_rl_runs/sft/<exp>/train_source.jsonl \
+  --replay-dir tmp/agent_rl_runs/sft/<exp>/gold_replay \
+  --output-dir tmp/agent_rl_runs/sft/<exp>/replayed_sft
+```
+
+`prepare-replayed-data` 默认拒绝覆盖已存在的 `train.jsonl`、`val.jsonl`、`system_prompt.txt` 或 `manifest.json`。需要有意重建时传 `--overwrite`；更推荐使用新的实验输出目录，保留每个数据版本供复现。
+
+输出的 `train.jsonl` / `val.jsonl` 只保留 `messages`：assistant 目标仍是 OEA 的 JSON-actions，user-side `OBSERVATION` 换成真实 Terrabox observation；回放产生的运行目录和绝对路径会 canonicalize 为当前会话可复用的 artifact alias。最终 assistant 空 actions turn 会补上源数据的 `ground_truth`，避免与首个“计划但尚未行动”的空 actions turn 混淆。`manifest.json` 记录过滤原因、回放目录和数据边界，旧数据目录不会被覆盖。
+
+训练后必须显式使用：
+
+```bash
+export TERRABOX_SFT_JSON_ACTIONS=1
+export TERRABOX_SFT_SYSTEM_PROMPT_FILE=tmp/agent_rl_runs/sft/<exp>/replayed_sft/system_prompt.txt
+```
+
+并采用与 Base/GRPO 相同的 prompt-only OEA test manifest 做真实 rollout；不能把 replay SFT JSONL 或包含 `ground_truth` 的文件作为 eval prompt。
 
 ### 指令限制 / 注意
 - 必须 `unsloth` conda 环境;**`--cuda-visible-devices 0` 单卡**(unsloth 本就单卡,且无跳闸风险)。

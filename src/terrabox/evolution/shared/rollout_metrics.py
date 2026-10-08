@@ -54,7 +54,15 @@ def is_online(expected) -> bool:
 
 
 def reconstruct(d: dict):
-    """还原 (slug, args_json, errored) 调用序列(按 conversation_history 顺序)。"""
+    """还原 (slug, args_json, errored) 调用序列。
+
+    Native tool-call rollouts keep calls in ``conversation_history``.  The
+    ``sft-json`` protocol executes text actions and therefore records the
+    canonical sequence in the top-level ``tool_calls`` field instead.  Keep
+    the conversation as the authoritative source when available, then fall
+    back to that normalized sequence so shared reports also score SFT/RL
+    checkpoints instead of silently reporting zero tool calls.
+    """
     calls, pending = [], None
     for m in d.get("conversation_history") or []:
         if not isinstance(m, dict):
@@ -72,6 +80,19 @@ def reconstruct(d: dict):
             calls.append(tuple(pending)); pending = None
     if pending is not None:
         calls.append(tuple(pending))
+    if not calls:
+        for item in d.get("tool_calls") or []:
+            if isinstance(item, (list, tuple)):
+                name = item[0] if item else ""
+                args = item[1] if len(item) > 1 else {}
+            elif isinstance(item, dict):
+                name = item.get("name") or item.get("tool") or item.get("slug") or ""
+                args = item.get("args") or item.get("arguments") or {}
+            else:
+                name, args = str(item), {}
+            name = str(name).replace("__", ".")
+            if name:
+                calls.append((name, json.dumps(args, ensure_ascii=False, sort_keys=True), False))
     return calls
 
 

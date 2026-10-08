@@ -22,7 +22,7 @@ without modifying that checkout.
   and the string `none` as non-attack sentinels.
 - Do not invent tool F1: AgentDojo result JSON contains utility/security labels,
   not a gold tool sequence suitable for that metric.
-- Experiment groups live under `agentdojo/experiments/<group>/`; prompt versions
+- Experiment groups live under `tmp/promptevo_agentdojo_experiments/<group>/`; prompt versions
   live under `evolution_store/promptevo/agentdojo/versions/`.
 - Runs must be resumable (`force_rerun=False`) and must stop their own vLLM
   containers in `finally`. A job is complete only when its valid result count
@@ -103,10 +103,11 @@ without modifying that checkout.
   these as evaluator failures. Even with `TERRABOX_AGENTDOJO_API_WORKERS=1`,
   one AgentDojo sample can issue many rapid model calls, so external API
   requests are cross-process paced by the shared Terrabox
-  `pace_remote_llm_request` limiter, using workload
-  `TERRABOX_REMOTE_LLM_WORKLOAD=agentdojo` by default and the shared
-  `tmp/service_locks/remote_llm_longcat.lock` by default. This must be shared
-  with any concurrent LongCat rollout, including ExperienceEvo and tau2. Legacy
+  `pace_remote_llm_request` limiter and the shared
+  `tmp/service_locks/remote_llm_longcat.lock` by default. Leave
+  `TERRABOX_REMOTE_LLM_WORKLOAD` unset for a single PromptEvo LongCat run; set it
+  explicitly only when multiple workload families must fairly share LongCat.
+  This lock must be shared with any concurrent LongCat rollout. Legacy
   `TERRABOX_AGENTDOJO_LONGCAT_MIN_INTERVAL_SECONDS` / `_RATE_LOCK` remain aliases,
   but new watcher scripts should use the generic API names. LongCat
   OpenAI-compatible calls must disable `thinking` explicitly and must not forward

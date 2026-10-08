@@ -65,6 +65,14 @@ def _iter_result_files(results_dir: str) -> Iterable[str]:
             if path not in seen and os.path.isfile(path):
                 seen.add(path)
                 yield path
+    # Candidate validation stores results under answers/<group>/<file>. The
+    # official full-run layout remains unchanged, so this fallback only adds
+    # files when a caller passes the validation root.
+    if not seen:
+        for path in glob.glob(os.path.join(results_dir, "*", "*", "*.json")):
+            if path not in seen and os.path.isfile(path):
+                seen.add(path)
+                yield path
 
 
 def _task_id_from_path(path: str) -> str:

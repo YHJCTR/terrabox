@@ -11,7 +11,7 @@ from typing import Iterable
 
 TAU2_ADAPTER_DIR = os.path.dirname(__file__)
 DEFAULT_TAU2_ROOT = "/data1/yuhongjie2/tau2-bench"
-DEFAULT_TAU2_EXPERIMENTS_DIR = os.path.join(TAU2_ADAPTER_DIR, "experiments")
+DEFAULT_TAU2_EXPERIMENTS_DIR = str(Path(__file__).resolve().parents[6] / "tmp" / "promptevo_tau2_experiments")
 DEFAULT_TAU2_VERSIONS_DIR = "evolution_store/promptevo/tau2_bench/versions"
 DEFAULT_TAU2_RUNTIME_DIR = str(Path(__file__).resolve().parents[6] / "tmp" / "tau2_runtime")
 
@@ -67,9 +67,7 @@ def tau2_adapter_results_path(name_or_path: str, output_dir: str = DEFAULT_TAU2_
     """Resolve an experiment name to the tau2 results copied by the adapter runner.
 
     Existing absolute/relative paths are returned as-is. Otherwise, the
-    convention is:
-
-    adapters/tau2_bench/experiments/<experiment>/tau2_results/
+        convention is ``tmp/promptevo_tau2_experiments/<experiment>/tau2_results/``.
     """
 
     if os.path.exists(name_or_path):

@@ -4,11 +4,14 @@ from __future__ import annotations
 import glob
 import json
 import os
+from pathlib import Path
 from typing import Iterable
 
 
 API_BANK_ADAPTER_DIR = os.path.dirname(__file__)
-DEFAULT_API_BANK_EXPERIMENTS_DIR = os.path.join(API_BANK_ADAPTER_DIR, "experiments")
+DEFAULT_API_BANK_EXPERIMENTS_DIR = str(
+    Path(__file__).resolve().parents[6] / "tmp" / "promptevo_api_bank_experiments"
+)
 
 
 def _default_data_dir(experiment: str) -> str:

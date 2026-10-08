@@ -208,13 +208,20 @@ full revised static prompt
 class PromptOptimizer:
     """用 EvolutionLLMClient,基于(原始提示词 + 原始日志)产出一次改写提案。"""
 
-    def __init__(self, llm_client=None, max_growth_ratio: float = 1.5, meta_prompt_version: str = "v1"):
+    def __init__(
+        self,
+        llm_client=None,
+        max_growth_ratio: float = 1.5,
+        meta_prompt_version: str = "v1",
+        protocol_mode: str = "legacy",
+    ):
         if llm_client is None:
             from ..shared.llm_client import EvolutionLLMClient
             llm_client = EvolutionLLMClient()
         self.llm = llm_client
         self.max_growth_ratio = max_growth_ratio  # 仅软提示:改写后体量超过原文的此倍数则标记
         self.meta_prompt_version = meta_prompt_version
+        self.protocol_mode = protocol_mode
 
     def _check_restraint(self, base: str, revised: str) -> tuple[bool, str]:
         ratio = len(revised) / max(1, len(base))
@@ -240,10 +247,11 @@ class PromptOptimizer:
             trace_text,
             metric_block=metric_block,
             comparison=comparison,
+            protocol_mode=self.protocol_mode,
         )
         data = self.llm.call_json(prompt, system=_OPTIMIZER_SYSTEM, max_tokens=max_tokens)
         try:
-            return parse_patch_proposal(data, base_prompt)
+            return parse_patch_proposal(data, base_prompt, self.protocol_mode)
         except ProtocolPatchError:
             return None
 

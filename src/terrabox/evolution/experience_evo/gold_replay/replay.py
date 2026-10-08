@@ -764,6 +764,21 @@ def replay_one_task(
         "has_tool_error": has_tool_error,
         "has_tool_oom": bool(failure_type == "oom"),
         "conversation_history": conversation_history,
+        # Keep the untruncated observations in a separate field for supervised
+        # data preparation.  ``conversation_history`` intentionally remains
+        # compact because it is also consumed by rollout reports and can be
+        # very large for raster/OSM tools.  The SFT adapter uses this field only
+        # after checking that the replay completed without tool errors.
+        "replay_observations": [
+            {
+                "step": item["step"],
+                "tool": item["tool"],
+                "arguments": item["arguments"],
+                "content": item["content"],
+                "is_error": item["is_error"],
+            }
+            for item in observations
+        ],
         "replay_meta": {
             "method": "gold_teacher_forced_replay",
             "actor_llm_used": False,

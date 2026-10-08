@@ -34,9 +34,21 @@ experiment-local injection in the runner.
 - adapter 不得向 PromptEvo core 注入项目专属的 patch 类型、工具名、任务 ID、实体、路径或
   固定 workflow。元提示词禁止这些内容，编译器会确定性拒绝任务 ID、路径和已知 benchmark
   标识。可用类型仅为 `tool_selection`、`argument_validation`、`error_recovery`、
-  `termination_and_repetition`，其语义必须跨该 adapter 的未见任务通用。
+  `query_abstraction`、`termination_and_repetition`、`answer_contract`、`tool_output_security`、`candidate_metric_guard`、
+  `state_transition`，其语义必须跨该 adapter 的未见任务通用。
+- API-Bank 可通过 `--task-profile tool_search` 提供任务类型级指导，限定优化器检查工具发现、
+  下游调用、可观察依赖状态、精确参数键和语义搜索词；该 profile 不得注入具体 API、task id、gold 调用或固定
+  认证 workflow，结果必须标为 `PromptEvo-ToolSearch-adapted`，并与 vanilla PromptEvo 分开报告。
 - patch 模式仍只改静态 prompt slot；不得把动态 schema、对话历史、工具 observation、gold
   label 或 evaluator 输出编译进 prompt。
+- API-Bank 可用 `--promptevo-protocol-mode conditional` 启用条件协议编译：保留 typed patch
+  的 `trigger`、`rule`、`scope`，并用逐任务配对效果保护 baseline 成功、要求至少一个 exact-call
+  gain；`query_abstraction` 会被强制限制为 `discovery/query fields only`，不得把查询规则扩大
+  成全局实体值改写；该模式不写入具体 API、样本、认证流程或轨迹示例，必须在 manifest/provenance
+  中单独标注。
+- API-Bank 的 `--promptevo-patch-composition atomic_pairwise` 是 PromptEvo 的结构化组合搜索：
+  保留 LLM 产出的 typed patches，逐条验证单 patch/两两组合并记录 lineage，整组候选只作高阶交互回退；
+  该模式属于 PromptEvo 的方法变体，必须在 manifest/provenance 和结果表中与默认 whole 模式分开。
 - adapter 若提供 `RolloutRunner`，必须支持固定 `dev_task_ids` 的真实 rollout。仅当该 rollout
   的指标通过接受门时，候选才能标记为 accepted；没有 runner 时只允许生成提案，不能声称验证
   成功。
@@ -64,7 +76,7 @@ These two are enough for first-stage prompt proposal.
   experiment-local prompt overrides and dependency preflight checks intact:
   missing external-project dependencies should produce `run_status.json`
   explaining the blocker, not fake metrics or source-tree edits.
-- `gepa_aime` exposes a cached-HuggingFace AIME prompt-only runner aligned with GEPA's public example. It optimizes only the static math system prompt, keeps AIME solutions out of agent inputs, writes `results.jsonl` + `metrics.json` under `gepa_aime/experiments/<group>/<stage>/`, and should use `HF_HUB_OFFLINE=1` with the local cache unless the user explicitly wants network downloads.
+- `gepa_aime` exposes a cached-HuggingFace AIME prompt-only runner aligned with GEPA's public example. It optimizes only the static math system prompt, keeps AIME solutions out of agent inputs, writes `results.jsonl` + `metrics.json` under `tmp/promptevo_gepa_aime_experiments/<group>/<stage>/`, and should use `HF_HUB_OFFLINE=1` with the local cache unless the user explicitly wants network downloads.
 - `toolbench` exposes a StableToolBench runner for the local
   `/data1/yuhongjie2/StepTool/stabletoolbench` checkout. It must only override
   `Prompts.ReAct_prompts.FORMAT_INSTRUCTIONS_SYSTEM_FUNCTION` in the current
@@ -72,8 +84,16 @@ These two are enough for first-stage prompt proposal.
   external source tree. The formal pipeline may explicitly start the cached API
   server and per-GPU vLLM lanes, must record those resources in experiment
   metadata/logs, and must stop resources it started at the end of each stage.
+  Paper-style ToolBench chains must use the adapter's deterministic
+  evolution/dev/test split manifest: both Stage1 and Stage2 require held-out
+  dev rollouts for candidate acceptance, and the test split cannot be used to
+  choose a prompt.
 
 ## External API pacing
+
+- API-Bank 按用户新要求在 prompt 冻结后追加全部389条评测，保留79条独立test；前者包含优化数据，不可标独立泛化结果。旧进程由 `compare-methods --follow-full-evaluations` 补评，复用公共限流；`full_set_summary.json` 才是全量完成标志。
+
+- API-Bank 外部对比入口 `api_bank.pipeline compare-methods` 使用对话级固定划分、公共 LongCat 限流和逐任务缓存。test 不参与优化，旧全量 389 条结果不能代替新 test 的 Base。方法适配差异记录于 `provenance.json` 和 API-Bank README，不得把导入检查算实验或把 adapted 算完整官方复现。账户错误停止，修改节流环境须重启父进程。
 
 - Adapters that call LongCat/DeepSeek through `make_llm_client()` inherit the
   shared `RemoteChatClient` pacing and retry behavior. Keep it configurable with
@@ -83,13 +103,13 @@ These two are enough for first-stage prompt proposal.
   pacing because multi-turn agent tasks can burst requests even at low job
   concurrency; set the interval to `0` only for a deliberate high-concurrency
   rerun.
-- LongCat-heavy adapters must share the same remote-provider lock and JSON
-  fairness state. Set `TERRABOX_REMOTE_LLM_WORKLOAD` to a stable workload name
-  such as `tau2` or `experienceevo`; when both workloads are waiting, the shared
-  pacer rotates request grants by workload. If only one workload is waiting, it
-  may continue using the configured provider interval. Do not create a separate
-  adapter lock to bypass the service-level LongCat limit, and restart the
-  watcher/rollout parent after changing pacing or workload env vars.
+- LongCat-heavy adapters must share the same remote-provider lock. Leave
+  `TERRABOX_REMOTE_LLM_WORKLOAD` unset for a single PromptEvo LongCat run, so the
+  provider interval is the only pacing policy. Set a stable workload name only
+  when multiple workload families must fairly share LongCat; then the shared
+  pacer rotates request grants by workload. Do not create a separate adapter
+  lock to bypass the service-level LongCat limit, and restart the watcher/rollout
+  parent after changing pacing or workload env vars.
 - Adapters that bypass `RemoteChatClient` and call an upstream OpenAI-compatible
   SDK directly must implement equivalent cross-process pacing and finite queue
   retries. A single worker can still issue many rapid API calls inside one
@@ -109,7 +129,7 @@ These two are enough for first-stage prompt proposal.
 ## Experiment outputs
 
 - Adapter-owned experiments should live under
-  `src/terrabox/evolution/promptevo/adapters/<project>/experiments/`.
+  `tmp/promptevo_<project>_experiments/`.
 - Generated prompt versions should live under
   `evolution_store/promptevo/<project>/versions/`.
 - Each runnable experiment should record prompt version, model endpoint, data

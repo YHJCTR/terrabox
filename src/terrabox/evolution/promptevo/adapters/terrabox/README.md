@@ -62,7 +62,7 @@ bash tmp/run_oea_stage1_after_sam2_refresh_20260630.sh
 It writes adapter-local artifacts under:
 
 ```text
-src/terrabox/evolution/promptevo/adapters/terrabox/experiments/<run_id>/
+tmp/promptevo_terrabox_experiments/<run_id>/
 ```
 
 ## Stage-1 Prompt Optimization
@@ -71,14 +71,14 @@ src/terrabox/evolution/promptevo/adapters/terrabox/experiments/<run_id>/
 cd /data1/yuhongjie2/terrabox
 no_proxy=localhost,127.0.0.1 PYTHONPATH=src python -m terrabox.evolution.promptevo.run propose \
   --trajectories tmp/trajectories/oe_full_react_offline/standard/trajectories_full.jsonl \
-  --out src/terrabox/evolution/promptevo/adapters/terrabox/experiments/<run>/stage1_proposal.json
+  --out tmp/promptevo_terrabox_experiments/<run>/stage1_proposal.json
 ```
 
 Then accept it as a Terrabox-scoped version:
 
 ```bash
 PYTHONPATH=src python -m terrabox.evolution.promptevo.run accept \
-  --proposal src/terrabox/evolution/promptevo/adapters/terrabox/experiments/<run>/stage1_proposal.json \
+  --proposal tmp/promptevo_terrabox_experiments/<run>/stage1_proposal.json \
   --name <version> \
   --versions-dir evolution_store/promptevo/terrabox/versions
 ```
@@ -108,7 +108,7 @@ Use that same stem for:
 
 ```text
 evolution_store/promptevo/terrabox/versions/<stem>.txt
-src/terrabox/evolution/promptevo/adapters/terrabox/experiments/<stem>/
+tmp/promptevo_terrabox_experiments/<stem>/
 tmp/trajectories/<stem>/standard/results/
 ```
 

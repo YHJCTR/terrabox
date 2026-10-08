@@ -112,7 +112,7 @@ Actual StableToolBench rollout prerequisites:
    `StableToolBenchRunConfig.model_path`; for Qwen-style runs the official
    wrapper uses `--backbone_model qwen2` and `VLLM_API_BASE`.
 3. Run `StableToolBenchRolloutRunner.run_version(...)`. Outputs are saved under
-   `src/terrabox/evolution/promptevo/adapters/toolbench/experiments/<experiment>/answers/<group>/`.
+   `tmp/promptevo_toolbench_experiments/<experiment>/answers/<group>/`.
 4. For official pass-rate/preference metrics, use StableToolBench's own
    `toolbench/tooleval` conversion and evaluation scripts on the generated
    answer directory. The adapter's `ToolBenchMetricProvider` can read raw JSON
@@ -160,12 +160,45 @@ The default profile:
 - mirrors StepTool's official `qwen2` script: `DFS_woFilter_w2`,
   `max_observation_length=1024`, `max_query_count=30`, `num_thread=4`.
 
+Paper-style split-isolated chain:
+
+```bash
+conda run -n unsloth bash -lc 'cd /data1/yuhongjie2/terrabox && \
+PYTHONPATH=src python -m terrabox.evolution.promptevo.adapters.toolbench.pipeline \
+  paper-split-chain \
+  --experiment-stem promptevo_stabletoolbench_longcat_paper_YYYYMMDD_HHMMSS \
+  --provider longcat --optimizer-version v2 --agent-provider longcat --api-workers 4'
+```
+
+This command writes a deterministic group-stratified manifest with a 60/20/20
+evolution/dev/test partition under
+`tmp/promptevo_toolbench_experiments/<stem>_paper_split/split_manifest.json`. Stage1 and Stage2 each
+generate typed protocol-patch candidates only from evolution trajectories,
+select them on the held-out dev split, and then evaluate Base/Stage1/Stage2 on
+the held-out test split. Stage2 is contrastive regression repair: it preserves
+Stage1 gains over Base while patching repeated Stage1 regressions. The protected
+dev gate rejects candidates that degrade success beyond tolerance or raise
+give-up, no-finish, tool-error, repeated-call, over-calling, or average-tool-call
+metrics. The chain is resumable and does not overwrite prior experiments.
+
 For the LongCat-agent profile, `--agent-provider longcat` instead selects the
 official `chatgpt_function` route and sends agent completions to LongCat. It
 does not start vLLM containers or occupy local GPUs. Requests use the shared
-`pace_remote_llm_request` limiter with workload `toolbench`; do not configure a
-separate ToolBench lock to bypass the global provider limit. Restart the parent
-pipeline after changing any LongCat pacing environment variable.
+`pace_remote_llm_request` provider limiter. By default ToolBench does not set a
+workload label, so multiple ToolBench workers share the single provider pacing
+lock without entering cross-workload fair rotation. Set
+`TERRABOX_REMOTE_LLM_WORKLOAD=toolbench` only when ToolBench must fairly rotate
+with other LongCat consumers; do not configure a separate ToolBench lock to
+bypass the global provider limit. Restart the parent pipeline after changing any
+LongCat pacing environment variable.
+The pipeline starts StableToolBench's cached tool server with an experiment-local
+runtime `config.yml` under `tmp/toolbench_server_runtime/`. This keeps the
+upstream checkout unchanged, avoids blank upstream `toolbench_url` / LongCat API
+settings turning cache misses into server 500s, and redacts the LongCat key from
+server logs.
+The official StableToolBench import preflight may be slow on a cold environment;
+`TERRABOX_TOOLBENCH_PREFLIGHT_TIMEOUT_SECONDS` controls that timeout and
+defaults to 300 seconds.
 
 Progress/status:
 
@@ -178,9 +211,9 @@ python -m terrabox.evolution.promptevo.adapters.toolbench.pipeline status \
 Outputs:
 
 - answer JSONs:
-  `src/terrabox/evolution/promptevo/adapters/toolbench/experiments/<experiment>/answers/<stable_group>/`
+  `tmp/promptevo_toolbench_experiments/<experiment>/answers/<stable_group>/`
 - group statuses:
-  `src/terrabox/evolution/promptevo/adapters/toolbench/experiments/<experiment>/status/<stable_group>.json`
+  `tmp/promptevo_toolbench_experiments/<experiment>/status/<stable_group>.json`
 - stage metadata and aggregate structural metrics:
   `pipeline_status.json`, `metrics_summary.json`, `run_meta_<stable_group>.json`
 - generated prompts:
@@ -196,8 +229,15 @@ Important metric note:
 - For DFS/DFSDT outputs without `train_messages`, metrics use the whole nested
   action tree, while PromptEvo diagnosis uses one representative root-to-leaf
   path so mutually exclusive sibling branches are not fabricated into one
-  conversation. Static candidate selection is not rollout
-  validation; an unvalidated Stage2 candidate is rejected before formal rollout.
+  conversation. Static candidate selection is not rollout validation; an
+  unvalidated or protected-gate-failing Stage1/Stage2 candidate is rejected
+  before formal rollout.
 - Paper-style semantic pass-rate should still be produced with StableToolBench's
   official `toolbench/tooleval` conversion and pass-rate scripts when reporting
   final results.
+# 2026-09-18 冷启动修复
+
+服务 wrapper 的内层异常消息曾被外层 f-string 提前求值，导致服务启动前出现
+`NameError: name 'exc' is not defined`。已改为延迟到子进程求值，并使用脱敏日志。
+回归验证覆盖无现成服务时的 wrapper 生成和异常分支；已有健康服务会绕过该分支，
+所以热启动成功不能替代冷启动验证。续跑仍使用原冻结 split，保留已完成阶段。

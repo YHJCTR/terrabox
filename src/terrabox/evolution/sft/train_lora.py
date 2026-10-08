@@ -36,7 +36,80 @@ def _load_rows(path: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _messages_to_text(tokenizer: Any, messages: list[dict[str, Any]]) -> str:
+def _has_current_harness_fields(messages: list[dict[str, Any]]) -> bool:
+    return any(
+        message.get("role") == "tool"
+        or message.get("tool_calls")
+        or message.get("final_answer")
+        for message in messages
+    )
+
+
+def _safe_json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _render_current_harness_messages(messages: list[dict[str, Any]]) -> str:
+    """Render current Terrabox harness SFT rows without dropping supervision.
+
+    Qwen's tokenizer template already renders OpenAI-style tool calls as
+    ``<tool_call>`` blocks, but it ignores our auxiliary ``final_answer`` field.
+    This explicit renderer keeps tool calls and final answers in assistant spans,
+    while rendering tool observations as user-side ``<tool_response>`` blocks so
+    assistant-only masking will not train on observations/user text.
+    """
+    parts: list[str] = []
+    for message in messages:
+        role = str(message.get("role") or "user")
+        content = str(message.get("content") or "")
+
+        if role == "tool":
+            parts.append(
+                "<|im_start|>user\n"
+                "<tool_response>\n"
+                f"{content}\n"
+                "</tool_response><|im_end|>\n"
+            )
+            continue
+
+        if role not in {"system", "user", "assistant"}:
+            role = "user"
+        body = content
+        if role == "assistant":
+            tool_calls = message.get("tool_calls") or []
+            if tool_calls:
+                rendered_calls: list[str] = []
+                for call in tool_calls:
+                    function = call.get("function") if isinstance(call, dict) else None
+                    if isinstance(function, dict):
+                        name = function.get("name") or call.get("name") or call.get("terrabox_tool")
+                        arguments = function.get("arguments", call.get("arguments", {}))
+                    elif isinstance(call, dict):
+                        name = call.get("name") or call.get("terrabox_tool")
+                        arguments = call.get("arguments", {})
+                    else:
+                        name = None
+                        arguments = {}
+                    if not isinstance(arguments, str):
+                        arguments = _safe_json_dumps(arguments)
+                    rendered_calls.append(_safe_json_dumps({"name": name, "arguments": arguments}))
+                call_block = "\n".join(f"<tool_call>\n{item}\n</tool_call>" for item in rendered_calls)
+                body = f"{body}\n{call_block}" if body else call_block
+            final_answer = message.get("final_answer")
+            if final_answer:
+                final_block = f"Final answer:\n{final_answer}"
+                body = f"{body}\n{final_block}" if body else final_block
+        parts.append(f"<|im_start|>{role}\n{body}<|im_end|>\n")
+    return "".join(parts)
+
+
+def _messages_to_text(tokenizer: Any, messages: list[dict[str, Any]], *, chat_format: str = "auto") -> str:
+    if chat_format not in {"auto", "tokenizer", "current_harness"}:
+        raise ValueError(f"Unsupported chat format: {chat_format}")
+    if chat_format == "current_harness" or (
+        chat_format == "auto" and _has_current_harness_fields(messages)
+    ):
+        return _render_current_harness_messages(messages)
     if hasattr(tokenizer, "apply_chat_template"):
         return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
     return "\n".join(f"{m.get('role', '')}: {m.get('content', '')}" for m in messages)
@@ -52,11 +125,12 @@ def token_length_stats(
     *,
     max_seq_length: int,
     split_name: str,
+    chat_format: str = "auto",
 ) -> dict[str, Any]:
     lengths: list[int] = []
     overlong: list[dict[str, Any]] = []
     for index, row in enumerate(rows):
-        text = _messages_to_text(tokenizer, row.get("messages", []) or [])
+        text = _messages_to_text(tokenizer, row.get("messages", []) or [], chat_format=chat_format)
         encoded = tokenizer(text, add_special_tokens=False)
         length = len(encoded.input_ids)
         lengths.append(length)
@@ -99,6 +173,7 @@ def assert_no_overlength_rows(
     *,
     max_seq_length: int,
     split_name: str,
+    chat_format: str = "auto",
     drop: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Guard against SFTTrainer silently truncating tool catalog/messages.
@@ -109,12 +184,18 @@ def assert_no_overlength_rows(
     rollout regime (no lossy per-content compaction; rows that can't fit the
     window are removed rather than truncated mid-tool-call). Returns (kept_rows, stats).
     """
-    stats = token_length_stats(rows, tokenizer, max_seq_length=max_seq_length, split_name=split_name)
+    stats = token_length_stats(
+        rows,
+        tokenizer,
+        max_seq_length=max_seq_length,
+        split_name=split_name,
+        chat_format=chat_format,
+    )
     if stats["overlong_count"]:
         if drop:
             kept = [
                 row for row in rows
-                if len(tokenizer(_messages_to_text(tokenizer, row.get("messages", []) or []),
+                if len(tokenizer(_messages_to_text(tokenizer, row.get("messages", []) or [], chat_format=chat_format),
                                  add_special_tokens=False).input_ids) <= max_seq_length
             ]
             print(
@@ -135,6 +216,135 @@ def assert_no_overlength_rows(
             "or pass --drop-overlength; silent truncation is disabled."
         )
     return rows, stats
+
+
+def _extract_assistant_spans(text: str) -> list[str]:
+    marker = "<|im_start|>assistant\n"
+    next_marker = "<|im_start|>"
+    spans: list[str] = []
+    start = 0
+    while True:
+        idx = text.find(marker, start)
+        if idx < 0:
+            break
+        body_start = idx + len(marker)
+        body_end = text.find(next_marker, body_start)
+        if body_end < 0:
+            body_end = len(text)
+        span = text[body_start:body_end].replace("<|im_end|>", "")
+        spans.append(span)
+        start = body_end
+    return spans
+
+
+def render_and_mask_audit(
+    rows: list[dict[str, Any]],
+    tokenizer: Any,
+    *,
+    split_name: str,
+    chat_format: str,
+    max_examples: int = 3,
+) -> dict[str, Any]:
+    """Audit rendered SFT text before expensive model loading.
+
+    The actual TRL/Unsloth masking is still applied by ``train_on_responses_only``.
+    This audit checks the same ChatML boundaries: only assistant spans should be
+    trainable, tool calls/final answers must be present when source rows contain
+    them, and tool observations must not leak into assistant spans.
+    """
+    stats: dict[str, Any] = {
+        "split_name": split_name,
+        "num_rows": len(rows),
+        "chat_format": chat_format,
+        "source_tool_call_rows": 0,
+        "rendered_tool_call_rows": 0,
+        "source_final_answer_rows": 0,
+        "rendered_final_answer_rows": 0,
+        "assistant_span_count": 0,
+        "assistant_tokens": 0,
+        "total_tokens": 0,
+        "assistant_token_ratio": 0.0,
+        "assistant_spans_with_tool_response": 0,
+        "bad_examples": [],
+    }
+    for index, row in enumerate(rows):
+        messages = row.get("messages", []) or []
+        source_has_tool_calls = any(m.get("role") == "assistant" and m.get("tool_calls") for m in messages)
+        source_has_final_answer = any(m.get("role") == "assistant" and m.get("final_answer") for m in messages)
+        text = _messages_to_text(tokenizer, messages, chat_format=chat_format)
+        spans = _extract_assistant_spans(text)
+        assistant_text = "\n".join(spans)
+        total_tokens = len(tokenizer(text, add_special_tokens=False).input_ids)
+        assistant_tokens = len(tokenizer(assistant_text, add_special_tokens=False).input_ids) if assistant_text else 0
+        rendered_has_tool_calls = "<tool_call>" in assistant_text
+        rendered_has_final_answer = "Final answer:" in assistant_text
+        spans_with_tool_response = sum("<tool_response>" in span for span in spans)
+
+        stats["source_tool_call_rows"] += int(source_has_tool_calls)
+        stats["rendered_tool_call_rows"] += int(rendered_has_tool_calls)
+        stats["source_final_answer_rows"] += int(source_has_final_answer)
+        stats["rendered_final_answer_rows"] += int(rendered_has_final_answer)
+        stats["assistant_span_count"] += len(spans)
+        stats["assistant_tokens"] += assistant_tokens
+        stats["total_tokens"] += total_tokens
+        stats["assistant_spans_with_tool_response"] += spans_with_tool_response
+
+        if (
+            (source_has_tool_calls and not rendered_has_tool_calls)
+            or (source_has_final_answer and not rendered_has_final_answer)
+            or spans_with_tool_response
+            or not spans
+        ) and len(stats["bad_examples"]) < max_examples:
+            stats["bad_examples"].append(
+                {
+                    "row_index": index,
+                    "task_id": _row_id(row, index),
+                    "source_has_tool_calls": source_has_tool_calls,
+                    "rendered_has_tool_calls": rendered_has_tool_calls,
+                    "source_has_final_answer": source_has_final_answer,
+                    "rendered_has_final_answer": rendered_has_final_answer,
+                    "assistant_spans": len(spans),
+                    "assistant_spans_with_tool_response": spans_with_tool_response,
+                }
+            )
+    if stats["total_tokens"]:
+        stats["assistant_token_ratio"] = stats["assistant_tokens"] / stats["total_tokens"]
+    return stats
+
+
+def write_preflight_artifacts(
+    output_dir: str | Path,
+    *,
+    args: argparse.Namespace,
+    train_length_stats: dict[str, Any],
+    eval_length_stats: dict[str, Any],
+    train_mask_stats: dict[str, Any],
+    eval_mask_stats: dict[str, Any],
+    preview_text: str,
+) -> None:
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "base_model": args.model_path,
+        "train_file": args.train_file,
+        "val_file": args.val_file,
+        "chat_format": args.chat_format,
+        "mask_prompt": args.mask_prompt,
+        "loss_policy": "assistant_only" if args.mask_prompt else "full_text",
+        "length_stats": {
+            "train": train_length_stats,
+            "val": eval_length_stats,
+            "truncation_policy": "drop_overlength" if args.drop_overlength else "fail_before_training_if_any_row_exceeds_max_seq_length",
+        },
+        "mask_audit": {
+            "train": train_mask_stats,
+            "val": eval_mask_stats,
+        },
+    }
+    (out / "sft_preflight_metadata.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (out / "sft_render_preview.txt").write_text(preview_text, encoding="utf-8")
 
 
 def main() -> None:
@@ -173,6 +383,15 @@ def main() -> None:
                         help="Seconds to idle the GPU at each --rest-every-steps boundary.")
     parser.add_argument("--logging-steps", type=int, default=5)
     parser.add_argument("--save-merged-model", action="store_true")
+    parser.add_argument("--chat-format", choices=["auto", "tokenizer", "current_harness"], default="auto",
+                        help="How to render messages before SFT. 'auto' uses current_harness when rows contain "
+                             "tool_calls/tool/final_answer fields; otherwise tokenizer.apply_chat_template.")
+    parser.add_argument("--preflight-only", action="store_true",
+                        help="Only validate rendering, length, and assistant-only mask assumptions; do not load model/train.")
+    parser.add_argument("--strict-mask-audit", dest="strict_mask_audit", action="store_true", default=True,
+                        help="Fail before training if rendered tool calls/final answers are missing or tool responses "
+                             "leak into assistant spans (default on).")
+    parser.add_argument("--no-strict-mask-audit", dest="strict_mask_audit", action="store_false")
     # veRL standard: compute loss only on assistant turns (mask system/user/
     # observation). veRL's MultiTurnSFTDataset does this; mirror it here so the
     # unsloth backend trains the same objective. Default ON.
@@ -208,17 +427,27 @@ def main() -> None:
     parser.add_argument("--no-resume", dest="resume", action="store_false")
     args = parser.parse_args()
 
+    # Unsloth monkey-patches parts of the HF stack and must be imported before
+    # transformers during real training.  Keep preflight-only lightweight so it
+    # can still run on CPU-only/debug environments without importing Unsloth.
+    FastLanguageModel = None
+    train_on_responses_only = None
+    if not args.preflight_only:
+        try:
+            from unsloth import FastLanguageModel as _FastLanguageModel
+            from unsloth.chat_templates import train_on_responses_only as _train_on_responses_only
+        except ImportError as exc:
+            raise RuntimeError(
+                "SFT training requires the unsloth environment with unsloth installed."
+            ) from exc
+        FastLanguageModel = _FastLanguageModel
+        train_on_responses_only = _train_on_responses_only
+
     try:
-        import time
-        from unsloth import FastLanguageModel
-        from unsloth.chat_templates import train_on_responses_only
-        from datasets import Dataset
-        from transformers import AutoTokenizer, TrainerCallback
-        from transformers.trainer_utils import get_last_checkpoint
-        from trl import SFTTrainer, SFTConfig
+        from transformers import AutoTokenizer
     except ImportError as exc:
         raise RuntimeError(
-            "SFT training requires the unsloth environment with datasets, trl, and unsloth installed."
+            "SFT preflight/training requires transformers in the active environment."
         ) from exc
 
     train_rows = _load_rows(args.train_file)
@@ -233,6 +462,7 @@ def main() -> None:
         preflight_tokenizer,
         max_seq_length=args.max_seq_length,
         split_name="train",
+        chat_format=args.chat_format,
         drop=args.drop_overlength,
     )
     eval_rows, eval_length_stats = assert_no_overlength_rows(
@@ -240,8 +470,79 @@ def main() -> None:
         preflight_tokenizer,
         max_seq_length=args.max_seq_length,
         split_name="val",
+        chat_format=args.chat_format,
         drop=args.drop_overlength,
     )
+    train_mask_stats = render_and_mask_audit(
+        train_rows,
+        preflight_tokenizer,
+        split_name="train",
+        chat_format=args.chat_format,
+    )
+    eval_mask_stats = render_and_mask_audit(
+        eval_rows,
+        preflight_tokenizer,
+        split_name="val",
+        chat_format=args.chat_format,
+    )
+    bad_reasons = []
+    for name, stats in (("train", train_mask_stats), ("val", eval_mask_stats)):
+        if stats["source_tool_call_rows"] != stats["rendered_tool_call_rows"]:
+            bad_reasons.append(
+                f"{name}: rendered tool_call rows {stats['rendered_tool_call_rows']} != "
+                f"source {stats['source_tool_call_rows']}"
+            )
+        if stats["source_final_answer_rows"] != stats["rendered_final_answer_rows"]:
+            bad_reasons.append(
+                f"{name}: rendered final_answer rows {stats['rendered_final_answer_rows']} != "
+                f"source {stats['source_final_answer_rows']}"
+            )
+        if stats["assistant_spans_with_tool_response"]:
+            bad_reasons.append(f"{name}: tool_response appears inside assistant spans")
+        if not stats["assistant_span_count"]:
+            bad_reasons.append(f"{name}: no assistant spans detected")
+    if args.strict_mask_audit and bad_reasons:
+        raise ValueError("SFT render/mask audit failed: " + "; ".join(bad_reasons))
+
+    preview_row = train_rows[0] if train_rows else {}
+    preview_text = _messages_to_text(
+        preflight_tokenizer,
+        preview_row.get("messages", []) or [],
+        chat_format=args.chat_format,
+    ) if preview_row else ""
+    write_preflight_artifacts(
+        args.output_dir,
+        args=args,
+        train_length_stats=train_length_stats,
+        eval_length_stats=eval_length_stats,
+        train_mask_stats=train_mask_stats,
+        eval_mask_stats=eval_mask_stats,
+        preview_text=preview_text,
+    )
+    print(
+        "[SFT preflight] "
+        f"chat_format={args.chat_format} mask_prompt={args.mask_prompt} "
+        f"train_rows={len(train_rows)} val_rows={len(eval_rows)} "
+        f"train_assistant_token_ratio={train_mask_stats['assistant_token_ratio']:.3f} "
+        f"val_assistant_token_ratio={eval_mask_stats['assistant_token_ratio']:.3f}",
+        flush=True,
+    )
+    if args.preflight_only:
+        print(f"[SFT preflight] wrote {Path(args.output_dir) / 'sft_preflight_metadata.json'}", flush=True)
+        return
+
+    try:
+        import time
+        from datasets import Dataset
+        from transformers import TrainerCallback
+        from transformers.trainer_utils import get_last_checkpoint
+        from trl import SFTTrainer, SFTConfig
+    except ImportError as exc:
+        raise RuntimeError(
+            "SFT training requires the unsloth environment with datasets and trl installed."
+        ) from exc
+    if FastLanguageModel is None or train_on_responses_only is None:
+        raise RuntimeError("Internal error: Unsloth training helpers were not initialized.")
 
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=args.model_path,
@@ -267,7 +568,7 @@ def main() -> None:
     )
 
     def convert(row: dict[str, Any]) -> dict[str, str]:
-        return {"text": _messages_to_text(tokenizer, row.get("messages", []) or [])}
+        return {"text": _messages_to_text(tokenizer, row.get("messages", []) or [], chat_format=args.chat_format)}
 
     train_dataset = Dataset.from_list([convert(row) for row in train_rows])
     # Skip building/passing the eval set entirely when in-loop eval is disabled,
@@ -299,7 +600,14 @@ def main() -> None:
         save_total_limit=args.save_total_limit,
         bf16=True,
         report_to=[],
-        packing=False,
+        # Unsloth's compiled SFTTrainer may force padding-free processing.  In
+        # current TRL, padding-free without packing refuses to enforce
+        # max_length and aborts before step 1, so enable packing explicitly.
+        # The dataset is already preflighted for max_seq_length; packing only
+        # changes batch construction, not which tokens are supervised.
+        packing=True,
+        packing_strategy="bfd",
+        padding_free=True,
         # Cap CPU parallelism so the load-phase tokenization doesn't pin all cores
         # at 100% (a CPU power spike that can trip a marginal breaker before any
         # GPU step runs). See --dataset-num-proc.
@@ -451,8 +759,15 @@ def main() -> None:
         "length_stats": {
             "train": train_length_stats,
             "val": eval_length_stats,
-            "truncation_policy": "fail_before_training_if_any_row_exceeds_max_seq_length",
+            "truncation_policy": "drop_overlength" if args.drop_overlength else "fail_before_training_if_any_row_exceeds_max_seq_length",
         },
+        "mask_audit": {
+            "train": train_mask_stats,
+            "val": eval_mask_stats,
+        },
+        "chat_format": args.chat_format,
+        "mask_prompt": args.mask_prompt,
+        "loss_policy": "assistant_only" if args.mask_prompt else "full_text",
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "sft_training_metadata.json").write_text(

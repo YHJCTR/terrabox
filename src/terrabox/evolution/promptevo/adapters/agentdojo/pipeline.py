@@ -221,12 +221,37 @@ def _cleanup_stale_agentdojo_containers() -> None:
 
 def _acquire_rollout_lock():
     ROLLOUT_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    handle = ROLLOUT_LOCK_PATH.open("w")
-    try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as exc:
-        handle.close()
-        raise RuntimeError("another AgentDojo rollout pipeline is already running") from exc
+    timeout = float(os.getenv("TERRABOX_AGENTDOJO_ROLLOUT_LOCK_TIMEOUT_SECONDS", "21600"))
+    poll_seconds = float(os.getenv("TERRABOX_AGENTDOJO_ROLLOUT_LOCK_POLL_SECONDS", "30"))
+    handle = ROLLOUT_LOCK_PATH.open("a+")
+    started = time.monotonic()
+    last_log = 0.0
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError as exc:
+            elapsed = time.monotonic() - started
+            if timeout > 0 and elapsed >= timeout:
+                handle.seek(0)
+                owner = handle.read().strip()
+                handle.close()
+                raise RuntimeError(
+                    "timed out waiting for AgentDojo rollout lock "
+                    f"after {elapsed:.0f}s; current lock record: {owner or '<empty>'}"
+                ) from exc
+            if elapsed - last_log >= max(30.0, poll_seconds):
+                handle.seek(0)
+                owner = handle.read().strip()
+                print(
+                    f"[{time.strftime('%F %T')}] waiting for AgentDojo rollout lock "
+                    f"held by {owner or '<unknown>'}",
+                    flush=True,
+                )
+                last_log = elapsed
+            time.sleep(max(1.0, poll_seconds))
+    handle.seek(0)
+    handle.truncate()
     handle.write(f"pid={os.getpid()} started={time.strftime('%F %T')}\n")
     handle.flush()
     return handle
@@ -1055,6 +1080,98 @@ def _agentdojo_accept(after: dict[str, Any], before: dict[str, Any], _max_drop: 
     return _agentdojo_security_gate(after, before) and _agentdojo_score(after) >= _agentdojo_score(before)
 
 
+def _load_stage1_candidate_cache(
+    path: Path,
+    *,
+    version: str,
+    optimizer_version: str,
+    base_prompt_version: str,
+) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return []
+    if (
+        data.get("version") != version
+        or data.get("optimizer_version") != optimizer_version
+        or data.get("base_prompt_version") != base_prompt_version
+        or data.get("proposal_format") != "patch"
+    ):
+        return []
+    proposals = data.get("proposals")
+    if not isinstance(proposals, list):
+        return []
+    return [item for item in proposals if isinstance(item, dict) and str(item.get("compiled_prompt") or "").strip()]
+
+
+def _write_stage1_candidate_cache(
+    path: Path,
+    *,
+    version: str,
+    optimizer_version: str,
+    base_prompt_version: str,
+    proposals: list[dict[str, Any]],
+) -> None:
+    _write_json(
+        path,
+        {
+            "version": version,
+            "optimizer_version": optimizer_version,
+            "base_prompt_version": base_prompt_version,
+            "proposal_format": "patch",
+            "proposals": proposals,
+        },
+    )
+
+
+def _recover_stage1_candidate_cache(
+    record: Path,
+    *,
+    version: str,
+    optimizer_version: str,
+    base_prompt_version: str,
+    candidates: int,
+) -> list[dict[str, Any]]:
+    """Recover Stage1 candidates from already-started validation directories.
+
+    Older AgentDojo runs wrote each candidate prompt into
+    ``validation/stage1_candidate_*/active_system_message.txt`` before the
+    Stage1 candidate cache existed. Recovering those prompts makes interrupted
+    long LongCat runs resumable without asking the optimizer to produce a new
+    candidate set or drifting to new validation fingerprints.
+    """
+    recovered: list[dict[str, Any]] = []
+    for index in range(candidates):
+        prompt_path = record / "validation" / f"stage1_candidate_{index}" / "active_system_message.txt"
+        if not prompt_path.is_file():
+            break
+        try:
+            prompt = prompt_path.read_text(encoding="utf-8")
+        except OSError:
+            break
+        if not prompt.strip():
+            break
+        recovered.append(
+            {
+                "compiled_prompt": prompt,
+                "patches": [],
+                "rationale": "Recovered from an existing validation prompt written before candidate checkpointing.",
+                "recovered_from": str(prompt_path),
+            }
+        )
+    if recovered:
+        _write_stage1_candidate_cache(
+            record / "optimization" / "stage1_candidates.json",
+            version=version,
+            optimizer_version=optimizer_version,
+            base_prompt_version=base_prompt_version,
+            proposals=recovered,
+        )
+    return recovered
+
+
 class _AgentDojoValidationRunner:
     """Execute candidate prompts on the same real AgentDojo dev slice."""
 
@@ -1125,21 +1242,48 @@ def optimize_stage1(
         meta_prompt_version=optimizer_version,
     )
     validation_runner = _AgentDojoValidationRunner(record_group, output_dir, agent_provider)
-    candidate_records: list[dict[str, Any]] = []
-    for index in range(candidates):
+    candidate_cache_path = record / "optimization" / "stage1_candidates.json"
+    proposals = _load_stage1_candidate_cache(
+        candidate_cache_path,
+        version=version,
+        optimizer_version=optimizer_version,
+        base_prompt_version=base_prompt_version,
+    )
+    if not proposals:
+        proposals = _recover_stage1_candidate_cache(
+            record,
+            version=version,
+            optimizer_version=optimizer_version,
+            base_prompt_version=base_prompt_version,
+            candidates=candidates,
+        )
+    trace_text = ""
+    while len(proposals) < candidates:
+        if not trace_text:
+            trace_text = _sample_stage1_traces(base_results)
         proposal = optimizer.propose_protocol_patches(
             base_prompt,
-            _sample_stage1_traces(base_results),
+            trace_text,
             max_tokens=max_tokens,
             metric_block=json.dumps(metrics, ensure_ascii=False, indent=2),
             comparison="Stage1: use only Base rollout observations and aggregate utility/security metrics.",
         )
         if proposal is None:
-            continue
-        candidate_path = validation_runner.run(proposal.compiled_prompt, dev_ids, f"stage1_candidate_{index}")
+            break
+        proposals.append(proposal.to_dict())
+        _write_stage1_candidate_cache(
+            candidate_cache_path,
+            version=version,
+            optimizer_version=optimizer_version,
+            base_prompt_version=base_prompt_version,
+            proposals=proposals,
+        )
+    candidate_records: list[dict[str, Any]] = []
+    for index, proposal in enumerate(proposals[:candidates]):
+        candidate_path = validation_runner.run(str(proposal["compiled_prompt"]), dev_ids, f"stage1_candidate_{index}")
         candidate_metrics = AgentDojoMetricProvider(results_path_fn=lambda exp: exp).aggregate(candidate_path, dev_ids)
         candidate_records.append({
-            "index": index, "experiment": candidate_path, "proposal": proposal.to_dict(),
+            "index": index, "experiment": candidate_path, "proposal": proposal,
             "metrics": candidate_metrics, "score": _agentdojo_score(candidate_metrics),
             "security_gate": _agentdojo_security_gate(candidate_metrics, base_dev),
         })
@@ -1243,6 +1387,8 @@ def optimize_stage2(
         max_tokens=max_tokens,
         diagnose_max_tokens=max_tokens,
         objective=objective,
+        proposal_format="patch",
+        candidate_cache_path=str(record / "optimization" / "stage2_candidates.json"),
     )
     prompt_path = store.save(
         stage2_version,
@@ -1342,6 +1488,7 @@ def optimize_stage3(
         diagnose_max_tokens=max_tokens,
         objective=objective,
         proposal_format="patch",
+        candidate_cache_path=str(record / "optimization" / "stage3_candidates.json"),
     )
     prompt_path = store.save(
         stage3_version,

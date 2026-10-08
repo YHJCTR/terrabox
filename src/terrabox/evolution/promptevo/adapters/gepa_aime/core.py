@@ -27,7 +27,7 @@ DEFAULT_STATIC_PROMPT = (
     "Put your final answer in the format '### <answer>'"
 )
 DEFAULT_VERSIONS_DIR = "evolution_store/promptevo/gepa_aime/versions"
-DEFAULT_EXPERIMENTS_DIR = os.path.join(os.path.dirname(__file__), "experiments")
+DEFAULT_EXPERIMENTS_DIR = str(Path(__file__).resolve().parents[6] / "tmp" / "promptevo_gepa_aime_experiments")
 DEFAULT_HF_HOME = "/data1/yuhongjie2/hf_cache"
 DEFAULT_HF_DATASETS_CACHE = "/data1/yuhongjie2/hf_datasets_cache"
 

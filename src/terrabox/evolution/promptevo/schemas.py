@@ -145,6 +145,9 @@ class UpdateResult:
     dev_after: dict[str, float] = field(default_factory=dict)
     reason: str = ""
     protocol_patches: list[ProtocolPatch] = field(default_factory=list)
+    patch_composition: str = "whole"
+    selected_patch_ids: list[str] = field(default_factory=list)
+    candidate_evaluations: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)

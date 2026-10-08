@@ -1,5 +1,7 @@
 # EvolveR lifecycle strict adapted baseline
 
+Embedding transport、索引持久化和相似度计算复用 `shared/embedding_index.py`。`--strict-nolabel` 会同时从 principle embedding 文档中移除 `type`，建库和查询使用同一序列化规则。
+
 本模块用于在 Terrabox/OEA 上做 EvolveR 风格的第三方对比实验。它是 **official-source-guided adapted**，不是完整官方 EvolveR RL 复刻。
 
 ## 官方机制对齐点

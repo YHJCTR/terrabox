@@ -50,6 +50,6 @@ cd /data1/yuhongjie2/terrabox && PYTHONPATH=src /data/yhj/miniconda3/envs/unslot
 Outputs live under:
 
 ```text
-src/terrabox/evolution/promptevo/adapters/gepa_aime/experiments/<group>/
+tmp/promptevo_gepa_aime_experiments/<group>/
 evolution_store/promptevo/gepa_aime/versions/
 ```

@@ -2,6 +2,72 @@
 
 Terrabox rollout 的离线产物状态转移经验自进化模块。
 
+## 2026-09-20 训练侧反例验证与全量评测入口
+
+`runner boundary-experiment` 串联训练侧成对真实工具重放、独立训练验证、冻结
+Boundary sidecar 和 OEA 全量评测。父库与历史 v4-clean 不重跑、不覆盖。运行方式：
+
+```bash
+PYTHONPATH=src python -m terrabox.evolution.experience_evo.runner boundary-experiment \
+  --parent-store evolution_store/experience_evo/oea_train2000_v4_clean_longcat_20260814 \
+  --output-store evolution_store/experience_evo/oea_train2000_boundary_full_20260920 \
+  --train-results tmp/trajectories/longcat_oea_train2000_seed42_base_nightly_20260724/standard/results \
+  --eval-tasks data/oea_full_sft/openearth_test_tasks.json \
+  --output-dir tmp/agent_rl_runs/longcat_boundary/longcat_boundary_full_20260920 \
+  --vlm-gpu 0 --tool-gpu 1
+```
+
+先检查训练来源与父 manifest 一致、训练问题与测试问题不重叠；按问题哈希分为发现与验证两部分。
+重放复制输入到独立目录，控制分支成功且删除参数分支出现可归因错误，才算有效反例；每个工具、
+必需参数、分区默认最多尝试两个不同问题。缺历史文件、网络/OOM/API 故障、不能确定归因的失败均记 unknown。
+条件在两分区各有至少两个不同问题的正反支持，且没有反向成功证据，才用于条件化规则。
+runtime 将条件注入当前选中的 family，并在相应工具调用前检查；未知元数据仍可用。
+`TERRABOX_EXPEVO_BOUNDARY_DISABLE=1` 关闭 Boundary；完整回退使用 `experience_evo_v4_clean` 和原 store。
+
+完整入口随后遍历全部 803 个 family，由独立的 Proposer 提出最多两个语义改变/语义保持/输入破坏
+探针，只允许修改现有非文件、非输出参数，隔离执行原调用与反例调用；Auditor 根据实际观察审核
+keep/add_condition/split_family/quarantine/defer_unknown。两个角色都通过 `EvolutionLLMClient`
+调用现有 Docker 服务，禁用静默 provider 降级；响应可带 Markdown/说明文字，入口会提取其中的 JSON。
+连续格式失败时只记录 `defer_unknown`（Proposer 记录空 probes），不把无证据的模型输出当作边界结论，
+也不因此中止整个可续跑 workflow。
+若旧的中断记录含有不完整的 `proposal`/`audit` 字段，续跑时会先规范化为
+`defer_unknown`，避免单个 family 的脏记录使整批审核失败。
+默认 proposer=9102（当前 SFT Qwen2.5-3B），auditor=9113（当前原生 Qwen2.5-3B）。这是两个
+角色与独立上下文，不意味着统计独立的真值判定器。训练记录缺文件或前缀不能重建时明确 unknown。
+
+方法范围须准确报告：参数缺失成对重放的证据、元数据关系检查与 LLM 语义审核分开统计。
+路径重命名与已知 CRS/单位/分辨率关系改变的确定性检查不是真实工具重放；LLM 提出的可执行参数
+变换才进入真实重放。语义条件作为 soft guidance，不能凭模型打分硬判未知时间/对象错误。
+`children` / `semantic_branches` 是适用域分裂，复用父策略并在违反条件时要求重绑定/回退，不是
+重新蒸馏一套新工具流程。当前探针为单步成对执行，尚不验证任意长后缀反事实因果效应。
+
+进度在 `<output-dir>/boundary_workflow.json`；真实探针每条原子写入 `probes/results/`，续跑复用。
+没有有效机器条件或语义审核更新时流程失败退出，不用空边界冒充新方法。评测冻结后使用 1162 条、15 轮、完整工具目录，
+显式 `--no-skip-mock/osm/bing/vlm/changeos`，GPU workers=1、nogpu workers=2，LongCat 请求间隔 5 秒。
+既有 v4-clean 作为固定参照；历史 API/服务版本漂移仍需在结果中说明，不能宣称逐比特公平。
+
+## 2026-09-19 边界自进化模式
+
+`experience_evo_boundary` 是 v4-clean 的独立模式。它只读复制
+`oea_train2000_v4_clean_longcat_20260814`，在新目录中增加
+`boundary_rules.jsonl`，根据当前运行的产物状态检查经验的适用边界；原 store、
+`experience_evo_v4_clean` 入口和历史结果不被修改。当前 v1 使用确定性规则记录三类
+反例假设：语义保持变换、语义改变变换和前置条件破坏。缺少必需产物时回退通用 ReAct，
+元数据未知时不强行拒绝。
+
+构建独立 store：
+
+```bash
+PYTHONPATH=src python -m terrabox.evolution.experience_evo.runner build-boundary \
+  --parent-store evolution_store/experience_evo/oea_train2000_v4_clean_longcat_20260814 \
+  --output-store evolution_store/experience_evo/oea_train2000_v4_clean_boundary_v1_20260919
+```
+
+运行时使用 `--evolution-method experience_evo_boundary` 和新 store。该模式的
+`boundary_manifest.json` 记录父 store 哈希、规则数量、反例类型和无标签约束，便于和
+v4-clean 做公平对照。当前版本是确定性 v1；后续可在不改父 store 的前提下加入真实工具
+反例审核和版本化更新。
+
 本模块刻意放在 `promptevo/` 同级而不是内部：PromptEvo 优化静态系统 prompt，
 ExperienceEvo 构建外部经验库。当前 MVP 是离线优先：
 
