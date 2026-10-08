@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .adapters import DEFAULT_ADAPTER, DEFAULT_TOTAL
+from .adapters import DEFAULT_ADAPTER, DEFAULT_SCENE
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -20,15 +20,24 @@ def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/api/scenes")
+def scenes() -> dict:
+    return {"scenes": DEFAULT_ADAPTER.scenes()}
+
+
 @app.get("/api/experiments")
-def experiments() -> dict:
-    refs = DEFAULT_ADAPTER.discover()
+def experiments(scene: str = Query(DEFAULT_SCENE)) -> dict:
+    refs = DEFAULT_ADAPTER.discover(scene)
     return {
         "experiments": [
             {
                 "name": ref.name,
+                "scene": ref.scene,
+                "id": ref.id,
                 "kind": ref.kind,
-                "results_dir": str(ref.results_dir),
+                # ExperimentRef exposes the discovered result location as
+                # source_path; keep the API field name stable for the UI.
+                "results_dir": str(ref.source_path),
                 "prompt_path": str(ref.prompt_path) if ref.prompt_path else None,
             }
             for ref in refs
@@ -39,11 +48,11 @@ def experiments() -> dict:
 @app.get("/api/status")
 def status(
     experiment: str = Query(..., description="Experiment name or results directory"),
+    scene: str = Query(DEFAULT_SCENE, description="Evaluation scene"),
     scope: str = Query("all", pattern="^(all|online|offline)$"),
-    total: int = Query(DEFAULT_TOTAL, ge=0),
 ) -> dict:
     try:
-        return DEFAULT_ADAPTER.status(experiment, scope=scope, total=total)
+        return DEFAULT_ADAPTER.status(scene, experiment, scope=scope)
     except Exception as exc:  # noqa: BLE001 - return readable UI errors
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -52,17 +61,20 @@ def status(
 def compare(
     current: str = Query(..., description="Current experiment name or results directory"),
     baseline: str = Query(..., description="Baseline experiment name or results directory"),
+    scene: str = Query(DEFAULT_SCENE, description="Evaluation scene"),
 ) -> dict:
     try:
-        return DEFAULT_ADAPTER.compare(current, baseline)
+        return DEFAULT_ADAPTER.compare(scene, current, baseline)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/prompt")
-def prompt(experiment: str = Query(..., description="Experiment name or results directory")) -> dict:
+def prompt(
+    experiment: str = Query(..., description="Experiment name or results directory"),
+    scene: str = Query(DEFAULT_SCENE, description="Evaluation scene"),
+) -> dict:
     try:
-        return DEFAULT_ADAPTER.prompt(experiment)
+        return DEFAULT_ADAPTER.prompt(scene, experiment)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-

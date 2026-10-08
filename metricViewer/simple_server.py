@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from .adapters import DEFAULT_ADAPTER, DEFAULT_TOTAL
+from .adapters import DEFAULT_ADAPTER, DEFAULT_SCENE
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -30,14 +30,17 @@ class MetricViewerHandler(BaseHTTPRequestHandler):
                 self._send_file(target)
                 return
             if parsed.path == "/api/experiments":
-                refs = DEFAULT_ADAPTER.discover()
+                scene = parse_qs(parsed.query).get("scene", [DEFAULT_SCENE])[0]
+                refs = DEFAULT_ADAPTER.discover(scene)
                 self._send_json(
                     {
                         "experiments": [
                             {
                                 "name": ref.name,
+                                "scene": ref.scene,
+                                "id": ref.id,
                                 "kind": ref.kind,
-                                "results_dir": str(ref.results_dir),
+                                "results_dir": str(ref.source_path),
                                 "prompt_path": str(ref.prompt_path) if ref.prompt_path else None,
                             }
                             for ref in refs
@@ -48,20 +51,22 @@ class MetricViewerHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/status":
                 qs = parse_qs(parsed.query)
                 experiment = self._required(qs, "experiment")
+                scene = qs.get("scene", [DEFAULT_SCENE])[0]
                 scope = qs.get("scope", ["all"])[0]
-                total = int(qs.get("total", [str(DEFAULT_TOTAL)])[0])
-                self._send_json(DEFAULT_ADAPTER.status(experiment, scope=scope, total=total))
+                self._send_json(DEFAULT_ADAPTER.status(scene, experiment, scope=scope))
                 return
             if parsed.path == "/api/compare":
                 qs = parse_qs(parsed.query)
                 current = self._required(qs, "current")
                 baseline = self._required(qs, "baseline")
-                self._send_json(DEFAULT_ADAPTER.compare(current, baseline))
+                scene = qs.get("scene", [DEFAULT_SCENE])[0]
+                self._send_json(DEFAULT_ADAPTER.compare(scene, current, baseline))
                 return
             if parsed.path == "/api/prompt":
                 qs = parse_qs(parsed.query)
                 experiment = self._required(qs, "experiment")
-                self._send_json(DEFAULT_ADAPTER.prompt(experiment))
+                scene = qs.get("scene", [DEFAULT_SCENE])[0]
+                self._send_json(DEFAULT_ADAPTER.prompt(scene, experiment))
                 return
             self._send_json({"detail": "not found"}, status=404)
         except Exception as exc:  # noqa: BLE001 - show readable UI errors
@@ -101,4 +106,3 @@ def run(host: str = "127.0.0.1", port: int = 8765) -> None:
     server = ThreadingHTTPServer((host, port), MetricViewerHandler)
     print(f"Metric Viewer running at http://{host}:{port}")
     server.serve_forever()
-

@@ -85,6 +85,9 @@ ssh -L 8766:127.0.0.1:8766 yuhongjie@<服务器地址>
 - 对比模式：选择任意两个实验，只对两边都存在的同一批 `task_id` 做配对比较。
 - Static Prompt：查看当前所选实验能够解析到的静态提示词。
 - 实验列表来自各 adapter 对 `results/` 目录的扫描；逐任务 JSON 仍是指标计算的权威来源。
+- 后端 adapter 现按 scene 组织（`terrabox` / `api_bank` / `tau2_bench` / `agentdojo` / `toolbench` / `gepa_aime`）。
+  `GET /api/scenes` 返回各 scene 的实验数量；`/api/experiments`、`/api/status`、`/api/compare`、`/api/prompt`
+  都接受可选的 `scene` 查询参数，默认 `terrabox`。前端页面仍只用默认 scene，功能不受影响。
 
 ## 停止服务
 
