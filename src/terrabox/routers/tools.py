@@ -209,6 +209,13 @@ def make_tools_router(config: RouterConfig) -> APIRouter:
 
         saved_paths = await save_upload_files(files, upload_dir=runtime_metadata["upload_dir"])
 
+        # Modality-neutral contract for remote-sensing inputs. Keep image aliases
+        # below for existing tools and clients that still expect them.
+        if saved_paths:
+            inputs_dict["files"] = saved_paths
+            inputs_dict["data_files"] = saved_paths
+            inputs_dict["uploaded_files"] = saved_paths
+
         # Write back to image/images; also populate legacy image_path/image_paths keys
         if len(saved_paths) > 1:
             inputs_dict["images"] = saved_paths

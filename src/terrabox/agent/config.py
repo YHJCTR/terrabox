@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import threading
+import contextvars
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,19 @@ except Exception:  # pragma: no cover - fallback for minimal Python envs
     yaml = None
 
 from .modes import list_agent_modes
+
+_REQUEST_LLM_PROVIDER: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "terrabox_request_llm_provider", default=None
+)
+
+def set_request_llm_provider(provider: str | None):
+    value = (provider or "").strip().lower() or None
+    if value not in {None, "local", "deepseek", "longcat"}:
+        raise ValueError("llm_provider must be one of: local, deepseek, longcat")
+    return _REQUEST_LLM_PROVIDER.set(value)
+
+def reset_request_llm_provider(token) -> None:
+    _REQUEST_LLM_PROVIDER.reset(token)
 
 
 def _repo_root() -> Path:
@@ -114,6 +128,7 @@ class AgentConfig:
     remote_llm_api_base: str = "https://api.openai.com/v1"
     remote_llm_api_key: str = ""
     remote_llm_model: str = "gpt-4o"
+    llm_provider: str = ""
 
     # Local LLM runtime parameters
     local_llm_max_model_len: int = 24576   # token context window (GPU-limited; max ~24960)
@@ -185,6 +200,16 @@ def load_config() -> AgentConfig:
             )
 
     config = AgentConfig(**{k: v for k, v in data.items() if hasattr(AgentConfig, k)})
+    request_provider = _REQUEST_LLM_PROVIDER.get()
+    if request_provider:
+        config.llm_provider = request_provider
+        config.use_local_llm = request_provider == "local"
+        if request_provider in {"deepseek", "longcat"}:
+            from .llm_provider import resolve_provider
+            spec = resolve_provider(request_provider)
+            config.remote_llm_api_base = spec.base_url
+            config.remote_llm_api_key = spec.api_key
+            config.remote_llm_model = spec.model
     if config.circuit_breaker_overrides is None:
         config.circuit_breaker_overrides = {}
     if config.human_tool_approval is None:

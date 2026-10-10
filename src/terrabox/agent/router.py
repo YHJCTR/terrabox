@@ -5,6 +5,7 @@ from typing import List, Optional
 
 import asyncio
 import functools
+import contextvars
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
@@ -28,7 +29,7 @@ from ..core.schemas import (
 from ..routers.deps import current_user_from_jwt
 from ..core.utils.uploads import save_upload_files
 from .graph import clear_session, new_session_id, run_agent_with_meta, stream_agent
-from .config import load_config
+from .config import load_config, reset_request_llm_provider, set_request_llm_provider
 from .runtime import get_runtime
 from .session import BtwSessionNotFound, compact_session, get_context_status, run_btw_query
 from .llm import get_llm
@@ -40,6 +41,8 @@ router = APIRouter(prefix="/v1/gui/agent", tags=["agent"])
 async def agent_chat(
     message: str = Form(...),
     session_id: Optional[str] = Form(None),
+    language: str = Form("auto"),
+    llm_provider: str = Form("deepseek"),
     files: List[UploadFile] = File(default=[]),
     current_user: models.User = Depends(current_user_from_jwt),
     db: Session = Depends(get_db),
@@ -49,23 +52,31 @@ async def agent_chat(
 
     - **message**: User's text prompt
     - **session_id**: Conversation session ID (omit to start a new session)
-    - **files**: Optional image uploads (paths will be passed to the Agent)
+    - **files**: Optional multimodal uploads (images, GeoTIFF, GeoJSON, GPKG, SHP, KML; paths are passed to the Agent)
+    - **language**: `zh`, `en`, or `auto` response language preference
+    - **llm_provider**: `deepseek`, `longcat`, or `local`
     """
     if not session_id:
         session_id = new_session_id()
 
     image_paths = await save_upload_files(files)
+    message = _localized_message(message, language)
+    try:
+        provider_token = set_request_llm_provider(llm_provider)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None, functools.partial(run_agent_with_meta, session_id, message, image_paths, current_user, db)
-        )
+        call = functools.partial(run_agent_with_meta, session_id, message, image_paths, current_user, db)
+        result = await loop.run_in_executor(None, contextvars.copy_context().run, call)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Agent error: {e}",
         )
+    finally:
+        reset_request_llm_provider(provider_token)
 
     return {"response": result["response"], "session_id": session_id, "run_id": result["run_id"]}
 
@@ -74,6 +85,8 @@ async def agent_chat(
 async def agent_chat_stream(
     message: str = Form(...),
     session_id: Optional[str] = Form(None),
+    language: str = Form("auto"),
+    llm_provider: str = Form("deepseek"),
     files: List[UploadFile] = File(default=[]),
     current_user: models.User = Depends(current_user_from_jwt),
     db: Session = Depends(get_db),
@@ -89,12 +102,33 @@ async def agent_chat_stream(
         session_id = new_session_id()
 
     image_paths = await save_upload_files(files)
+    message = _localized_message(message, language)
+    try:
+        provider_token = set_request_llm_provider(llm_provider)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    async def _stream_with_provider():
+        try:
+            async for chunk in stream_agent(session_id, message, image_paths, current_user, db):
+                yield chunk
+        finally:
+            reset_request_llm_provider(provider_token)
 
     return StreamingResponse(
-        stream_agent(session_id, message, image_paths, current_user, db),
+        _stream_with_provider(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+def _localized_message(message: str, language: str) -> str:
+    normalized = (language or "auto").strip().lower()
+    if normalized in {"en", "english"}:
+        return f"{message}\n\n[Response language: English. Use English for the final answer and explanations.]"
+    if normalized in {"zh", "中文", "chinese"}:
+        return f"{message}\n\n[回答语言：中文。最终回答和解释请使用中文。]"
+    return message
 
 
 @router.delete("/sessions/{session_id}")

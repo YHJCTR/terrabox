@@ -91,6 +91,8 @@ def run_sample(
     llm_port: int,
     mode: str = "llm_driven",
     max_rounds: int = 10,
+    provider: str = "local",
+    language: str = "zh",
 ) -> Generator[dict, None, None]:
     """
     执行单条 SFT 样本的工具链。
@@ -110,7 +112,7 @@ def run_sample(
     if mode == "replay":
         yield from _replay_mode(sample)
     else:
-        yield from _llm_driven_mode(sample, llm_port, max_rounds)
+        yield from _llm_driven_mode(sample, llm_port, max_rounds, provider=provider, language=language)
 
 
 # ---------------------------------------------------------------------------
@@ -322,8 +324,11 @@ def _parse_json_action(text: str) -> dict | None:
 
 def _llm_driven_mode(
     sample: dict,
-    llm_port: int,
+    llm_port: int | None,
     max_rounds: int,
+    *,
+    provider: str = "local",
+    language: str = "zh",
 ) -> Generator[dict, None, None]:
     """
     JSON 行动协议驱动的多轮工具调用循环。
@@ -340,36 +345,36 @@ def _llm_driven_mode(
         yield {"type": "error", "message": "openai package not installed. Run: pip install openai"}
         return
 
-    from .tool_bridge import get_expected_tool_schemas, execute_tool
+    from .tool_bridge import get_tool_schemas, get_expected_tool_schemas, execute_tool
     from .docker_utils import perception_manager, get_llm_model_name, TOOL_DOCKER_FULL_MAP
 
     tool_calls_in_sample = sample.get("tool_calls", [])
-    schemas = get_expected_tool_schemas(tool_calls_in_sample)
+    schemas = get_expected_tool_schemas(tool_calls_in_sample) if tool_calls_in_sample else get_tool_schemas()
 
     if not schemas:
-        yield {"type": "error", "message": "No tool schemas available for this sample"}
+        yield {"type": "error", "message": "No registered tool schemas available"}
         return
 
     tool_text = _build_tool_prompt(schemas)
 
     # 构建工具调用顺序提示（严格顺序，参数由 LLM 自决）
-    tool_order_lines = [
-        f"{i}. {tc['tool']}"
-        for i, tc in enumerate(tool_calls_in_sample, 1)
-    ]
-    tool_order_text = "\n".join(tool_order_lines)
+    tool_order_text = "\n".join(f"- {tc['tool']}" for tc in tool_calls_in_sample)
+    order_instruction = (
+        f"参考工具链（不是硬编码答案，必要时可调整）：\n{tool_order_text}"
+        if tool_order_text else "请根据任务自主选择并组合工具。"
+    )
 
     system_prompt = f"""你是专业的地理空间 AI 助手，擅长灾害遥感分析。
-根据用户的任务，严格按照指定顺序依次调用工具完成分析。
+根据用户的遥感任务，自主选择并组合工具完成分析。
 
-==== 工具调用顺序（必须严格按此顺序，不可跳过或改变）====
-{tool_order_text}
+==== 工具规划提示 ====
+{order_instruction}
 
 ==== 可用工具详细说明（* 表示必填参数）====
 {tool_text}
 
 ==== 文件路径规则 ====
-- 用户消息中 [影像文件] 块提供了实际可用的影像路径，工具参数中的图像路径必须使用这些真实路径
+- 用户消息中 [上传文件] 块提供了实际可用的路径；图片、GeoTIFF、GeoJSON、GPKG 等都可作为工具输入
 - 中间输出文件（如索引图、掩膜等）请写入 /tmp/ 目录，例如 /tmp/ndwi.tif、/tmp/mask.tif
 - 不要使用任何中文字符或占位符作为文件路径
 
@@ -389,19 +394,27 @@ def _llm_driven_mode(
 
 每次工具调用结果会以 [TOOL_RESULT] ... [/TOOL_RESULT] 形式返回给你，请据此继续分析。"""
 
-    client = OpenAI(
-        base_url=f"http://127.0.0.1:{llm_port}/v1",
-        api_key="token-abc",
-        http_client=_make_http_client(),
-    )
-    model_name = get_llm_model_name(llm_port)
+    if provider in {"deepseek", "longcat"}:
+        from terrabox.agent.llm_provider import resolve_provider
+        spec = resolve_provider(provider)
+        client = OpenAI(base_url=spec.base_url, api_key=spec.api_key, http_client=_make_http_client())
+        model_name = spec.model
+    else:
+        if llm_port is None:
+            yield {"type": "error", "message": "local provider requires a running LLM port"}
+            return
+        client = OpenAI(base_url=f"http://127.0.0.1:{llm_port}/v1", api_key="token-abc", http_client=_make_http_client())
+        model_name = get_llm_model_name(llm_port)
 
     # 将实际影像路径注入 prompt
-    sample_id = sample.get("id", "")
-    image_ctx = _get_image_context(sample_id)
-    user_content = sample["prompt"]
-    if image_ctx:
-        user_content = user_content + "\n\n" + image_ctx
+    user_content = sample.get("prompt", "")
+    file_paths = sample.get("files") or sample.get("images") or []
+    if file_paths:
+        user_content += "\n\n[上传文件]\n" + "\n".join(str(path) for path in file_paths)
+    if language in {"en", "english"}:
+        user_content += "\n\n[Response language: English.]"
+    else:
+        user_content += "\n\n[回答语言：中文。]"
 
     messages = [
         {"role": "system", "content": system_prompt},
